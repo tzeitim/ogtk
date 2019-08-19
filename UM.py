@@ -223,3 +223,9 @@ def merge_all(seqs, jobs = 100):
     it = itertools.zip_longest(seqs, [seqs], fillvalue=seqs)
     return(pool.map(merge_umi_to_pool, it))
 
+def plot_hdist():
+    a = umis.umi_counts()
+    #b = b[-10:]
+    b = pd.DataFrame({"c":a, "umi":a.index})
+    b = b.sort_values(by=['c', 'umi'], ascending=False)
+    bi = [i for i in b.index]
