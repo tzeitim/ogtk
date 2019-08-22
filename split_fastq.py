@@ -12,7 +12,6 @@ def split_from_yaml(conf_fn = sys.argv[1]):
     conf = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
     errors = conf['errors']
 
-
     out_prefix = conf['sample_dir']+"/"+"by_sample/"
     xp_name = conf['xp_name']
 
@@ -21,7 +20,7 @@ def split_from_yaml(conf_fn = sys.argv[1]):
         f1_fn = conf['sample_dir'] + "/" + conf['samples'][sample]['f1_fn']
         f2_fn = conf['sample_dir'] + "/" + conf['samples'][sample]['f2_fn']
         vsamples = conf['samples'][sample]['vsamples']
-        UM.split_fastq(sample, out_prefix, f1_fn, f2_fn, vsamples, anchor)
+        UM.split_fastq(sample_name = sample, out_prefix = out_prefix, f1_fn = f1_fn, f2_fn = f2_fn, vsamples = vsamples, anchor = anchor)
     
 if __name__=="__main__":
-    split_from_yaml()
+    split_from_yaml(conf_fn = sys.argv[1])

@@ -374,8 +374,8 @@ def split_fastq(sample_name, out_prefix, f1_fn, f2_fn, vsamples, anchor, nreads 
                 dic_files2[sample_id].write("\n".join([id[1]+ " sample_id:%s"%(sample_id), seq[1], plus[1], qual[1]]) +'\n')
                 filter_good+=1
             else:
-                inv1.write("".join([id[0]+ " sample_id:%s"%(sample_id), seq[0], plus[0], qual[0]]) +'\n')
-                inv2.write("".join([id[1]+ " sample_id:%s"%(sample_id), seq[1], plus[1], qual[1]]) +'\n')
+                inv1.write("\n".join([id[0]+ " sample_id:%s"%(sample_id), seq[0], plus[0], qual[0]]) +'\n')
+                inv2.write("\n".join([id[1]+ " sample_id:%s"%(sample_id), seq[1], plus[1], qual[1]]) +'\n')
                 filter_bad+=1
             id =[]
             seq = []
