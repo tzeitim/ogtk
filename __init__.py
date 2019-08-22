@@ -1,1 +1,1 @@
-import UM
+from . import UM as UM
