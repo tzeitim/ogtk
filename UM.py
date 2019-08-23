@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+from .aln_to_mat import Alg as Alg
 
 
 class Read_Set:
@@ -28,17 +29,19 @@ class Read_Set:
 
         self.consensus = None
         self.conf = None
+        self.prefix = ''
 
     def set_header(self, header):
         self.original_header = header
         self.header = header.as_dict()
 
-
     def write_fasta(self, outfn  = None):
-        prefix = self.conf['dataset']['workdir']+ "/" 
-        if outfn == None:
-            outfn = prefix+ '.cons.fa'
+        outfn = self.prefix+ '.cons.fa'
         consensuses_fa = open(outfn, 'w')
+        # balance the alignment using the full reference 100x times
+        fa_ref = Fasta(self.conf['ref_fa'])
+        for i in range(50):
+            consensuses_fa.write(">%s\n%s\n"%(fa_ref[0].name+"_balancer_"+str(i),fa_ref[0][:]))
         for entry in self.consensus.keys():
             if len(self.consensus[entry]) >0:
                 consensuses_fa.write(">%s\n%s\n"%(entry, self.consensus[entry].replace('\n', '')))
@@ -90,9 +93,10 @@ class Read_Set:
         if corrected_count>0:
             self.correct_umis(errors = errors, mode = mode)
 
-    def do_msa(self):
+    def do_msa(self, plot = False):
+       
         assert self.consensus, "consensus has not been generated: run .do_pileup to generate it"
-        prefix = self.conf['dataset']['workdir']+ "/"  
+        prefix = self.prefix
         conf_clustalo = self.conf['clustalo']
         clust = {'ifn': prefix+".cons.fa",
                  'ofn': prefix+".msa.fa",
@@ -106,10 +110,11 @@ class Read_Set:
         print(cmd_clustalo)
         subprocess.run(cmd_clustalo.split())
         clean_fasta(clust['ofn'], prefix)
-
-
         
- 
+        ## post processing
+        alignment = Alg(fastafn = clust['ofn'], freqfn = prefix + ".msa.freqs", colorfn = prefix + ".msa.colors")
+        return(alignment)
+
 class UM:
     def __init__(self, sample, umi):
         self.sample = sample
@@ -135,6 +140,8 @@ def fastq_collapse_UMI(fastq_ifn, umi_start=0, umi_len=12, end=None):
     '''
     Process a fastq file and collapse reads by UMI making use of their consensus seq
     '''
+    if end != None:
+        end = int(end)
     fq = open(fastq_ifn)
     it = itertools.islice(fq, 1, end, 4)
     readset = Read_Set(name=fastq_ifn)
@@ -215,6 +222,7 @@ def to_sam(readset, ln = 3497, prefix= ''):
    sout = pysam.AlignmentFile(consensus_sam, 'w', header = header)
    sout.close()
    sout = open(consensus_sam, "a")
+
    for i in sam_out:
        sout.write("\t".join(i)+"\n")
    sout.close()
@@ -222,7 +230,8 @@ def to_sam(readset, ln = 3497, prefix= ''):
 
  
  
-def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, region = 'chr_rsa:1898-2036', threads = 50, prefix = ''):
+def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, region = 'chr_rsa:1898-2036', threads = 50):
+    prefix = readset.prefix
     self = readset
     if self.consensus != None:
         return(None)
@@ -486,10 +495,10 @@ def write_to_fasta(fasta_ofn, seqs):
 
 ## STAR 
 
-
-def star_build_ref(conf_fn, force = False):
+def star_build_ref(conf_fn, force = False, prepare_workspace = False):
     conf = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
-    conf_init_workspace(conf)
+    if prepare_workspace:
+        conf_init_workspace(conf)
     genomedir = conf['star']['genomedir'] 
     ref_fa = conf['input_files']['ref_fa']
     if not os.path.exists(genomedir) or force:
@@ -500,24 +509,24 @@ def star_build_ref(conf_fn, force = False):
     else:
         print("Found pre-existing genomedir: %s" % (genomedir))
 
-def star_map(conf_fn, force = False):
+def star_map(conf_fn, fq_reads, prefix = '',  force = False, prepare_workspace = False):
     conf = yaml.load(open(conf_fn), Loader=yaml.FullLoader) 
-    conf_init_workspace(conf)
-    name = conf['dataset']['name']
-    bam_ofn = conf_return_path(conf, 'bam')
+    if prepare_workspace:
+        conf_init_workspace(conf)
     star = conf['star']
     genomedir = star['genomedir'] 
-    prefix = conf['dataset']['workdir']+"/" 
 
     if not os.path.exists(genomedir):
         star_build_ref(conf_fn, force)
 
-    star_args = (genomedir, conf['input_files']['raw_fastq'], star['threads'], prefix, star['options'] )
+    star_args = (genomedir, fq_reads, star['threads'], prefix, star['options'] )
     star_cmd = "STAR --genomeDir %s --readFilesIn %s --runThreadN %s --outFileNamePrefix %s %s" % star_args
     sort_cmd = "samtools sort %s -o %s" % (prefix+'Aligned.out.bam', prefix+"sorted.bam")
     index_cmd = "samtools index %s" % (prefix+"sorted.bam")
-
-    if not os.path.exists(prefix+"Aligned.out.bam") or force:
+    
+    print("searching for %s" %(prefix+"Aligned.out.bam"))
+    print(os.path.exists(prefix+"Aligned.out.bam"))
+    if (not os.path.exists(prefix+"Aligned.out.bam")) or force:
         print(star_cmd)
         subprocess.run(star_cmd.split())
         print(sort_cmd)
@@ -546,5 +555,4 @@ def clean_fasta(fn, prefix):
     tmp_fa.close()
     cmd = "mv %s %s"%(tmp_fa_fn, fn)
     subprocess.run(cmd.split())
-
 
