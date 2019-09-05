@@ -90,8 +90,8 @@ class Read_Set:
         print("Found %s corrections" %(corrected_count))
         
         print("end", len([i for i in self.umis.keys()]))
-        if corrected_count>0:
-            self.correct_umis(errors = errors, mode = mode)
+        #if corrected_count>0:
+        #    self.correct_umis(errors = errors, mode = mode)
 
     def do_msa(self, plot = False):
        
@@ -157,13 +157,15 @@ def bam_collapse_UMI(bam_ifn, umi_start=0, umi_len=12, end=None):
     '''
     Process a fastq file and collapse reads by UMI making use of their consensus seq
     '''
+    print("processing %s" % bam_ifn)
     bamfile = pysam.pysam.AlignmentFile(bam_ifn)  
     readset = Read_Set(name = bam_ifn)
     readset.set_header(bamfile.header.copy())
     if end != None:
         end = int(end)
-    bam_it = itertools.islice(bamfile, 0 ,end)
+    bam_it = itertools.islice(bamfile, 0, end)
     for i,bam in enumerate(bam_it):
+        print("\r%s"%i, end='')
         read = bam.seq
         umi = read[umi_start:umi_len] 
         seq = read[umi_len-1:]
@@ -269,10 +271,10 @@ def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, re
         cigar = fields[2]
         hits = int(fields[0])
         #print(entry)
-        if hits > 1:
+        if hits > 1 or True:
             nts_per_pos = [pos.get_query_sequences(mark_matches=False, mark_ends=False, add_indels=True) for pos in cons_bam.pileup(contig=entry)]
             #print(len(nts_per_pos))
-            cuini = [1 for i in nts_per_pos if regex.search("-|\+", "".join(i)) ]
+            #cuini = [1 for i in nts_per_pos if regex.search("-|\+", "".join(i)) ]
 
             #if sum(cuini) >0:
             #    print(sum(cuini))
@@ -291,8 +293,8 @@ def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, re
                     return(convs.get(pattern, pattern))
                 
             nts_per_pos = [[decide(j, indel_pattern) for j in i] for i in nts_per_pos]
-            if(entry == "AAACGTTCACAC_15S18M4I99M15S_1"):
-                pdb.set_trace()
+            #if(entry == "2_CATAGAACAGTC_12S27M11D97M15S"):
+            #    pdb.set_trace()
             #print(entry)
 
             #pdb.set_trace()
@@ -301,13 +303,13 @@ def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, re
                 nts_per_pos = [pd.value_counts(i) for i in nts_per_pos]
                 #print(nts_per_pos)
                 # danger: we are almost blindly assuming that the most frequent is the right one
-                consensus = "".join([i.index[0] for i in nts_per_pos])
+                consensus = "".join([i.index[0] for i in nts_per_pos if len(i.index) >0])
                 #consensus = "".join([i[0] for i in nts_per_pos])
                 #print(consensus)
                 self.consensus[entry] = consensus[11:] 
-        else:
-            consensus = readset.umis[umi].sams[cigar][0].seq[11:]
-            self.consensus[entry] = consensus 
+        #else:
+        #    consensus = readset.umis[umi].sams[cigar][0].seq[11:]
+        #    self.consensus[entry] = consensus 
 
     self.write_fasta()
     return(None)

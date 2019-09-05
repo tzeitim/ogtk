@@ -3,9 +3,9 @@ import pdb
 import regex
 
 import sys
-sys.path.append('/local/users/polivar/src/projects/ogtk')
-from UM import UM as UM
-import UM
+#sys.path.append('/local/users/polivar/src/projects/ogtk')
+from ogtk import UM as UM
+#import UM
 
 def split_from_yaml(conf_fn = sys.argv[1]):
     conf_fn = sys.argv[1]
