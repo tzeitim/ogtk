@@ -113,6 +113,7 @@ class Read_Set:
         
         ## post processing
         alignment = Alg(fastafn = clust['ofn'], freqfn = prefix + ".msa.freqs", colorfn = prefix + ".msa.colors")
+        self.msa = alignment
         return(alignment)
 
 class UM:
@@ -271,7 +272,7 @@ def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, re
         cigar = fields[2]
         hits = int(fields[0])
         #print(entry)
-        if hits > 1 or True:
+        if hits > 5:
             nts_per_pos = [pos.get_query_sequences(mark_matches=False, mark_ends=False, add_indels=True) for pos in cons_bam.pileup(contig=entry)]
             #print(len(nts_per_pos))
             #cuini = [1 for i in nts_per_pos if regex.search("-|\+", "".join(i)) ]
