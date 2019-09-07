@@ -17,7 +17,11 @@ from .aln_to_mat import Alg as Alg
 
 
 class Read_Set:
+    '''
+    Hosts a list UM instances and provides a number of functions to process them
+    '''
     def __init__(self, name = ''):
+        # gets filled with UM instances
         self.umis = {}
         self.name = name
         self.ori_umis = None
@@ -35,13 +39,14 @@ class Read_Set:
         self.original_header = header
         self.header = header.as_dict()
 
-    def write_fasta(self, outfn  = None):
+    def write_fasta(self, outfn  = None, balance = False):
         outfn = self.prefix+ '.cons.fa'
         consensuses_fa = open(outfn, 'w')
         # balance the alignment using the full reference 100x times
-        fa_ref = Fasta(self.conf['ref_fa'])
-        for i in range(50):
-            consensuses_fa.write(">%s\n%s\n"%(fa_ref[0].name+"_balancer_"+str(i),fa_ref[0][:]))
+        if balance:
+            fa_ref = Fasta(self.conf['ref_fa'])
+            for i in range(50):
+                consensuses_fa.write(">%s\n%s\n"%(fa_ref[0].name+"_balancer_"+str(i),fa_ref[0][:]))
         for entry in self.consensus.keys():
             if len(self.consensus[entry]) >0:
                 consensuses_fa.write(">%s\n%s\n"%(entry, self.consensus[entry].replace('\n', '')))
@@ -233,7 +238,7 @@ def to_sam(readset, ln = 3497, prefix= ''):
 
  
  
-def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, region = 'chr_rsa:1898-2036', threads = 50):
+def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, region = 'chr_rsa:1898-2036', threads = 50, balance = True):
     prefix = readset.prefix
     self = readset
     if self.consensus != None:
@@ -312,7 +317,7 @@ def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, re
         #    consensus = readset.umis[umi].sams[cigar][0].seq[11:]
         #    self.consensus[entry] = consensus 
 
-    self.write_fasta()
+    self.write_fasta( balance = balance)
     return(None)
 
 
