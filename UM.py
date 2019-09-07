@@ -57,7 +57,7 @@ class Read_Set:
         if self.umis.get(umi, 0) == 0:
             self.umis[umi] = UM(self.name, umi)
         self.umis[umi].seqs.append(seq)
-        if alignment != None:
+        if alignment.__class__.__name__ == 'AlignedSegment':
             if self.umis[umi].sams.get(alignment.cigarstring, 0) == 0:
                 self.umis[umi].sams[alignment.cigarstring] = []
             self.umis[umi].sams[alignment.cigarstring].append(alignment)
@@ -99,8 +99,9 @@ class Read_Set:
         #    self.correct_umis(errors = errors, mode = mode)
 
     def do_msa(self, plot = False):
-       
         assert self.consensus, "consensus has not been generated: run .do_pileup to generate it"
+        if len(self.consensus) == 0:
+            return()
         prefix = self.prefix
         conf_clustalo = self.conf['clustalo']
         clust = {'ifn': prefix+".cons.fa",
@@ -120,6 +121,10 @@ class Read_Set:
         alignment = Alg(fastafn = clust['ofn'], freqfn = prefix + ".msa.freqs", colorfn = prefix + ".msa.colors")
         self.msa = alignment
         return(alignment)
+
+    def do_pileup(self, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, region = 'chr_rsa:1898-2036', threads = 50, balance = True, min_cov = 5, prefix = None):
+    
+        do_pileup(self, fa_ref = fa_ref, start= start , end = end, region = region, threads = threads, balance = balance, min_cov = min_cov, prefix = prefix)
 
 class UM:
     def __init__(self, sample, umi):
@@ -238,8 +243,9 @@ def to_sam(readset, ln = 3497, prefix= ''):
 
  
  
-def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, region = 'chr_rsa:1898-2036', threads = 50, balance = True):
-    prefix = readset.prefix
+def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, region = 'chr_rsa:1898-2036', threads = 50, balance = True, min_cov = 5, prefix = None):
+    if prefix == None:
+        prefix = readset.prefix
     self = readset
     if self.consensus != None:
         return(None)
@@ -265,7 +271,7 @@ def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, re
     self.consensus = {}
     
     print("consensusing")
-    print("this new bam file contains these chroms", len([i['SN'] for i in cons_bam.header.as_dict()['SQ']]))
+    print("new ref bam contigs: ", len([i['SN'] for i in cons_bam.header.as_dict()['SQ']]))
 
     sorted_entries = sorted([i['SN'] for i in cons_bam.header.as_dict()['SQ']][1:], key = lambda x: x.split("_")[0])
     
@@ -277,7 +283,7 @@ def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, re
         cigar = fields[2]
         hits = int(fields[0])
         #print(entry)
-        if hits > 5:
+        if hits >= min_cov:
             nts_per_pos = [pos.get_query_sequences(mark_matches=False, mark_ends=False, add_indels=True) for pos in cons_bam.pileup(contig=entry)]
             #print(len(nts_per_pos))
             #cuini = [1 for i in nts_per_pos if regex.search("-|\+", "".join(i)) ]
