@@ -53,6 +53,18 @@ class Read_Set:
         print('save consensuses to %s' % (outfn))
         consensuses_fa.close()
 
+    def write_tabular(self):
+        outfn = self.prefix+ '.cons.txt'
+        consensuses_tab = open(outfn, 'w')
+        for entry in self.consensus.keys():
+            
+            hits, umi, cigar = entry.split("_") 
+            if len(self.consensus[entry]) >0:
+                consensuses_tab.write("%s\t%s\n"%("\t".join(entry.split("_")), self.consensus[entry].replace('\n', '')))
+        print('save consensuses to %s' % (outfn))
+        consensuses_tab.close()
+
+
     def add_umi(self, umi, seq, alignment=None):
         if self.umis.get(umi, 0) == 0:
             self.umis[umi] = UM(self.name, umi)
@@ -123,8 +135,12 @@ class Read_Set:
         return(alignment)
 
     def do_pileup(self, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, region = 'chr_rsa:1898-2036', threads = 50, balance = True, min_cov = 5, prefix = None):
-    
-        do_pileup(self, fa_ref = fa_ref, start= start , end = end, region = region, threads = threads, balance = balance, min_cov = min_cov, prefix = prefix)
+        consensuses = do_pileup(self, fa_ref = fa_ref, start= start , end = end, region = region, threads = threads, balance = balance, min_cov = min_cov, prefix = prefix)
+        return(consensuses)
+
+    def plot_hdist(self, outpng):
+        plot_hdist(self, outpng)
+       
 
 class UM:
     def __init__(self, sample, umi):
@@ -247,8 +263,8 @@ def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, re
     if prefix == None:
         prefix = readset.prefix
     self = readset
-    if self.consensus != None:
-        return(None)
+    #if self.consensus != None:
+    #    return(None)
     # create SAM file that maps to Umi-based contigs
     print("Creating SAM")
     sam_tmp = to_sam(self, prefix = prefix)
@@ -268,63 +284,63 @@ def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, re
    
     print("opening %s" %(bam_tmp)) 
     cons_bam = pysam.AlignmentFile(bam_tmp, 'rb')
-    self.consensus = {}
+    #self.consensus = {}
     
     print("consensusing")
-    print("new ref bam contigs: ", len([i['SN'] for i in cons_bam.header.as_dict()['SQ']]))
 
-    sorted_entries = sorted([i['SN'] for i in cons_bam.header.as_dict()['SQ']][1:], key = lambda x: x.split("_")[0])
+    sorted_entries = sorted([i['SN'] for i in cons_bam.header.as_dict()['SQ']][1:], key = lambda x: int(x.split("_")[0]))
+    print("new ref bam contigs: ", len(sorted_entries)) #[i['SN'] for i in cons_bam.header.as_dict()['SQ']]))
     
-    for i,entry in enumerate(sorted_entries):
-        if i%100 ==0:
-            print('\r', i, end ='')
-        fields = entry.split("_")
-        umi = fields[1]
-        cigar = fields[2]
-        hits = int(fields[0])
-        #print(entry)
-        if hits >= min_cov:
-            nts_per_pos = [pos.get_query_sequences(mark_matches=False, mark_ends=False, add_indels=True) for pos in cons_bam.pileup(contig=entry)]
-            #print(len(nts_per_pos))
-            #cuini = [1 for i in nts_per_pos if regex.search("-|\+", "".join(i)) ]
+   
+    consensuses = {}
+    cc = [] 
+    pool = multiprocessing.Pool(100)
+    #entry, cons_bam, min_cov = params
+    it = iter([[i, bam_tmp, min_cov] for i in sorted_entries])
+    cc = pool.map(return_cons, it)
 
-            #if sum(cuini) >0:
-            #    print(sum(cuini))
-            #    pdb.set_trace()
-            convs = {'*':'-', '>':'-', '<':'-'}
-            indel_pattern = regex.compile("([-\+])[0-9]+([ACGTNacgtn]+)")
+    for k,v in cc:
+        if k != None:
+            consensuses[k] = v
+    #for i,entry in enumerate(sorted_entries):
+    #    map(return_cons, [])
+    #    if i%100 ==0:
+    #       print('\rmolecules piled up %s (%.2f)'%(i, i/len(sorted_entries)), end ='')
+    #    fields = entry.split("_")
+    #    umi = fields[1]
+    #    cigar = fields[2]
+    #    hits = int(fields[0])
+    #    #print(entry)
+    #    if hits >= min_cov:
+    #        nts_per_pos = [pos.get_query_sequences(mark_matches=False, mark_ends=False, add_indels=True) for pos in cons_bam.pileup(contig=entry)]
+    #        convs = {'*':'-', '>':'-', '<':'-'}
+    #        indel_pattern = regex.compile("([-\+])[0-9]+([ACGTNacgtn]+)")
 
-            def decide(pattern, ins_pattern):
-                match = ins_pattern.search(pattern)
-                if match:
-                    if match.groups()[0] == "-":
-                        return('')
-                    else:
-                        return(match.groups()[1])
-                else:
-                    return(convs.get(pattern, pattern))
-                
-            nts_per_pos = [[decide(j, indel_pattern) for j in i] for i in nts_per_pos]
-            #if(entry == "2_CATAGAACAGTC_12S27M11D97M15S"):
-            #    pdb.set_trace()
-            #print(entry)
+    #        def decide(pattern, ins_pattern):
+    #            match = ins_pattern.search(pattern)
+    #            if match:
+    #                if match.groups()[0] == "-":
+    #                    return('')
+    #                else:
+    #                    return(match.groups()[1])
+    #            else:
+    #                return(convs.get(pattern, pattern))
+    #            
+    #        nts_per_pos = [[decide(j, indel_pattern) for j in i] for i in nts_per_pos]
+    #        if len(nts_per_pos) >0:
+    #            nts_per_pos = [pd.value_counts(i) for i in nts_per_pos]
+    #            # danger: we are almost blindly assuming that the most frequent is the right one
+    #            # here is where the consensus sequence is determined
+    #            consensus = "".join([i.index[0] for i in nts_per_pos if len(i.index) >0])
+    #            # trimming allows a more robust alignment
+    #            #print(consensus)
+    #            #self.consensus[entry] = consensus[11:100] 
+    #            consensuses[entry] = consensus 
 
-            #pdb.set_trace()
-            #print(len(nts_per_pos))
-            if len(nts_per_pos) >0:
-                nts_per_pos = [pd.value_counts(i) for i in nts_per_pos]
-                #print(nts_per_pos)
-                # danger: we are almost blindly assuming that the most frequent is the right one
-                consensus = "".join([i.index[0] for i in nts_per_pos if len(i.index) >0])
-                #consensus = "".join([i[0] for i in nts_per_pos])
-                #print(consensus)
-                self.consensus[entry] = consensus[11:] 
-        #else:
-        #    consensus = readset.umis[umi].sams[cigar][0].seq[11:]
-        #    self.consensus[entry] = consensus 
-
-    self.write_fasta( balance = balance)
-    return(None)
+    #self.write_fasta( balance = balance)
+    #self.write_tabular()
+    print("kept %s hits" % len(consensuses))
+    return(consensuses)
 
 
 
@@ -480,15 +496,16 @@ def hdist_all(seqs, jobs = 100):
     dists = pool.map(compare_umi_to_pool, it)
     return(dists)
 
-def plot_hdist(readset):
-    seqs = readset.umi_list()
-    dists = hdist_all(seqs)
-    chunks_iterator = itertools.zip_longest(*[iter(dists)]*len(seqs), fillvalue=None)
-    hdist_mat = np.array([i for i in chunks_iterator])
+def plot_hdist(readset, outpng):
+    plt.ioff()
     matplotlib.rcParams['figure.figsize'] = [10,10]
+    hdist_mat = np.array([i for i in chunks_iterator])
+
     #TODO understand why is hdist_mat has an additional layer
     plt.imshow(hdist_mat[0],cmap="plasma" )
     plt.colorbar()
+    plt.savefig(outpng)
+    plt.clf()
 
 def chain_keys(k, umis_dict):
     if k != umis_dict[k]:
@@ -570,3 +587,92 @@ def clean_fasta(fn, prefix):
     cmd = "mv %s %s"%(tmp_fa_fn, fn)
     subprocess.run(cmd.split())
 
+
+
+def fa_to_tabular(ifn, oufn, start, end):
+    fa = Fasta(ifn)
+    fout = open(oufn, 'w')
+    fout.write("\t".join(["mm","hash","umi", "counts","seq"]) + '\n')
+    for i in fa:
+        name = i.name.split("_")
+        mm = name[0]
+        hash_key = name[1]
+        umi = name[2]
+        counts = name [3]
+        seq = i[:].seq[start:end]
+        fout.write("\t".join([mm, hash_key, umi, counts, seq])+'\n')
+    fout.close()
+    fa.close()
+
+
+
+def fa_to_tabular(ifn, oufn, start, end):
+    fa = Fasta(ifn)
+    fout = open(oufn, 'w')
+    fout.write("\t".join(["mm","hash","umi", "counts","seq"]) + '\n')
+    for i in fa:
+        name = i.name.split("_")
+        mm = name[0]
+        hash_key = name[1]
+        umi = name[2]
+        counts = name [3]
+        seq = i[:].seq[start:end]
+        fout.write("\t".join([mm, hash_key, umi, counts, seq])+'\n')
+    fout.close()
+    fa.close()
+
+
+    
+def filter_qual(query, tolerance = 0, min_qual = "@"):
+    bad_nts = sum([i for i in map(lambda x: x.encode("ascii") <= min_qual.encode("ascii"), query.strip())])
+    return(bad_nts < tolerance)
+
+
+def trim_by_regex(dic, pattern, end=None):
+    import regex
+    edge_cases = []
+    for i in dic.keys():
+        match = regex.search(pattern, dic[i])
+        if match:
+            sp = match.span()
+            dic[i] = dic[i][sp[0]:end]
+        else:
+            edge_cases.append(i)
+    
+def return_cons(params):
+    entry, bam_tmp, min_cov = params
+    fields = entry.split("_")
+    umi = fields[1]
+    cigar = fields[2]
+    hits = int(fields[0])
+    import pysam
+    cons_bam = pysam.AlignmentFile(bam_tmp, 'rb')
+    if hits >= min_cov:
+        nts_per_pos = [pos.get_query_sequences(mark_matches=False, mark_ends=False, add_indels=True) for pos in cons_bam.pileup(contig=entry)]
+        indel_pattern = regex.compile("([-\+])[0-9]+([ACGTNacgtn]+)")
+
+            
+        nts_per_pos = [[decide(j, indel_pattern) for j in i] for i in nts_per_pos]
+        if len(nts_per_pos) >0:
+            nts_per_pos = [pd.value_counts(i) for i in nts_per_pos]
+            # danger: we are almost blindly assuming that the most frequent is the right one
+            # here is where the consensus sequence is determined
+            consensus = "".join([i.index[0] for i in nts_per_pos if len(i.index) >0])
+            return([entry, consensus])
+        else:
+            return([None, None])
+ 
+    else:
+        return([None, None])
+
+
+def decide(pattern, ins_pattern):
+    match = ins_pattern.search(pattern)
+    convs = {'*':'-', '>':'-', '<':'-'}
+    if match:
+        if match.groups()[0] == "-":
+            return('')
+        else:
+            return(match.groups()[1])
+    else:
+        return(convs.get(pattern, pattern))
