@@ -140,6 +140,10 @@ class Read_Set:
 
     def plot_hdist(self, outpng):
         plot_hdist(self, outpng)
+    def get_hdists(self):
+        seqs = self.umi_list()
+        dists = hdist_all(seqs)
+        return(dists)
        
 
 class UM:
@@ -497,14 +501,17 @@ def hdist_all(seqs, jobs = 100):
     return(dists)
 
 def plot_hdist(readset, outpng):
+    seqs = readset.umi_list()
+    dists = hdist_all(seqs)
+    chunks_iterator = itertools.zip_longest(*[iter(dists)]*len(seqs), fillvalue=None)
     plt.ioff()
-    matplotlib.rcParams['figure.figsize'] = [10,10]
+    matplotlib.rcParams['figure.figsize'] = [20,20]
     hdist_mat = np.array([i for i in chunks_iterator])
 
     #TODO understand why is hdist_mat has an additional layer
     plt.imshow(hdist_mat[0],cmap="plasma" )
     plt.colorbar()
-    plt.savefig(outpng)
+    plt.savefig(outpng, dpi=300)
     plt.clf()
 
 def chain_keys(k, umis_dict):
