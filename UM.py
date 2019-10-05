@@ -500,8 +500,9 @@ def hdist_all(seqs, jobs = 100):
     dists = pool.map(compare_umi_to_pool, it)
     return(dists)
 
-def plot_hdist(readset, outpng):
-    seqs = readset.umi_list()
+def plot_hdist(readset, outpng, seqs = None):
+    if seqs == None:
+        seqs = readset.umi_list()
     dists = hdist_all(seqs)
     chunks_iterator = itertools.zip_longest(*[iter(dists)]*len(seqs), fillvalue=None)
     plt.ioff()
