@@ -489,12 +489,12 @@ def compare_umi_to_pool(args):
         dists.append(string_hamming_distance((seq, best)))
     return(dists)
 
-def merge_all(seqs, jobs = 100, errors = 1, mode = "regex"):
+def merge_all(seqs, jobs = 10, errors = 1, mode = "regex"):
     pool = multiprocessing.Pool(jobs)
     it = itertools.zip_longest(seqs, [[i, seqs, errors, mode] for i,v in enumerate(seqs)], fillvalue=seqs)
     return(pool.map(merge_umi_to_pool, it))
 
-def hdist_all(seqs, jobs = 100):
+def hdist_all(seqs, jobs = 10):
     pool = multiprocessing.Pool(jobs)
     it = itertools.zip_longest(seqs, [[i, seqs] for i,v in enumerate(seqs)], fillvalue=seqs)
     dists = pool.map(compare_umi_to_pool, it)
