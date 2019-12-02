@@ -88,15 +88,16 @@ class Read_Set:
         
         return(by_counts)
 
-    def correct_umis(self, errors = 1, mode = "dist"):
+    def correct_umis(self, errors = 1, mode = "dist", jobs =10, silent = True):
         if self.ori_umis == None:
             self.ori_umis = [i for i in self.umis.keys()]
         self.corr_stages.append(self.umi_counts())
         seqs = [len(self.umis[i].seqs) for i in self.umis.keys()]
         by_counts = pd.Series(seqs, index = [i for i in self.umis.keys()]).sort_values()
-        print("start", len(seqs))
+        if not silent:
+            print("start", len(seqs))
 
-        old_to_new = merge_all(self.umi_list(), errors = errors, mode = mode)
+        old_to_new = merge_all(self.umi_list(), errors = errors, mode = mode, jobs = jobs)
         for oldk,newk in old_to_new[::-1]:
             if oldk != newk:
                 for i in self.umis[oldk].seqs:
@@ -104,9 +105,10 @@ class Read_Set:
                 del self.umis[oldk]
         
         corrected_count = sum([1 for i,v in old_to_new if i !=v])
-        print("Found %s corrections" %(corrected_count))
+        if not silent:
+            print("Found %s corrections" %(corrected_count))
+            print("end", len([i for i in self.umis.keys()]))
         
-        print("end", len([i for i in self.umis.keys()]))
         #if corrected_count>0:
         #    self.correct_umis(errors = errors, mode = mode)
 
