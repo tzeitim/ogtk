@@ -50,16 +50,12 @@ if __name__=="__main__":
 """
     parser=argparse.ArgumentParser(description=use_txt, formatter_class=argparse.RawDescriptionHelpFormatter)
 
-    parser.add_argument('command', type=str, choices=['all', 'map', 'call'], help='defines the main mode of the script')
+    parser.add_argument('conf', type=str, help='path to YAML config file')
+    #parser.add_argument('command', type=str, choices=['all', 'map', 'call'], help='defines the main mode of the script')
     #parser.add_argument('-c', '--conf', type=str, help='[map] path to YAML config file')
     #parser.add_argument('-w', '--wildcard', type=str, help='use this parameter to pass any str; used in development')
     #parser.add_argument('-m', '--mincov', type=int, help='override config file mincov value', default=None)
     #parser.add_argument('-n', '--number', type=int, help='[map] subsample how many reads from original fastq', default=None)
     args=parser.parse_args()
-    conf=yaml.load(open(args.conf))
-    if args.mincov != None:
-        conf['mincov'] = args.mincov
-    wd=conf['workdir']+"/"+conf['name']+"/"
-
  
-    split_from_yaml(conf_fn = sys.argv[1])
+    split_from_yaml(conf_fn = args.conf)
