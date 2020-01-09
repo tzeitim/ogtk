@@ -23,4 +23,43 @@ def split_from_yaml(conf_fn = sys.argv[1]):
         UM.split_fastq(sample_name = sample, out_prefix = out_prefix, f1_fn = f1_fn, f2_fn = f2_fn, vsamples = vsamples, anchor = anchor)
     
 if __name__=="__main__":
+    import sys, argparse
+
+    use_txt = """    This script is able to demultiplex fastq files by using two main
+    elements. 1) an anchor sequence on R1 and 2) a sample id (specified through a
+    yaml conf file).  The anchor supports fuzzy matching (errors) to account for
+    small sequencing errors. Index samples are exact.
+
+    An example of a yaml conf file follows:
+
+            xp_name: nope_nanog
+            sample_dir: /local/users/polivar/tmp/RM_20191128/data
+            errors: 3
+            samples:
+             64-cells_nanog:
+              f1_fn: 64_cell_S5_R1_001.fastq
+              f2_fn: 64_cell_S5_R2_001.fastq
+              anchor: \"AGCAGTCGAGA\"
+              vsamples:
+               - TAGATC
+               - CTCTCT
+               - TATCCT
+               - AGAGTA
+               - GTAAGG
+               - ACTGCA
+"""
+    parser=argparse.ArgumentParser(description=use_txt, formatter_class=argparse.RawDescriptionHelpFormatter)
+
+    parser.add_argument('command', type=str, choices=['all', 'map', 'call'], help='defines the main mode of the script')
+    #parser.add_argument('-c', '--conf', type=str, help='[map] path to YAML config file')
+    #parser.add_argument('-w', '--wildcard', type=str, help='use this parameter to pass any str; used in development')
+    #parser.add_argument('-m', '--mincov', type=int, help='override config file mincov value', default=None)
+    #parser.add_argument('-n', '--number', type=int, help='[map] subsample how many reads from original fastq', default=None)
+    args=parser.parse_args()
+    conf=yaml.load(open(args.conf))
+    if args.mincov != None:
+        conf['mincov'] = args.mincov
+    wd=conf['workdir']+"/"+conf['name']+"/"
+
+ 
     split_from_yaml(conf_fn = sys.argv[1])
