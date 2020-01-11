@@ -360,7 +360,17 @@ def mafft_consensus(args):
 
             # extract the consensus
             read_len = msa_mat.shape[1]
-            umi_consensus = ''.join([msa_mat[i].value_counts().head(1).index.to_list()[0] for i in range(read_len)]).upper()
+            
+            read_counts = [int(i.split("_")[2]) for i in msa_fa.keys()]
+            
+            umi_consensus = ''
+            for i in range(read_len):
+                variants = msa_mat[i]
+                # multiply each nt by the times the read was found, concatenate into string and transform into a vector
+                column_expansion = [i for i in ''.join([var*count for var,count in zip(variants, read_counts)])]
+                column_counts = pd.Series(column_expansion).value_counts()
+                umi_consensus = umi_consensus + column_counts.head(1).index.to_list()[0]
+            #umi_consensus = ''.join([msa_mat[i].value_counts().head(1).index.to_list()[0] for i in range(read_len)]).upper()
 
             consensus = (name, umi_consensus)
     else:
