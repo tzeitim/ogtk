@@ -262,62 +262,13 @@ def to_sam(readset, ln = 3497, prefix= ''):
        sout.write("\t".join(i)+"\n")
    sout.close()
    return(consensus_sam)
-#############################
-#def do_fastq_pileup(readset, min_cov = 2, jobs = 1):
-#    ''' Generate consensus sequences of sets of reads, grouped by UMI '''
-#    # TODO implement a quality check
-#    consensuses = {}
-#    for umi in readset.umis.keys():
-#        if len(readset.umis[umi].seqs) > 1:
-#            # These are UM objects
-#            print("umi {} has {} seqs".format(umi, len(readset.umis[umi].seqs)))
-#            # save to fa
-#            umi_counts = pd.Series(readset.umis[umi].seqs).value_counts()
-#            umi_counts = umi_counts[umi_counts >= min_cov]
-#            if len(umi_counts) > 0:
-#                mafft_in = '/tmp/{}_in-mafft.fa'.format(umi)
-#                mafft_out = '/tmp/{}_out-mafft.fa'.format(umi)
-#                fasta_entry_names = [str(i)+"_"+str(v) for i,v in enumerate(umi_counts.to_list())]
-#                write_to_fasta(mafft_in, zip(fasta_entry_names, umi_counts.index.to_list()))
-#                
-#                # run maff
-#                # add threads TODO
-#                cmd_mafft = "mafft --maxiterate 1000 --genafpair {} > {} ".format(mafft_in, mafft_out)
-#                # TODO change to subprocess - the annoying part is that MAFFT only outpurs to stdoutput
-#                import os
-#                cmd_ret = os.system(cmd_mafft)
-#                
-#                msa = open(mafft_out)
-#                import pyfasta
-#                
-#                msa_fa = pyfasta.Fasta(mafft_out)
-#                # concatenate aligned sequences (all the same size) 
-#                read_stream = ""
-#                for read in msa_fa:
-#                    read_stream = read_stream + msa_fa[read][:]
-#                # we then chop the stream into a matrix and trasfer it to the pandas universe
-#                msa_mat = [i for i in read_stream]
-#                msa_mat = np.array(msa_mat) 
-#                msa_mat = pd.DataFrame(msa_mat.reshape((len(msa_fa),-1)))
-#                # extract the consensus
-#                read_len = msa_mat.shape[1]
-#                umi_consensus = ''.join([msa_mat[i].value_counts().head(1).index.to_list()[0] for i in range(read_len)]).upper()
-#                consensuses[umi] = umi_consensus
-#        else:
-#            consensuses[umi] = readset.umis[umi].seqs[0]
-#                
-#    return(consensuses) 
-#
-#############################
-#############################
-
 
 def mafft_consensus(args):
     # TODO implement a quality check
     ''' Generate consensus sequences of a set of reads. Returns a (key, consensus) tuple'''
     name, seqs, min_cov, jobs  = args
-
-    consensus = ()
+    #TODO trim by regex?
+    #consensus = ()
     if len(seqs) > 1:
         umi_counts = pd.Series(seqs).value_counts()
         # TODO - do we really want to do this? What would happen if we have 5 reads with the real sequence of all seen only once?
@@ -369,12 +320,14 @@ def mafft_consensus(args):
                 # multiply each nt by the times the read was found, concatenate into string and transform into a vector
                 column_expansion = [i for i in ''.join([var*count for var,count in zip(variants, read_counts)])]
                 column_counts = pd.Series(column_expansion).value_counts()
-                umi_consensus = umi_consensus + column_counts.head(1).index.to_list()[0]
+                umi_consensus = umi_consensus + column_counts.head(1).index.to_list()[0].upper()
             #umi_consensus = ''.join([msa_mat[i].value_counts().head(1).index.to_list()[0] for i in range(read_len)]).upper()
 
             consensus = (name, umi_consensus)
+        else:
+            consensus = ("drop-not-cov", name)
     else:
-        consensus = (name, seqs[0])
+        consensus = ("drop-one-seq", name)
              
     return(consensus) 
 
@@ -725,17 +678,32 @@ def filter_qual(query, tolerance = 0, min_qual = "@"):
     bad_nts = sum([i for i in map(lambda x: x.encode("ascii") <= min_qual.encode("ascii"), query.strip())])
     return(bad_nts < tolerance)
 
-
-def trim_by_regex(dic, pattern, end=None):
+def trim_by_regex(dic, pattern, end = None):
     import regex
+    dic = copy.deepcopy(dic)
     edge_cases = []
+    mean_start = []
     for i in dic.keys():
         match = regex.search(pattern, dic[i])
         if match:
             sp = match.span()
-            dic[i] = dic[i][sp[0]:end]
+            if end == None:
+                dic[i] = dic[i][sp[0]:]
+            else:
+                dic[i] = dic[i][sp[0]:sp[0]+end]
+            mean_start.append(sp[0])
         else:
             edge_cases.append(i)
+    if len(mean_start) >0:
+        mean_start = int(np.mean(mean_start)) 
+        print(mean_start)
+        for i in edge_cases:
+            if end == None:
+                dic[i] = dic[i][mean_start:]
+            else:
+                dic[i] = dic[i][mean_start:mean_start+end]
+    return(dic)
+
     
 def return_cons(params):
     import pysam
