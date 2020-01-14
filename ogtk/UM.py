@@ -331,6 +331,32 @@ def mafft_consensus(args):
              
     return(consensus) 
 
+def fix_fasta_needleal():
+## This is a draft of the function ##
+    '''Fix the issue of non-unique Fasta entries for faidx by manually appending the corresponding ref for a pairwise alignment. This requires the order of the entries to include the read before the ref (needleall -asequence reads.fa -bsequence ref.fa)'''
+    #TODO implement a more intelligent script that can deal with both orders
+    #TODO explore the hormozlab approach for using a custom aligner https://gitlab.com/hormozlab/carlin
+"needleall -gapextend 0.5 -gapopen 10 -datafile EDNAFULL -awidth3=5000 -aformat3 fasta  -bsequence ptol2-hspdrv7_scgstl.fa -asequence msa_in.fa -aaccshow3 yes -outfile xx.fasta"
+    FF = iter(open('xx.fasta'))
+    fa_out = open('out.fa', 'w')
+    ref_name = 'hspdrv7_scgstl'
+    first_line = next(FF)
+    if ref_name in first_line:
+        raise ValueError("Fasta file does not start with a read but instead a ref entry. TODO change this behaviour")
+    else:
+        flag = first_line[1:].strip()  # record the UMI for a given UMI-ref pair
+        fa_out.write(first_line)
+    for i in FF:
+        if i[0] == ">":
+            if ref_name in i:
+                fa_out.write("{}_{}\n".format(i.strip(), flag))
+            else:
+                flag = i[1:].strip()
+                fa_out.write(i)
+        else:
+            fa_out.write(i)
+    fa_out.close()
+    FF= pyfaidx.Fasta('out.fa', as_raw=True)
  
 
 def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1):
@@ -678,7 +704,7 @@ def filter_qual(query, tolerance = 0, min_qual = "@"):
     bad_nts = sum([i for i in map(lambda x: x.encode("ascii") <= min_qual.encode("ascii"), query.strip())])
     return(bad_nts < tolerance)
 
-def trim_by_regex(dic, pattern, end = None):
+def trim_by_regex(dic, pattern, end = None, span_index = 0):
     import regex
     dic = copy.deepcopy(dic)
     edge_cases = []
@@ -688,15 +714,14 @@ def trim_by_regex(dic, pattern, end = None):
         if match:
             sp = match.span()
             if end == None:
-                dic[i] = dic[i][sp[0]:]
+                dic[i] = dic[i][sp[span_index]:]
             else:
-                dic[i] = dic[i][sp[0]:sp[0]+end]
-            mean_start.append(sp[0])
+                dic[i] = dic[i][sp[span_index]:sp[span_index]+end]
+            mean_start.append(sp[span_index])
         else:
             edge_cases.append(i)
     if len(mean_start) >0:
         mean_start = int(np.mean(mean_start)) 
-        print(mean_start)
         for i in edge_cases:
             if end == None:
                 dic[i] = dic[i][mean_start:]
@@ -741,3 +766,88 @@ def decide(pattern, ins_pattern):
             return(match.groups()[1])
     else:
         return(convs.get(pattern, pattern))
+
+
+class Bint():
+    def __init__(self, name):
+        self.name = name
+        self.mis = []
+        self.dele = []
+        self.ins = []
+
+    def report(self):
+        print(self.name)
+        print(self.mis)
+        print(self.dele)
+        print(self.ins)
+
+
+def return_bint_index(bint_l, current_position):
+    '''Helper function that returns the key for the bint (barcode interval) that covers a given position on a pairwise alignment'''
+    bint_index = None
+    keys = [i for i in bint_l.keys()]
+    for i in range(len(keys)):
+        key  = keys[i]
+        # Magical number warning = 27bp
+        if i == (len(keys)-1):
+            if current_position >= bint_l[keys[i]][0] and current_position <= bint_l[keys[i]][0] + 27:
+                return(key)
+        else:
+            if current_position >= bint_l[keys[i]][0] and current_position <=bint_l[keys[i+1]][0]:
+                bint_index = key
+                return(bint_index)
+    return(0) # means that it couldn't find an overlapping bint
+
+def get_lineage_vector(args):
+    ref_seq, read_seq = args
+    bint_db = yaml.load(open('/local/users/polivar/src/projects/mltracer/conf/gstlt_barcode_intervs.yaml'), Loader=yaml.FullLoader)
+    ins = 0
+    weird = 0
+    mis = 0
+    de = 0
+    bint_dic = {}
+    bint_keys = [i for i in bint_db['intervs'].keys()]
+    for bint in bint_keys:
+        bint_dic[bint] = Bint(name=bint)
+
+    for i, (ref, read) in enumerate(zip(ref_seq, read_seq)):
+        ref = ref.upper()
+        read = read.upper()
+        cur_bint = return_bint_index(bint_db['intervs'], i)
+        if cur_bint != 0:
+            if ref == "-" and read == "-":
+                weird+=1
+            else:
+                if ref == "-":
+                    ins+=1
+                    # update the bint db by pushing down the coords by 1
+                    #bint_db['intervs'][cur_bint][1] += 1
+                    for j in range(bint_keys.index(cur_bint), len(bint_keys)):
+                        next_bint = bint_keys[j]
+                        bint_db['intervs'][next_bint][0]+= 1
+                    # save integration
+                    bint_dic[cur_bint].ins.append("i"+str(i)+read)
+                if read == "-":
+                    de+=1
+                    bint_dic[cur_bint].dele.append("d"+str(i)+ref)
+                if read != ref and ref != '-' and read != '-':
+                    # we have a mismatch
+                     mis+=1
+                     print(cur_bint)
+                     bint_dic[cur_bint].mis.append(ref+str(i)+read)
+             #print(ref+"="+read, end = ' ')
+     print("ins:",ins, "del:", de, "weird:", weird, "mis:", mis)
+     for i in bint_dic.values():
+         i.report()
+
+
+# for i in range(0, 50*(2), 2):
+#     ref_seq  = FF[i+1][:].upper()
+#     read_seq = FF[i][:].upper()
+#     get_lineage_vector((ref_seq, read_seq))
+#     if i == 26:
+#         print(i,ref_seq)
+#         print(i,read_seq)
+#         pdb.set_trace()
+
+
