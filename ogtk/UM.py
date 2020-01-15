@@ -175,13 +175,15 @@ class UM:
         else:
             seqs = [ [i, ] for i in self.sams.keys()]
 
-def pfastq_collapse_UMI(fastq_ifn, umi_start=0, umi_len=12, end=None):
+def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=12, end=None):
     '''Constructs a paired Readset by transfering the UMI from R1 to R2 via the
     read id. TODO and converts R2 to the same strand''' 
     rset1 = fastq_collapse_UMI(fastq_ifn1, umi_len = umi_len, keep_rid = True)
+    rset2 = fastq_collapse_UMI(fastq_ifn2, umi_len = umi_len, rid_umi = rset1.rid_umi, do_rc = True)
     
+    return([rset1, rset2])
     
-def fastq_collapse_UMI(fastq_ifn, umi_start=0, umi_len=12, end=None, keep_rid=False, rid_umi=None):
+def fastq_collapse_UMI(fastq_ifn, umi_start=0, umi_len=12, end=None, keep_rid=False, rid_umi=None, do_rc = False):
     '''
     Process a fastq file and collapses reads by UMI making use of their consensus seq
     Keeping the read id (rid) helps to match the UMI from read1 to read2
@@ -191,44 +193,45 @@ def fastq_collapse_UMI(fastq_ifn, umi_start=0, umi_len=12, end=None, keep_rid=Fa
         end = int(end)
     readset = Read_Set(name=fastq_ifn)
     
-    fq = open(fastq_ifn)
-    it =   itertools.islice(fq, 1, end, 4)
+    fq = open(fastq_ifn).readlines()
+    reads =   itertools.islice(fq, 1, end, 4)
     rids = itertools.islice(fq, 0, end, 4)
-    for i, (read, rid) in enumerate(zip(it, rids)):
+    for i, (read, rid) in enumerate(zip(reads, rids)):
         read = read.strip()
         if rid_umi == None:
             umi = read[umi_start:umi_len] 
+            seq = read[umi_len:]
         else:
-            umi = rid_umi[rid]
-        seq = read[umi_len:]
+            umi = rid_umi[rid.split(" ")[0]]
+            seq = read.strip()
         if do_rc:
             seq = rev_comp(seq) 
+
         readset.add_umi(umi, seq)
 
         if keep_rid:
-            rid = rid.split(" ")[0] 
-            readset.add_rid(umi, rid)
+            readset.add_rid(umi, rid.split(" ")[0])
 
-
-####
-    if keep_rid: # flag to store read id usign the UMI as a key
-        rids = itertools.islice(fq, 0, end, 4)
-        for i, (read, rid) in enumerate(zip(it, rids)):
-            read = read.strip()
-            rid = rid.split(" ")[0] 
-            umi = read[umi_start:umi_len] 
-            seq = read[umi_len:]
-            readset.add_umi(umi, seq)
-            readset.add_rid(umi, rid)
-    else:
-        for i,read in enumerate(it):
-            read = read.strip()
-            if rid_umi == None:
-                umi = read[umi_start:umi_len] 
-            else:   
-                umi = rid_umi[rid]
-            seq = read[umi_len:]
-            readset.add_umi(umi, seq)
+#
+#####
+#    if keep_rid: # flag to store read id usign the UMI as a key
+#        rids = itertools.islice(fq, 0, end, 4)
+#        for i, (read, rid) in enumerate(zip(it, rids)):
+#            read = read.strip()
+#            rid = rid.split(" ")[0] 
+#            umi = read[umi_start:umi_len] 
+#            seq = read[umi_len:]
+#            readset.add_umi(umi, seq)
+#            readset.add_rid(umi, rid)
+#    else:
+#        for i,read in enumerate(it):
+#            read = read.strip()
+#            if rid_umi == None:
+#                umi = read[umi_start:umi_len] 
+#            else:   
+#                umi = rid_umi[rid]
+#            seq = read[umi_len:]
+#            readset.add_umi(umi, seq)
     print(i, "reads were processed")
     return(readset)
 
@@ -336,6 +339,7 @@ def mafft_consensus(args):
             #pp = subprocess.run(cmd_mafft.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             
             pp = subprocess.run(cmd_mafft.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # TODO maybe process the output here already?
             fout = open(mafft_out, 'wb')
             fout.write(pp.stdout)
             fout.close()
@@ -378,7 +382,7 @@ def mafft_consensus(args):
     return(consensus) 
 
 
-def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1):
+def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_by = None):
     ''' Generate consensus sequences of sets of reads, grouped by UMI '''
     pool = multiprocessing.Pool(threads)
     # define the list of pool arguments
@@ -386,7 +390,8 @@ def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1):
     it = iter([(umi, readset.umis[umi].seqs, min_cov, threads_alg) for umi in readset.umis.keys()])
     cc = pool.map(mafft_consensus, it)
 
-    consensuses = dict(cc) 
+    consensuses = trim_by_regex(dict(cc), trim_by, span_index=1) if trim_by != None else dict(cc) 
+    
     return(consensuses) 
 
  
@@ -807,12 +812,12 @@ def return_bint_index(bint_l, current_position):
     keys = [i for i in bint_l.keys()]
     for i in range(len(keys)):
         key  = keys[i]
-        # Magical number warning = 27bp
+        # Magical number warning = 27bp TODO:think twice
         if i == (len(keys)-1):
             if current_position >= bint_l[keys[i]][0] and current_position <= bint_l[keys[i]][0] + 27:
                 return(key)
         else:
-            if current_position >= bint_l[keys[i]][0] and current_position <=bint_l[keys[i+1]][0]:
+            if current_position >= bint_l[keys[i]][0] and current_position <= bint_l[keys[i+1]][0]:
                 bint_index = key
                 return(bint_index)
     return(0) # means that it couldn't find an overlapping bint
@@ -855,9 +860,9 @@ def get_lineage_vector(args):
                      print(cur_bint)
                      bint_dic[cur_bint].mis.append(ref+str(i)+read)
              #print(ref+"="+read, end = ' ')
-     print("ins:",ins, "del:", de, "weird:", weird, "mis:", mis)
-     for i in bint_dic.values():
-         i.report()
+    print("ins:",ins, "del:", de, "weird:", weird, "mis:", mis)
+    for i in bint_dic.values():
+        i.report()
 
 def rev_comp(seq):
     " rev-comp a dna sequence with UIPAC characters ; courtesy of Max's crispor"
