@@ -27,6 +27,8 @@ class Read_Set:
         self.ori_umis = None
         self.corr_stages = []
 
+        # RID to UMI dic
+        self.rid_umi = {} # holds a k,v for every readid, UMI
         ## mapped attributes
         self.original_header = None
         self.header = None
@@ -74,6 +76,10 @@ class Read_Set:
                 self.umis[umi].sams[alignment.cigarstring] = []
             self.umis[umi].sams[alignment.cigarstring].append(alignment)
             self.umis[umi].is_mapped = True
+
+    def add_rid(self, umi, rid):
+        # TODO add some sanity checks here
+        self.rid_umi[rid] = umi
 
     def umi_list(self):
         return([i for i in self.umi_counts().index])
@@ -169,20 +175,40 @@ class UM:
         else:
             seqs = [ [i, ] for i in self.sams.keys()]
 
-def fastq_collapse_UMI(fastq_ifn, umi_start=0, umi_len=12, end=None):
+def pfastq_collapse_UMI(fastq_ifn, umi_start=0, umi_len=12, end=None):
+    '''Constructs a paired Readset by transfering the UMI from R1 to R2 via the
+    read id. TODO and converts R2 to the same strand''' 
+    rset1 = fastq_collapse_UMI(fastq_ifn1, umi_len = umi_len, keep_rid = True)
+    
+    
+def fastq_collapse_UMI(fastq_ifn, umi_start=0, umi_len=12, end=None, keep_rid=False, rid_umi=None):
     '''
-    Process a fastq file and collapse reads by UMI making use of their consensus seq
+    Process a fastq file and collapses reads by UMI making use of their consensus seq
+    Keeping the read id (rid) helps to match the UMI from read1 to read2
+    If a rid_umi dic is provided, it uses it instead of the sequence information to call a UMI
     '''
     if end != None:
         end = int(end)
+    readset = Read_Set(name=fastq_ifn)
+    
     fq = open(fastq_ifn)
     it = itertools.islice(fq, 1, end, 4)
-    readset = Read_Set(name=fastq_ifn)
-    for i,read in enumerate(it):
-        read = read.strip()
-        umi = read[umi_start:umi_len] 
-        seq = read[umi_len:]
-        readset.add_umi(umi, seq)
+    
+    if keep_rid:
+        rids = itertools.islice(fq, 0, end, 4)
+        for i, (read, rid) in enumerate(zip(it, rids)):
+            read = read.strip()
+            rid = rid.split(" ")[0] 
+            umi = read[umi_start:umi_len] 
+            seq = read[umi_len:]
+            readset.add_umi(umi, seq)
+            readset.add_rid(umi, rid)
+    else:
+        for i,read in enumerate(it):
+            read = read.strip()
+            umi = read[umi_start:umi_len] 
+            seq = read[umi_len:]
+            readset.add_umi(umi, seq)
     print(i, "reads were processed")
     return(readset)
 
@@ -331,33 +357,6 @@ def mafft_consensus(args):
              
     return(consensus) 
 
-def fix_fasta_needleal():
-## This is a draft of the function ##
-    '''Fix the issue of non-unique Fasta entries for faidx by manually appending the corresponding ref for a pairwise alignment. This requires the order of the entries to include the read before the ref (needleall -asequence reads.fa -bsequence ref.fa)'''
-    #TODO implement a more intelligent script that can deal with both orders
-    #TODO explore the hormozlab approach for using a custom aligner https://gitlab.com/hormozlab/carlin
-"needleall -gapextend 0.5 -gapopen 10 -datafile EDNAFULL -awidth3=5000 -aformat3 fasta  -bsequence ptol2-hspdrv7_scgstl.fa -asequence msa_in.fa -aaccshow3 yes -outfile xx.fasta"
-    FF = iter(open('xx.fasta'))
-    fa_out = open('out.fa', 'w')
-    ref_name = 'hspdrv7_scgstl'
-    first_line = next(FF)
-    if ref_name in first_line:
-        raise ValueError("Fasta file does not start with a read but instead a ref entry. TODO change this behaviour")
-    else:
-        flag = first_line[1:].strip()  # record the UMI for a given UMI-ref pair
-        fa_out.write(first_line)
-    for i in FF:
-        if i[0] == ">":
-            if ref_name in i:
-                fa_out.write("{}_{}\n".format(i.strip(), flag))
-            else:
-                flag = i[1:].strip()
-                fa_out.write(i)
-        else:
-            fa_out.write(i)
-    fa_out.close()
-    FF= pyfaidx.Fasta('out.fa', as_raw=True)
- 
 
 def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1):
     ''' Generate consensus sequences of sets of reads, grouped by UMI '''
