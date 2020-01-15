@@ -192,9 +192,26 @@ def fastq_collapse_UMI(fastq_ifn, umi_start=0, umi_len=12, end=None, keep_rid=Fa
     readset = Read_Set(name=fastq_ifn)
     
     fq = open(fastq_ifn)
-    it = itertools.islice(fq, 1, end, 4)
-    
-    if keep_rid:
+    it =   itertools.islice(fq, 1, end, 4)
+    rids = itertools.islice(fq, 0, end, 4)
+    for i, (read, rid) in enumerate(zip(it, rids)):
+        read = read.strip()
+        if rid_umi == None:
+            umi = read[umi_start:umi_len] 
+        else:
+            umi = rid_umi[rid]
+        seq = read[umi_len:]
+        if do_rc:
+            seq = rev_comp(seq) 
+        readset.add_umi(umi, seq)
+
+        if keep_rid:
+            rid = rid.split(" ")[0] 
+            readset.add_rid(umi, rid)
+
+
+####
+    if keep_rid: # flag to store read id usign the UMI as a key
         rids = itertools.islice(fq, 0, end, 4)
         for i, (read, rid) in enumerate(zip(it, rids)):
             read = read.strip()
@@ -206,7 +223,10 @@ def fastq_collapse_UMI(fastq_ifn, umi_start=0, umi_len=12, end=None, keep_rid=Fa
     else:
         for i,read in enumerate(it):
             read = read.strip()
-            umi = read[umi_start:umi_len] 
+            if rid_umi == None:
+                umi = read[umi_start:umi_len] 
+            else:   
+                umi = rid_umi[rid]
             seq = read[umi_len:]
             readset.add_umi(umi, seq)
     print(i, "reads were processed")
@@ -838,6 +858,18 @@ def get_lineage_vector(args):
      print("ins:",ins, "del:", de, "weird:", weird, "mis:", mis)
      for i in bint_dic.values():
          i.report()
+
+def rev_comp(seq):
+    " rev-comp a dna sequence with UIPAC characters ; courtesy of Max's crispor"
+    revTbl = {'A' : 'T', 'C' : 'G', 'G' : 'C', 'T' : 'A', 'N' : 'N' , 'M' : 'K', 'K' : 'M',
+    "R" : "Y" , "Y":"R" , "g":"c", "a":"t", "c":"g","t":"a", "n":"n", "V" : "B", "v":"b", 
+    "B" : "V", "b": "v", "W" : "W", "w" : "w"}
+
+    newSeq = []
+    for c in reversed(seq):
+        newSeq.append(revTbl[c])
+    return "".join(newSeq)
+
 
 
 # for i in range(0, 50*(2), 2):
