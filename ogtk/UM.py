@@ -178,12 +178,12 @@ class UM:
 def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=12, end=None):
     '''Constructs a paired Readset by transfering the UMI from R1 to R2 via the
     read id. TODO and converts R2 to the same strand''' 
-    rset1 = fastq_collapse_UMI(fastq_ifn1, umi_len = umi_len, keep_rid = True)
-    rset2 = fastq_collapse_UMI(fastq_ifn2, umi_len = umi_len, rid_umi = rset1.rid_umi, do_rc = True)
+    rset1 = fastq_collapse_UMI(fastq_ifn1, umi_len = umi_len, keep_rid = True, end = end)
+    rset2 = fastq_collapse_UMI(fastq_ifn2, umi_len = umi_len, rid_umi = rset1.rid_umi, do_rc = False, end = end)
     
     return([rset1, rset2])
     
-def fastq_collapse_UMI(fastq_ifn, umi_start=0, umi_len=12, end=None, keep_rid=False, rid_umi=None, do_rc = False):
+def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None, keep_rid=False, rid_umi=None, do_rc = False):
     '''
     Process a fastq file and collapses reads by UMI making use of their consensus seq
     Keeping the read id (rid) helps to match the UMI from read1 to read2
@@ -191,6 +191,8 @@ def fastq_collapse_UMI(fastq_ifn, umi_start=0, umi_len=12, end=None, keep_rid=Fa
     '''
     if end != None:
         end = int(end)
+    if name == None:
+        name = fastq_ifn
     readset = Read_Set(name=fastq_ifn)
     
     fq = open(fastq_ifn).readlines()
@@ -315,7 +317,8 @@ def to_sam(readset, ln = 3497, prefix= ''):
 def mafft_consensus(args):
     # TODO implement a quality check
     ''' Generate consensus sequences of a set of reads. Returns a (key, consensus) tuple'''
-    name, seqs, min_cov, jobs  = args
+    fname, name, seqs, min_cov, jobs  = args
+        
     #TODO trim by regex?
     #consensus = ()
     if len(seqs) > 1:
@@ -323,9 +326,9 @@ def mafft_consensus(args):
         # TODO - do we really want to do this? What would happen if we have 5 reads with the real sequence of all seen only once?
         umi_counts = umi_counts[umi_counts >= min_cov]
 
-        if len(umi_counts) > 0:
-            mafft_in = '/tmp/{}_in-mafft.fa'.format(name)
-            mafft_out = '/tmp/{}_out-mafft.fa'.format(name)
+        if len(umi_counts) > 1:
+            mafft_in = '{}_{}_mafft_in.fa'.format(fname, name)
+            mafft_out = '{}_{}_mafft_out.fa'.format(fname, name)
 
             fasta_entry_names = ["_".join([name, str(i), str(v)]) for i,v in enumerate(umi_counts.to_list())]
             write_to_fasta(mafft_in, zip(fasta_entry_names, umi_counts.index.to_list()))
@@ -387,10 +390,14 @@ def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_
     pool = multiprocessing.Pool(threads)
     # define the list of pool arguments
     # name, seqs, min_cov, jobs = args
-    it = iter([(umi, readset.umis[umi].seqs, min_cov, threads_alg) for umi in readset.umis.keys()])
-    cc = pool.map(mafft_consensus, it)
-
-    consensuses = trim_by_regex(dict(cc), trim_by, span_index=1) if trim_by != None else dict(cc) 
+    it = iter([(readset.name.replace('.fastq', ''), umi, readset.umis[umi].seqs, min_cov, threads_alg) for umi in readset.umis.keys()])
+    #cc = pool.map(mafft_consensus, it)
+    cc = []
+    for umi in readset.umis.keys():
+        counts = pd.Series(readset.umis[umi].seqs).value_counts()
+        cc.append((umi, counts.head(1).index.to_list()[0]))
+    #cc = [i for i in cc if "drop" not in i[0]]
+    consensuses = trim_by_regex(dict(cc) , trim_by, span_index=1) if trim_by != None else dict(cc) 
     
     return(consensuses) 
 
@@ -452,7 +459,7 @@ def iterator_collapse_UMI(name, field, it, umi_start=0, umi_len=12, end=None):
     print(i, "reads")
     return(umis)    
 
-def split_fastq(sample_name, out_prefix, f1_fn, f2_fn, vsamples, anchor, nreads = None):
+def split_fastq(sample_name, out_prefix, f1_fn, f2_fn, vsamples, anchor, nreads = None, keep_id = False ):
     ''' Splits fastqs given an anchor on R1 and a sample index (usually introduced via REV primer) on R2 '''
     filter_good = 0
     filter_bad = 0
@@ -506,8 +513,12 @@ def split_fastq(sample_name, out_prefix, f1_fn, f2_fn, vsamples, anchor, nreads 
         if qual:
             match = anchor.search(seq[0])
             if sample_id in vsamples and match:
-                dic_files1[sample_id].write("\n".join([id[0]+ " sample_id:%s"%(sample_id), seq[0], plus[0], qual[0]]) +'\n')
-                dic_files2[sample_id].write("\n".join([id[1]+ " sample_id:%s"%(sample_id), seq[1], plus[1], qual[1]]) +'\n')
+                if keep_id:
+                    sid_string = ''
+                else:
+                    sid_string = " sample_id:{}".format(sample_id)
+                dic_files1[sample_id].write("\n".join([id[0]+sid_string, seq[0], plus[0], qual[0]]) +'\n')
+                dic_files2[sample_id].write("\n".join([id[1]+sid_string, seq[1], plus[1], qual[1]]) +'\n')
                 filter_good+=1
             else:
                 inv1.write("\n".join([id[0]+ " sample_id:%s"%(sample_id), seq[0], plus[0], qual[0]]) +'\n')
@@ -868,7 +879,7 @@ def rev_comp(seq):
     " rev-comp a dna sequence with UIPAC characters ; courtesy of Max's crispor"
     revTbl = {'A' : 'T', 'C' : 'G', 'G' : 'C', 'T' : 'A', 'N' : 'N' , 'M' : 'K', 'K' : 'M',
     "R" : "Y" , "Y":"R" , "g":"c", "a":"t", "c":"g","t":"a", "n":"n", "V" : "B", "v":"b", 
-    "B" : "V", "b": "v", "W" : "W", "w" : "w"}
+    "B" : "V", "b": "v", "W" : "W", "w" : "w", "-":"-"}
 
     newSeq = []
     for c in reversed(seq):
