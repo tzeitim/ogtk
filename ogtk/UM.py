@@ -196,8 +196,8 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None
     readset = Read_Set(name=fastq_ifn)
     
     fq = open(fastq_ifn).readlines()
-    reads =   itertools.islice(fq, 1, end, 4)
-    rids = itertools.islice(fq, 0, end, 4)
+    reads =     itertools.islice(fq, 1, end, 4)
+    rids =      itertools.islice(fq, 0, end, 4)
     for i, (read, rid) in enumerate(zip(reads, rids)):
         read = read.strip()
         if rid_umi == None:
