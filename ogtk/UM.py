@@ -391,11 +391,13 @@ def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_
     # define the list of pool arguments
     # name, seqs, min_cov, jobs = args
     it = iter([(readset.name.replace('.fastq', ''), umi, readset.umis[umi].seqs, min_cov, threads_alg) for umi in readset.umis.keys()])
+    # collapsing reads by consensus seems to be incorrect, deprecating the use of such (e.g. mafft alignment) in favor for just getting the most frequent sequence
     #cc = pool.map(mafft_consensus, it)
     cc = []
     for umi in readset.umis.keys():
         counts = pd.Series(readset.umis[umi].seqs).value_counts()
-        cc.append((umi, counts.head(1).index.to_list()[0]))
+        if counts[0] >= min_cov:
+            cc.append((umi, counts.head(1).index.to_list()[0]))
     #cc = [i for i in cc if "drop" not in i[0]]
     consensuses = trim_by_regex(dict(cc) , trim_by, span_index=1) if trim_by != None else dict(cc) 
     
