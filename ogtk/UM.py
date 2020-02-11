@@ -363,18 +363,36 @@ def mafft_consensus(args):
             msa_mat = pd.DataFrame(msa_mat.reshape((len(msa_fa.keys()),-1)))
 
             # extract the consensus
-            read_len = msa_mat.shape[1]
+            # this needs to ve transfered to a higher level ... at the cell one, not the umi/read
+            ## naively
+            naive = True
+            if naive:
+                read_len = msa_mat.shape[1]
+                
+                read_counts = [int(i.split("_")[2]) for i in msa_fa.keys()]
+                
+                umi_consensus = ''
+                for i in range(read_len):
+                    variants = msa_mat[i]
+                    # multiply each nt by the times the read was found, concatenate into string and transform into a vector
+                    column_expansion = [i for i in ''.join([var*count for var,count in zip(variants, read_counts)])]
+                    column_counts = pd.Series(column_expansion).value_counts()
+                    umi_consensus = umi_consensus + column_counts[0].index.to_list()[0].upper()
+                #umi_consensus = ''.join([msa_mat[i].value_counts().head(1).index.to_list()[0] for i in range(read_len)]).upper()
+            #else:
+            #    mafft_in = '{}_{}_mafft_in.fa'.format(fname, name)
+            #    mafft_out = '{}_{}_mafft_out.fa'.format(fname, name)
+
+            #    fasta_entry_names = ["_".join([name, str(i), str(v)]) for i,v in enumerate(umi_counts.to_list())]
+            #    write_to_fasta(mafft_in, zip(fasta_entry_names, umi_counts.index.to_list()))
+            #
+            #    # run cons
+#[-sequence]          seqset     File containing a sequence alignment.
+#  [-outseq]            seqout     [.] Sequence filename and
+#                                  optional format (output USA)
+#            #    cmd_cons = "cons -sequence {} -outset {} -name ".format(mafft_out, cons_out, umi)
             
-            read_counts = [int(i.split("_")[2]) for i in msa_fa.keys()]
-            
-            umi_consensus = ''
-            for i in range(read_len):
-                variants = msa_mat[i]
-                # multiply each nt by the times the read was found, concatenate into string and transform into a vector
-                column_expansion = [i for i in ''.join([var*count for var,count in zip(variants, read_counts)])]
-                column_counts = pd.Series(column_expansion).value_counts()
-                umi_consensus = umi_consensus + column_counts.head(1).index.to_list()[0].upper()
-            #umi_consensus = ''.join([msa_mat[i].value_counts().head(1).index.to_list()[0] for i in range(read_len)]).upper()
+
 
             consensus = (name, umi_consensus)
         else:
@@ -385,22 +403,26 @@ def mafft_consensus(args):
     return(consensus) 
 
 
-def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_by = None):
+def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_by = None, by_alignment = False):
     ''' Generate consensus sequences of sets of reads, grouped by UMI '''
+    # collapsing reads by consensus seems to be incorrect, deprecating the use of such (e.g. mafft alignment) in favor for just getting the most frequent sequence
     pool = multiprocessing.Pool(threads)
     # define the list of pool arguments
     # name, seqs, min_cov, jobs = args
     it = iter([(readset.name.replace('.fastq', ''), umi, readset.umis[umi].seqs, min_cov, threads_alg) for umi in readset.umis.keys()])
-    # collapsing reads by consensus seems to be incorrect, deprecating the use of such (e.g. mafft alignment) in favor for just getting the most frequent sequence
-    #cc = pool.map(mafft_consensus, it)
-    cc = []
-    for umi in readset.umis.keys():
-        counts = pd.Series(readset.umis[umi].seqs).value_counts()
-        if counts[0] >= min_cov:
-            cc.append((umi, counts.head(1).index.to_list()[0]))
-    #cc = [i for i in cc if "drop" not in i[0]]
+    if by_alignment:
+        print("Aligning read with the same UMI")
+        cc = pool.map(mafft_consensus, it)
+        #cc = [i for i in cc if "drop" not in i[0]]
+    else:
+    # this option represents a ranked based approach where the only the most common sequence is used as the representative
+        cc = []
+        for umi in readset.umis.keys():
+            counts = pd.Series(readset.umis[umi].seqs).value_counts()
+            if counts[0] >= min_cov:
+                cc.append((umi + "_" + str(counts[0]), counts.index.to_list()[0]))
+
     consensuses = trim_by_regex(dict(cc) , trim_by, span_index=1) if trim_by != None else dict(cc) 
-    
     return(consensuses) 
 
  
