@@ -317,7 +317,7 @@ def to_sam(readset, ln = 3497, prefix= ''):
 def mafft_consensus(args):
     # TODO implement a quality check
     ''' Generate consensus sequences of a set of reads. Returns a (key, consensus) tuple'''
-    fname, name, seqs, min_cov, jobs  = args
+    fname, name, seqs, min_cov, jobs, naive  = args
         
     #TODO trim by regex?
     #consensus = ()
@@ -325,7 +325,6 @@ def mafft_consensus(args):
         umi_counts = pd.Series(seqs).value_counts()
         # TODO - do we really want to do this? What would happen if we have 5 reads with the real sequence of all seen only once?
         umi_counts = umi_counts[umi_counts >= min_cov]
-
         if len(umi_counts) > 1:
             mafft_in = '{}_{}_mafft_in.fa'.format(fname, name)
             mafft_out = '{}_{}_mafft_out.fa'.format(fname, name)
@@ -352,24 +351,21 @@ def mafft_consensus(args):
             ferr.close()
             
             msa_fa = Fasta(mafft_out)
-            # concatenate aligned sequences (all the same size) 
-            read_stream = ""
-            for read in msa_fa.keys():
-                read_stream = read_stream + str(msa_fa[read][:])
-
-            # chop the stream into a matrix and trasfer it to the pandas universe
-            msa_mat = [i for i in read_stream]
-            msa_mat = np.array(msa_mat) 
-            msa_mat = pd.DataFrame(msa_mat.reshape((len(msa_fa.keys()),-1)))
-
+            read_len = len(msa_fa[0][:])
+            read_counts = [int(i.split("_")[2]) for i in msa_fa.keys()]
             # extract the consensus
-            # this needs to ve transfered to a higher level ... at the cell one, not the umi/read
             ## naively
-            naive = True
-            if naive:
-                read_len = msa_mat.shape[1]
-                
-                read_counts = [int(i.split("_")[2]) for i in msa_fa.keys()]
+            if False:
+                print("returning naive consensus")
+                # concatenate aligned sequences (all the same size) 
+                read_stream = ""
+                for read in msa_fa.keys():
+                    read_stream = read_stream + str(msa_fa[read][:])
+
+                # chop the stream into a matrix and trasfer it to the pandas universe
+                msa_mat = [i for i in read_stream]
+                msa_mat = np.array(msa_mat) 
+                msa_mat = pd.DataFrame(msa_mat.reshape((len(msa_fa.keys()),-1)))
                 
                 umi_consensus = ''
                 for i in range(read_len):
@@ -379,36 +375,52 @@ def mafft_consensus(args):
                     column_counts = pd.Series(column_expansion).value_counts()
                     umi_consensus = umi_consensus + column_counts[0].index.to_list()[0].upper()
                 #umi_consensus = ''.join([msa_mat[i].value_counts().head(1).index.to_list()[0] for i in range(read_len)]).upper()
-            #else:
-            #    mafft_in = '{}_{}_mafft_in.fa'.format(fname, name)
-            #    mafft_out = '{}_{}_mafft_out.fa'.format(fname, name)
+            else:
+                expand_by_counts = True
+                cons_in =  '{}_{}_cons_in.fa'.format(fname, name)
+                cons_out = '{}_{}_cons_out.fa'.format(fname, name)
+                cmd_cons = 'cons -datafile EDNAFULL -sequence {} -outseq {} -name {}'.format(cons_in, cons_out, name)
 
-            #    fasta_entry_names = ["_".join([name, str(i), str(v)]) for i,v in enumerate(umi_counts.to_list())]
-            #    write_to_fasta(mafft_in, zip(fasta_entry_names, umi_counts.index.to_list()))
-            #
-            #    # run cons
-#[-sequence]          seqset     File containing a sequence alignment.
-#  [-outseq]            seqout     [.] Sequence filename and
-#                                  optional format (output USA)
-#            #    cmd_cons = "cons -sequence {} -outset {} -name ".format(mafft_out, cons_out, umi)
+                cons_in_Fa = open(cons_in, 'w')
+                for entry, times in zip(msa_fa.keys(), umi_counts.to_list()):
+                    seq = msa_fa[entry][:]
+                    if not expand_by_counts:
+                        times = 1
+                    for ins in range(times):
+                        cons_in_Fa.write(">{}_{}\n{}\n".format(entry, times, seq)) 
+                cons_in_Fa.close()
+    
+                pp = subprocess.run(cmd_cons.split())
             
-
+                cons_Fa = Fasta(cons_out, as_raw=True)
+                umi_consensus = cons_Fa[0][:]
+                # run cons
+                #[-sequence]          seqset     File containing a sequence alignment.
+                #  [-outseq]            seqout     [.] Sequence filename and
+                #                                  optional format (output USA)
 
             consensus = (name, umi_consensus)
         else:
-            consensus = ("drop-not-cov", name)
+            if umi_counts[0] > min_cov:
+                consensus = (name, seqs[0])
+            else: 
+                #print("got only one allele and doesn't reach the min_cov {} with counts ".format(min_cov, umi_counts[0]))
+                consensus = ('drop-no_cov', name)
     else:
-        consensus = ("drop-one-seq", name)
+        #print("got only one rep")
+        #if int(name.split("_")[1]) > 1:
+        consensus = (name, seqs[0])
+        #else:
+        #    consensus = ("drop-one-seq", name)
              
     return(consensus) 
-
 
 def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_by = None, by_alignment = False):
     ''' Generate consensus sequences of sets of reads, grouped by UMI '''
     # collapsing reads by consensus seems to be incorrect, deprecating the use of such (e.g. mafft alignment) in favor for just getting the most frequent sequence
     pool = multiprocessing.Pool(threads)
     # define the list of pool arguments
-    # name, seqs, min_cov, jobs = args
+    # fname, name, seqs, min_cov, jobs  = args
     it = iter([(readset.name.replace('.fastq', ''), umi, readset.umis[umi].seqs, min_cov, threads_alg) for umi in readset.umis.keys()])
     if by_alignment:
         print("Aligning read with the same UMI")
@@ -626,19 +638,27 @@ def hdist_all(seqs, jobs = 10):
     pool = multiprocessing.Pool(jobs)
     it = itertools.zip_longest(seqs, [[i, seqs] for i,v in enumerate(seqs)], fillvalue=seqs)
     dists = pool.map(compare_umi_to_pool, it)
-    return(dists)
+    chunks_iterator = itertools.zip_longest(*[iter(dists)]*len(seqs), fillvalue=None)
+    hdist_mat = np.array([i for i in chunks_iterator])
+    #TODO understand why is hdist_mat has an additional layer
+    #TODO should a flag for as_matrix be added?
+    print(hdist_mat.shape)
+    return(hdist_mat[0])
 
-def plot_hdist(readset, outpng, seqs = None):
+def plot_hdist(readset = None, outpng = None, seqs = None):
+    if outpng == None:
+        raise ValueError('an outpng must be provided')
+    if seqs == None and readset == None:
+        raise ValueError('a list of sequences or a readset must be provided')
     if seqs == None:
         seqs = readset.umi_list()
-    dists = hdist_all(seqs)
-    chunks_iterator = itertools.zip_longest(*[iter(dists)]*len(seqs), fillvalue=None)
+    hdist_mat = hdist_all(seqs)
     plt.ioff()
     matplotlib.rcParams['figure.figsize'] = [20,20]
-    hdist_mat = np.array([i for i in chunks_iterator])
 
-    #TODO understand why is hdist_mat has an additional layer
-    plt.imshow(hdist_mat[0],cmap="plasma" )
+    #plt.imshow(hdist_mat[0],cmap="plasma" )
+    plt.imshow(hdist_mat,cmap="plasma" )
+
     plt.colorbar()
     plt.savefig(outpng, dpi=300)
     plt.clf()
