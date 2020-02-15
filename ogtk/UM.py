@@ -356,7 +356,6 @@ def mafft_consensus(args):
             # extract the consensus
             ## naively
             if False:
-                print("returning naive consensus")
                 # concatenate aligned sequences (all the same size) 
                 read_stream = ""
                 for read in msa_fa.keys():
@@ -389,15 +388,11 @@ def mafft_consensus(args):
                     for ins in range(times):
                         cons_in_Fa.write(">{}_{}\n{}\n".format(entry, times, seq)) 
                 cons_in_Fa.close()
-    
-                pp = subprocess.run(cmd_cons.split())
+                # invoque emboss cons 
+                pp = subprocess.run(cmd_cons.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             
                 cons_Fa = Fasta(cons_out, as_raw=True)
                 umi_consensus = cons_Fa[0][:]
-                # run cons
-                #[-sequence]          seqset     File containing a sequence alignment.
-                #  [-outseq]            seqout     [.] Sequence filename and
-                #                                  optional format (output USA)
 
             consensus = (name, umi_consensus)
         else:
