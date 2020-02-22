@@ -393,6 +393,8 @@ def mafft_consensus(args):
             
                 cons_Fa = Fasta(cons_out, as_raw=True)
                 umi_consensus = cons_Fa[0][:]
+                umi_consensus = umi_consensus.replace('N', '')
+                umi_consensus = umi_consensus.replace('n', '')
 
             consensus = (name, umi_consensus)
         else:
