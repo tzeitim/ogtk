@@ -239,7 +239,7 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None
 
 def bam_collapse_UMI(bam_ifn, umi_start=0, umi_len=12, end=None):
     '''
-    Process a fastq file and collapse reads by UMI making use of their consensus seq
+    Process a BAM file and collapse reads by UMI making use of their consensus seq
     '''
     print("processing %s" % bam_ifn)
     bamfile = pysam.pysam.AlignmentFile(bam_ifn)  
