@@ -414,7 +414,8 @@ def mafft_consensus(args):
 
 def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_by = None, by_alignment = False):
     ''' Generate consensus sequences of sets of reads, grouped by UMI '''
-    # collapsing reads by consensus seems to be incorrect, deprecating the use of such (e.g. mafft alignment) in favor for just getting the most frequent sequence
+    # collapsing reads by consensus seems to be incorrect, deprecating the use of such (e.g. mafft alignment) 
+    # in favor for just getting the most frequent sequence
     pool = multiprocessing.Pool(threads)
     # define the list of pool arguments
     # fname, name, seqs, min_cov, jobs  = args
@@ -632,6 +633,9 @@ def merge_all(seqs, jobs = 10, errors = 1, mode = "regex"):
     return(pool.map(merge_umi_to_pool, it))
 
 def hdist_all(seqs, jobs = 10):
+    '''
+    Pair-wise comparison of set of sequences
+    '''
     pool = multiprocessing.Pool(jobs)
     it = itertools.zip_longest(seqs, [[i, seqs] for i,v in enumerate(seqs)], fillvalue=seqs)
     dists = pool.map(compare_umi_to_pool, it)
