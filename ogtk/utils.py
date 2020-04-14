@@ -30,7 +30,7 @@ def bulk_merge_dir(raw_path, out_path, do_merge, clean = True, force = False, er
         unmerged_samples = []
         
         if not os.path.exists(out_merged) or force:
-            ret = genotype_merge_fastqs(f1 = f1, f2 = f2, out = out_merged, outu = out_unmerged1 , outu2 = out_unmerged2)
+            ret = bbmerge_fastqs(f1 = f1, f2 = f2, out = out_merged, outu = out_unmerged1 , outu2 = out_unmerged2)
         if ret:
             unmerged_samples.append(basename)
 
