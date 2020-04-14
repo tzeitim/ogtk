@@ -3,7 +3,7 @@ import os
 import subprocess
 import glob
 
-def bulk_merge_dir(raw_path, out_path, do_merge, clean = True, force = False, errors =0):
+def bulk_merge_dir(raw_path, out_path, clean = True, force = False, errors =0):
     ''' This wrapper makes use of bbmerge to merge fastqs locate in a given directory '''
 
     if clean and os.path.exists(out_path):
