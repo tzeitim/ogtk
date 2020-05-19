@@ -29,6 +29,31 @@ def bwa_build_ref(conf_fn, force = False, prepare_workspace = False):
     else:
         print("Found pre-existing index: %s" % (flag_file))
 
+def bwa_map(conf_fn, fq_reads, prefix,  force = False, prepare_workspace = False):
+    conf = yaml.load(open(conf_fn), Loader=yaml.FullLoader) 
+    if prepare_workspace:
+        conf_init_workspace(conf)
+    bwa = conf['bwa']
+    bwa_args = bwa.get('args', '')
+    ref_fa = conf['input_files']['ref_fa']
+    outbam = prefix + '.bam'
+
+    bwa_build_ref(conf_fn, force)
+
+    bwa_cmd = 'bwa bwasw -t %s %s %s %s' % (bwa['threads'], bwa_args, ref_fa, fq_reads)
+    tobam_cmd = 'samtools view -b'
+    index_cmd = 'samtools index %s' % (prefix + 'sorted.bam')
+
+    if (not os.path.exists(outbam)) or force:
+        print(bwa_cmd, "|", tobam_cmd , ">" , outbam)
+        c1 = subprocess.Popen(bwa_cmd.split(), stdout=subprocess.PIPE)
+        c2 = subprocess.Popen(tobam_cmd.split(), stdin=c1.stdout, stdout=open(outbam, "w"))
+        c1.stdout.close()
+        c2.communicate()
+
+    else:
+        print("Found pre-existing aligment: %s" %outbam)
+ 
 
 ## STAR 
 
