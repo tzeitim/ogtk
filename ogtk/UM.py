@@ -681,50 +681,7 @@ def write_to_fasta(fasta_ofn, seqs):
             fa.write(seq_to_fasta(seq, name)) 
 
 
-## STAR 
 
-def star_build_ref(conf_fn, force = False, prepare_workspace = False):
-    conf = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
-    if prepare_workspace:
-        conf_init_workspace(conf)
-    genomedir = conf['star']['genomedir'] 
-    ref_fa = conf['input_files']['ref_fa']
-    if not os.path.exists(genomedir) or force:
-        os.makedirs(genomedir)
-        ref_cmd = "STAR --runMode genomeGenerate --genomeDir %s --genomeFastaFiles %s --runThreadN 100 --genomeSAindexNbases 2" %(genomedir, ref_fa)
-        print(ref_cmd)
-        subprocess.run(ref_cmd.split())
-    else:
-        print("Found pre-existing genomedir: %s" % (genomedir))
-
-def star_map(conf_fn, fq_reads, prefix = '',  force = False, prepare_workspace = False):
-    conf = yaml.load(open(conf_fn), Loader=yaml.FullLoader) 
-    if prepare_workspace:
-        conf_init_workspace(conf)
-    star = conf['star']
-    genomedir = star['genomedir'] 
-
-    if not os.path.exists(genomedir):
-        star_build_ref(conf_fn, force)
-
-    star_args = (genomedir, fq_reads, star['threads'], prefix, star['options'] )
-    star_cmd = "STAR --genomeDir %s --readFilesIn %s --runThreadN %s --outFileNamePrefix %s %s" % star_args
-    sort_cmd = "samtools sort %s -o %s" % (prefix+'Aligned.out.bam', prefix+"sorted.bam")
-    index_cmd = "samtools index %s" % (prefix+"sorted.bam")
-    
-    print("searching for %s" %(prefix+"Aligned.out.bam"))
-    print(os.path.exists(prefix+"Aligned.out.bam"))
-    if (not os.path.exists(prefix+"Aligned.out.bam")) or force:
-        print(star_cmd)
-        subprocess.run(star_cmd.split())
-        print(sort_cmd)
-        subprocess.run(sort_cmd.split())
-        print(index_cmd)
-        subprocess.run(index_cmd.split())
-    else:
-        print("Found pre-existing aligment: %s" %(prefix+"Aligned.out.bam"))
-
- 
 def conf_return_path(conf, ftype = 'bam'):
     return("/".join([conf['dataset']['workdir'], conf['input_files'][ftype]]))
 

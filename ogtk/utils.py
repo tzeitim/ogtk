@@ -18,6 +18,7 @@ def bulk_merge_dir(raw_path, out_path, clean = True, force = False, errors =0):
         os.makedirs(out_path+"/umerged")
 
     ###
+    returns = []
     for i in glob.glob(raw_path+"/*R1*fastq"):
         f1 = i
         f2 = i.replace('R1', 'R2')
@@ -31,10 +32,12 @@ def bulk_merge_dir(raw_path, out_path, clean = True, force = False, errors =0):
         
         if not os.path.exists(out_merged) or force:
             ret = bbmerge_fastqs(f1 = f1, f2 = f2, out = out_merged, outu = out_unmerged1 , outu2 = out_unmerged2)
+            returns.append(ret)
         if ret:
             unmerged_samples.append(basename)
+    return(returns)
 
-def bbmerge_fastqs(f1, f2, out, outu, outu2, silent = True, bbmerge_bin = 'bbmerge.sh'):
+def bbmerge_fastqs(f1, f2, out, outu, outu2, verbose = False, bbmerge_bin = 'bbmerge.sh'):
     ''' use bbtools to merge amplicon derived reads 
     docs: https://github.com/BioInfoTools/BBMap/blob/master/sh/bbmerge.sh
     ref: https://doi.org/10.1371/journal.pone.0185056
@@ -42,13 +45,23 @@ def bbmerge_fastqs(f1, f2, out, outu, outu2, silent = True, bbmerge_bin = 'bbmer
     '''
     cmd = "{} in1={} in2={} out={} outu={} outu2={} pfilter=0 mismatches=5 efilter=-1".format(bbmerge_bin, f1, f2, out, outu, outu2)
     pp = subprocess.run(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if not silent:
-        print(pp.stderr.decode())
 
     if "RuntimeException" in pp.stderr.decode():
         #means the command failed
         return(False)
     else:
-        result = ''.join([i for i in pp.stderr.decode().split('\n') if "Joined" in i])
-        print(result)
-        return(True) 
+        if verbose:
+            print(pp.stderr.decode())
+            print("bbmerge log %s" % (log_ofn))
+
+        total = ''.join([i for i in pp.stderr.decode().split('\n') if "Pairs" in i])
+        total = float(total.split('\t')[-1].replace("%", ''))
+        joined = ''.join([i for i in pp.stderr.decode().split('\n') if "Joined" in i])
+        joined = float(joined.split('\t')[-1].replace("%", ''))/100
+        log = '\n'.join([i for i in pp.stderr.decode().split('\n')])
+        log_ofn =out.replace('fastq', 'log') 
+        with open(log_ofn, 'w') as logout:
+            for i in log:
+                logout.write(i)
+
+        return((total, joined, log_ofn))
