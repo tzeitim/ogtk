@@ -83,6 +83,7 @@ class Read_Set:
 
     def umi_list(self):
         return([i for i in self.umi_counts().index])
+
     def umi_counts(self):
         by_counts = pd.Series([len(self.umis[i].seqs) for i in self.umis.keys()], index=self.umis.keys()).sort_values(ascending=False)
         by_counts = pd.DataFrame({"counts":by_counts, "umi":by_counts.index}, index=by_counts.index)
@@ -91,10 +92,9 @@ class Read_Set:
 
     def umi_countss(self):
         by_counts = sorted([(len(self.umis[i].seqs), i) for i in self.umis.keys()], key = lambda x: x[1])
-        
         return(by_counts)
 
-    def correct_umis(self, errors = 1, mode = "dist", jobs =10, silent = True):
+    def correct_umis(self, errors = 1, mode = "dist", jobs =100, silent = True):
         if self.ori_umis == None:
             self.ori_umis = [i for i in self.umis.keys()]
         self.corr_stages.append(self.umi_counts())
@@ -193,11 +193,13 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None
         end = int(end)
     if name == None:
         name = fastq_ifn
+    umi_len = int(umi_len)
     readset = Read_Set(name=fastq_ifn)
     
-    fq = open(fastq_ifn).readlines()
+    fq = open(fastq_ifn)#.readlines()
     reads =     itertools.islice(fq, 1, end, 4)
-    rids =      itertools.islice(fq, 0, end, 4)
+    fq2 = open(fastq_ifn)#.readlines()
+    rids =      itertools.islice(fq2, 0, end, 4)
     for i, (read, rid) in enumerate(zip(reads, rids)):
         read = read.strip()
         if rid_umi == None:
@@ -628,6 +630,7 @@ def compare_umi_to_pool(args):
     return(dists)
 
 def merge_all(seqs, jobs = 10, errors = 1, mode = "regex"):
+    ''' parallel wrapper for merge_umi_to_pool - expects seqs sorted by ocurrence '''
     pool = multiprocessing.Pool(jobs)
     it = itertools.zip_longest(seqs, [[i, seqs, errors, mode] for i,v in enumerate(seqs)], fillvalue=seqs)
     return(pool.map(merge_umi_to_pool, it))
