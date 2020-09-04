@@ -95,6 +95,7 @@ class Read_Set:
         return(by_counts)
 
     def correct_umis(self, errors = 1, mode = "dist", jobs =100, silent = True):
+        jobs = int(jobs)
         if self.ori_umis == None:
             self.ori_umis = [i for i in self.umis.keys()]
         self.corr_stages.append(self.umi_counts())
@@ -630,10 +631,13 @@ def compare_umi_to_pool(args):
     return(dists)
 
 def merge_all(seqs, jobs = 10, errors = 1, mode = "regex"):
+    jobs = int(jobs)
     ''' parallel wrapper for merge_umi_to_pool - expects seqs sorted by ocurrence '''
     pool = multiprocessing.Pool(jobs)
     it = itertools.zip_longest(seqs, [[i, seqs, errors, mode] for i,v in enumerate(seqs)], fillvalue=seqs)
-    return(pool.map(merge_umi_to_pool, it))
+    ret = pool.map(merge_umi_to_pool, it)
+    pool.close()
+    return(ret)
 
 def hdist_all(seqs, jobs = 10):
     '''
