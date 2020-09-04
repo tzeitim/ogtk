@@ -426,6 +426,7 @@ def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_
     if by_alignment:
         print("Aligning read with the same UMI")
         cc = pool.map(mafft_consensus, it)
+        pool.close()
         #cc = [i for i in cc if "drop" not in i[0]]
     else:
     # this option represents a ranked based approach where the only the most common sequence is used as the representative
@@ -646,6 +647,7 @@ def hdist_all(seqs, jobs = 10):
     pool = multiprocessing.Pool(jobs)
     it = itertools.zip_longest(seqs, [[i, seqs] for i,v in enumerate(seqs)], fillvalue=seqs)
     dists = pool.map(compare_umi_to_pool, it)
+    pool.close()
     chunks_iterator = itertools.zip_longest(*[iter(dists)]*len(seqs), fillvalue=None)
     hdist_mat = np.array([i for i in chunks_iterator])
     #TODO understand why is hdist_mat has an additional layer
