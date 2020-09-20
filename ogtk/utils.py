@@ -50,18 +50,23 @@ def bbmerge_fastqs(f1, f2, out, outu, outu2, verbose = False, bbmerge_bin = 'bbm
         #means the command failed
         return(False)
     else:
-        if verbose:
-            print(pp.stderr.decode())
-            print("bbmerge log %s" % (log_ofn))
-
         total = ''.join([i for i in pp.stderr.decode().split('\n') if "Pairs" in i])
         total = float(total.split('\t')[-1].replace("%", ''))
         joined = ''.join([i for i in pp.stderr.decode().split('\n') if "Joined" in i])
         joined = float(joined.split('\t')[-1].replace("%", ''))/100
         log = '\n'.join([i for i in pp.stderr.decode().split('\n')])
         log_ofn =out.replace('fastq', 'log') 
+        if verbose:
+            print(pp.stderr.decode())
+            print("bbmerge log %s" % (log_ofn))
+
+
         with open(log_ofn, 'w') as logout:
             for i in log:
                 logout.write(i)
 
         return((total, joined, log_ofn))
+
+def print_open_children():
+    ''' prints the currently open sub-processes on ipython'''
+    print(subprocess.Popen('ps -u polivar | grep ipython | wc -l', shell=True, stdout=subprocess.PIPE,stderr=subprocess.STDOUT).communicate()[0].decode())

@@ -40,7 +40,7 @@ def bwa_map(conf_fn, fq_reads, prefix,  force = False, prepare_workspace = False
 
     bwa_build_ref(conf_fn, force)
 
-    bwa_cmd = 'bwa bwasw -t %s %s %s %s' % (bwa['threads'], bwa_args, ref_fa, fq_reads)
+    bwa_cmd = 'bwa %s -t %s %s %s %s' % (bwa['alg'], bwa['threads'], bwa_args, ref_fa, fq_reads)
     tobam_cmd = 'samtools view -b'
     index_cmd = 'samtools index %s' % (prefix + 'sorted.bam')
 

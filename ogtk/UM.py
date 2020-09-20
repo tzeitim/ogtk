@@ -14,6 +14,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from .aln_to_mat import Alg as Alg
+import random
 
 
 class Read_Set:
@@ -26,6 +27,7 @@ class Read_Set:
         self.name = name
         self.ori_umis = None
         self.corr_stages = []
+        self.nreads = 0
 
         # RID to UMI dic
         self.rid_umi = {} # holds a k,v for every readid, UMI
@@ -37,9 +39,22 @@ class Read_Set:
         self.conf = None
         self.prefix = ''
 
+    def saturation(self, mincov = 1):
+        mincov = int(mincov)
+        return([self.nreads, len(self.umi_counts() >= mincov )])
+
     def set_header(self, header):
         self.original_header = header
         self.header = header.as_dict()
+
+    def return_rep_reads(self, mincov = 1, unique = False):
+        '''return the most frequent read for every umi in the readset'''
+        rep_reads = [i.return_most_freq_read(mincov = mincov) for i in self.umis.values()]
+        if not unique:
+            return([i for i in rep_reads if i])
+        else:
+            return(list(set([i for i in rep_reads if i])))
+        
 
     def write_fasta(self, outfn  = None, balance = False):
         outfn = self.prefix+ '.cons.fa'
@@ -102,7 +117,7 @@ class Read_Set:
         seqs = [len(self.umis[i].seqs) for i in self.umis.keys()]
         by_counts = pd.Series(seqs, index = [i for i in self.umis.keys()]).sort_values()
         if not silent:
-            print("start", len(seqs))
+            print(f"start {len(seqs)} = {(len(seqs)**2)/1e6:0.2f}M comparisons")
 
         old_to_new = merge_all(self.umi_list(), errors = errors, mode = mode, jobs = jobs)
         for oldk,newk in old_to_new[::-1]:
@@ -114,7 +129,7 @@ class Read_Set:
         corrected_count = sum([1 for i,v in old_to_new if i !=v])
         if not silent:
             print("Found %s corrections" %(corrected_count))
-            print("end", len([i for i in self.umis.keys()]))
+            print(f"Total corrected UMIs {len(list(self.umis.keys()))}")
         
         #if corrected_count>0:
         #    self.correct_umis(errors = errors, mode = mode)
@@ -176,6 +191,20 @@ class UM:
         else:
             seqs = [ [i, ] for i in self.sams.keys()]
 
+    def return_most_freq_read(self, mincov = 1):
+        if not self.is_mapped:
+            return(False) # TODO change this assertion to raise an error
+        if len(self.sams.keys()) == 1 and len(self.seqs) >= mincov :
+            return(list(self.sams.keys())[0])
+        else:
+            return(False) # TODO change this assertion to raise an error
+        #counted_reads = pd.Series(self.seqs).value_counts()
+        #counted_reads = counted_reads[counted_reads >= mincov]
+        #if len(counted_reads) == 0:
+        #    return(False)
+        #top_read = counted_reads.index[0]
+        #return(top_read)
+
 def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=12, end=None):
     '''Constructs a paired Readset by transfering the UMI from R1 to R2 via the
     read id. TODO and converts R2 to the same strand''' 
@@ -184,7 +213,8 @@ def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=12, end=Non
     
     return([rset1, rset2])
     
-def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None, keep_rid=False, rid_umi=None, do_rc = False):
+def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None, keep_rid=False, rid_umi=None, do_rc = False, downsample = False, threshold = 1):
+
     '''
     Process a fastq file and collapses reads by UMI making use of their consensus seq
     Keeping the read id (rid) helps to match the UMI from read1 to read2
@@ -201,7 +231,12 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None
     reads =     itertools.islice(fq, 1, end, 4)
     fq2 = open(fastq_ifn)#.readlines()
     rids =      itertools.islice(fq2, 0, end, 4)
-    for i, (read, rid) in enumerate(zip(reads, rids)):
+    if downsample:
+        reads_rids_it = [(x, y) for x,y in zip(reads, rids) if random.random() < threshold]
+    else:
+        reads_rids_it = [(x, y) for x,y in zip(reads, rids)]
+
+    for i, (read, rid) in enumerate(reads_rids_it):
         read = read.strip()
         if rid_umi == None:
             umi = read[umi_start:umi_len] 
@@ -213,31 +248,18 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None
             seq = rev_comp(seq) 
 
         readset.add_umi(umi, seq)
+        readset.nreads += 1
 
         if keep_rid:
             readset.add_rid(umi, rid.split(" ")[0])
 
-#
-#####
-#    if keep_rid: # flag to store read id usign the UMI as a key
-#        rids = itertools.islice(fq, 0, end, 4)
-#        for i, (read, rid) in enumerate(zip(it, rids)):
-#            read = read.strip()
-#            rid = rid.split(" ")[0] 
-#            umi = read[umi_start:umi_len] 
-#            seq = read[umi_len:]
-#            readset.add_umi(umi, seq)
-#            readset.add_rid(umi, rid)
-#    else:
-#        for i,read in enumerate(it):
-#            read = read.strip()
-#            if rid_umi == None:
-#                umi = read[umi_start:umi_len] 
-#            else:   
-#                umi = rid_umi[rid]
-#            seq = read[umi_len:]
-#            readset.add_umi(umi, seq)
-    print(i, "reads were processed")
+
+    ucounts = readset.umi_counts()
+    top10 = (100*ucounts[0:9]/readset.nreads).tolist()
+    top10 = " ".join([i for i in map( lambda x: f'{x:.2f}%', top10[0:9])]) 
+    sat = readset.saturation()
+    #print(sat[1]/sat[0], sat[0]/sat[1])
+    #print(f"A total of {readset.nreads} reads were processed with {len(ucounts)} umis. top10 {top10} ")
     return(readset)
 
 def bam_collapse_UMI(bam_ifn, umi_start=0, umi_len=12, end=None):
@@ -245,6 +267,7 @@ def bam_collapse_UMI(bam_ifn, umi_start=0, umi_len=12, end=None):
     Process a BAM file and collapse reads by UMI making use of their consensus seq
     '''
     print("processing %s" % bam_ifn)
+    umi_len = int(umi_len)
     bamfile = pysam.pysam.AlignmentFile(bam_ifn)  
     readset = Read_Set(name = bam_ifn)
     readset.set_header(bamfile.header.copy())
@@ -258,7 +281,7 @@ def bam_collapse_UMI(bam_ifn, umi_start=0, umi_len=12, end=None):
         seq = read[umi_len-1:]
         readset.add_umi(umi, seq, bam)
         
-    print(i, "reads were processed")
+    print(f"\r{i} reads were processed")
     return(readset)
 
 def fit_header_to_umis(readset):
@@ -419,14 +442,15 @@ def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_
     ''' Generate consensus sequences of sets of reads, grouped by UMI '''
     # collapsing reads by consensus seems to be incorrect, deprecating the use of such (e.g. mafft alignment) 
     # in favor for just getting the most frequent sequence
-    pool = multiprocessing.Pool(threads)
     # define the list of pool arguments
     # fname, name, seqs, min_cov, jobs  = args
     it = iter([(readset.name.replace('.fastq', ''), umi, readset.umis[umi].seqs, min_cov, threads_alg) for umi in readset.umis.keys()])
     if by_alignment:
+        pool = multiprocessing.Pool(threads)
         print("Aligning read with the same UMI")
         cc = pool.map(mafft_consensus, it)
         pool.close()
+        pool.join()
         #cc = [i for i in cc if "drop" not in i[0]]
     else:
     # this option represents a ranked based approach where the only the most common sequence is used as the representative
@@ -434,8 +458,8 @@ def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_
         for umi in readset.umis.keys():
             counts = pd.Series(readset.umis[umi].seqs).value_counts()
             if counts[0] >= min_cov:
-                cc.append((umi + "_" + str(counts[0]), counts.index.to_list()[0]))
-
+                #cc.append((umi + "_" + str(counts[0]), counts.index.to_list()[0]))
+                cc.append((umi,  counts.index.to_list()[0]))
     consensuses = trim_by_regex(dict(cc) , trim_by, span_index=1) if trim_by != None else dict(cc) 
     return(consensuses) 
 
@@ -638,6 +662,7 @@ def merge_all(seqs, jobs = 10, errors = 1, mode = "regex"):
     it = itertools.zip_longest(seqs, [[i, seqs, errors, mode] for i,v in enumerate(seqs)], fillvalue=seqs)
     ret = pool.map(merge_umi_to_pool, it)
     pool.close()
+    pool.join()
     return(ret)
 
 def hdist_all(seqs, jobs = 10):
@@ -648,6 +673,7 @@ def hdist_all(seqs, jobs = 10):
     it = itertools.zip_longest(seqs, [[i, seqs] for i,v in enumerate(seqs)], fillvalue=seqs)
     dists = pool.map(compare_umi_to_pool, it)
     pool.close()
+    pool.join()
     chunks_iterator = itertools.zip_longest(*[iter(dists)]*len(seqs), fillvalue=None)
     hdist_mat = np.array([i for i in chunks_iterator])
     #TODO understand why is hdist_mat has an additional layer
