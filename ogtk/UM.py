@@ -39,9 +39,19 @@ class Read_Set:
         self.conf = None
         self.prefix = ''
 
-    def saturation(self, mincov = 1):
-        mincov = int(mincov)
-        return([self.nreads, len(self.umi_counts() >= mincov )])
+    def saturation(self):
+        return(' '.join([ str(sum(self.umi_counts() >= mincov)) for mincov in [1, 2, 3, 4, 5, 10, 100, 1000] ]))
+
+    def true_allele_cov(self):
+        ''' returns the counts for the top allele'''
+        cc = []
+        for umi in self.umis.keys():
+            counts = pd.Series(self.umis[umi].seqs).value_counts()
+            cc.append(counts[0])
+        return(cc)
+
+    def allele_saturation(self):
+        return(' '.join([ str(sum([i >= mincov for i in self.true_allele_cov()])) for mincov in [1, 2, 3, 4, 5, 10, 100, 1000] ]))
 
     def set_header(self, header):
         self.original_header = header
@@ -99,13 +109,16 @@ class Read_Set:
     def umi_list(self):
         return([i for i in self.umi_counts().index])
 
-    def umi_counts(self):
+    def umi_counts(self, mincov = 1):
         by_counts = pd.Series([len(self.umis[i].seqs) for i in self.umis.keys()], index=self.umis.keys()).sort_values(ascending=False)
         by_counts = pd.DataFrame({"counts":by_counts, "umi":by_counts.index}, index=by_counts.index)
         by_counts = by_counts.sort_values(by=["counts", "umi"], ascending = False)
-        return(by_counts['counts'])
+        if(mincov >1):
+            return(by_counts['counts'][by_counts['counts']>=mincov])
+        else:
+            return(by_counts['counts'])
 
-    def umi_countss(self):
+    def umi_countss(self, mincov = 1):
         by_counts = sorted([(len(self.umis[i].seqs), i) for i in self.umis.keys()], key = lambda x: x[1])
         return(by_counts)
 
@@ -133,6 +146,12 @@ class Read_Set:
         
         #if corrected_count>0:
         #    self.correct_umis(errors = errors, mode = mode)
+    def delete(self, delete_candidates):
+        '''
+        deletes the keys (UMIS) specified on the argumen
+        '''
+        for item in delete_candidates:
+            del self.umis[item]
 
     def do_msa(self, plot = False):
         assert self.consensus, "consensus has not been generated: run .do_pileup to generate it"
@@ -205,7 +224,7 @@ class UM:
         #top_read = counted_reads.index[0]
         #return(top_read)
 
-def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=12, end=None):
+def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=None):
     '''Constructs a paired Readset by transfering the UMI from R1 to R2 via the
     read id. TODO and converts R2 to the same strand''' 
     rset1 = fastq_collapse_UMI(fastq_ifn1, umi_len = umi_len, keep_rid = True, end = end)
@@ -227,9 +246,9 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None
     umi_len = int(umi_len)
     readset = Read_Set(name=fastq_ifn)
     
-    fq = open(fastq_ifn)#.readlines()
+    fq = gzip.open(fastq_ifn, 'rt') if fastq_ifn.endswith("fastq.gz") else open(fastq_ifn)#.readlines()
     reads =     itertools.islice(fq, 1, end, 4)
-    fq2 = open(fastq_ifn)#.readlines()
+    fq2 = gzip.open(fastq_ifn, 'rt') if fastq_ifn.endswith("fastq.gz") else open(fastq_ifn)#.readlines()
     rids =      itertools.islice(fq2, 0, end, 4)
     if downsample:
         reads_rids_it = [(x, y) for x,y in zip(reads, rids) if random.random() < threshold]
