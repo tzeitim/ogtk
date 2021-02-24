@@ -2,6 +2,15 @@ import shutil
 import os
 import subprocess
 import glob
+import itertools
+
+#https://docs.python.org/3/library/itertools.html#itertools.zip_longest
+def grouper(iterable, n, fillvalue=None):
+    "Collect data into fixed-length chunks or blocks"
+    # grouper('ABCDEFG', 3, 'x') --> ABC DEF Gxx"
+    args = [iter(iterable)] * n
+    return itertools.zip_longest(*args, fillvalue=fillvalue)
+
 
 def bulk_merge_dir(raw_path, out_path, clean = True, force = False, errors =0, verbose = False):
     ''' This wrapper makes use of bbmerge to merge fastqs locate in a given directory '''
@@ -70,3 +79,51 @@ def bbmerge_fastqs(f1, f2, out, outu, outu2, verbose = False, bbmerge_bin = 'bbm
 def print_open_children():
     ''' prints the currently open sub-processes on ipython'''
     print(subprocess.Popen('ps -u polivar | grep ipython | wc -l', shell=True, stdout=subprocess.PIPE,stderr=subprocess.STDOUT).communicate()[0].decode())
+
+
+def tadpole_fastqs(f1, out, verbose = False, k=66, tadpole_bin = 'tadpole.sh', bm1=1, bm2=1, mincontig = "auto", mincountseed = 100, return_contigs=False):
+    ''' use tadpole from bbtools to assemble a cloud of sequences controlled by a UMI
+    '''
+    #tadpole.sh in=tmp/f1_ACTTCGCCAGAGTTGG_GTGCGAGAGGGTA.fastq out=mini k=66 overwrite=True bm1=1 bm2=1 mincountseed=4
+    cmd = f"{tadpole_bin} in={f1} out={out} k={k} overwrite=True bm1={bm1} bm2={bm2} t=5 -Xmx6g mincontig={mincontig} mincountseed={mincountseed} rcomp=f"
+    if verbose:
+        print(cmd)
+    pp = subprocess.run(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    if "RuntimeException" in pp.stderr.decode():
+        #means the command failed
+        print("RunTimeEx")
+        return(False)
+    contigs = pp.stderr.decode().split("Contigs generated:")[1].split('\n')[0].split('\t')[1]
+    contigs = int(contigs)
+
+    if contigs == 0:
+        return(False)
+
+    else:
+        #total = ''.join([i for i in pp.stderr.decode().split('\n') if "Pairs" in i])
+        #total = float(total.split('\t')[-1].replace("%", ''))
+        #joined = ''.join([i for i in pp.stderr.decode().split('\n') if "Joined" in i])
+        #joined = float(joined.split('\t')[-1].replace("%", ''))/100
+        log = '\n'.join([i for i in pp.stderr.decode().split('\n')])
+        if "contig" in out:
+            log_ofn =out.replace('contig', 'log') 
+        else:
+            log_ofn = out+'.log'
+        if verbose:
+            print(pp.stderr.decode())
+            print("tadpole log %s" % (log_ofn))
+
+
+        with open(log_ofn, 'w') as logout:
+            for i in log:
+                logout.write(i)
+        if return_contigs:
+            from pyfaidx import Fasta
+            contigs = Fasta(out, as_raw=True)
+            contigs = [ (k, contigs[k][:]) for k in contigs.keys()]
+            return(contigs)
+
+        return(True)
+
+

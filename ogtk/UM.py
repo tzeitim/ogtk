@@ -15,6 +15,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 from .aln_to_mat import Alg as Alg
 import random
+from .utils import *
+import gzip
 
 
 class Read_Set:
@@ -92,10 +94,12 @@ class Read_Set:
         consensuses_tab.close()
 
 
-    def add_umi(self, umi, seq, alignment=None):
+    def add_umi(self, umi, seq, alignment = None, qual = None):
         if self.umis.get(umi, 0) == 0:
             self.umis[umi] = UM(self.name, umi)
         self.umis[umi].seqs.append(seq)
+        if qual != None:
+            self.umis[umi].quals.append(qual)
         if alignment.__class__.__name__ == 'AlignedSegment':
             if self.umis[umi].sams.get(alignment.cigarstring, 0) == 0:
                 self.umis[umi].sams[alignment.cigarstring] = []
@@ -148,7 +152,7 @@ class Read_Set:
         #    self.correct_umis(errors = errors, mode = mode)
     def delete(self, delete_candidates):
         '''
-        deletes the keys (UMIS) specified on the argumen
+        deletes the keys (UMIS) specified on the argument
         '''
         for item in delete_candidates:
             del self.umis[item]
@@ -188,14 +192,40 @@ class Read_Set:
         dists = hdist_all(seqs)
         return(dists)
        
+    def assemble_umis(self, threads= 10, temp_dir = '/tmp/tadpole'):
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+        ''' parallel call to tadpole to assemble contigs for each UMI'''
+        umis =list(self.umis.keys())
+        with multiprocessing.Pool(threads) as pool:
+            print(f"parallel tadpole invocation {threads}")
+            cc = pool.map(wrap_assemble, iter([self.umis[i] for i in umis]))
+            print("yacabe")
+            #pool.close()
+            #pool.join()
+            return(cc)
+            #for k,contigs in zip(umis,cc):
+            #    self.umis[k].contigs = contigs
+
+def wrap_assemble(name, umi, k = 31, mincontig='auto', mincountseed=1, verbose = False):
+    temp_dir= f'/tmp/tadpole/tadpole_{name}_'
+    if len(set(umi.seqs))>1:
+       fasta_ofn = temp_dir+"_"+umi.umi+"_temp.fastq"
+       umi.export_to_fastq(fasta_ofn = fasta_ofn)
+       contigs = tadpole_fastqs(fasta_ofn, out=fasta_ofn.replace('temp', 'contig').replace('fastq', 'fa'), return_contigs=True, k = k, verbose = verbose, mincontig=mincontig, mincountseed=mincountseed)
+    else:
+       contigs = False
+    return(contigs)
 
 class UM:
     def __init__(self, sample, umi):
         self.sample = sample
         self.umi = umi
         self.seqs = []
+        self.quals = []
         self.ori_umis = None
         self.is_mapped = False
+        self.contigs = False
      
         # stores sam entries using a cigar string as key
         self.sams = {}
@@ -203,10 +233,34 @@ class UM:
     def add_seq(self, seq):
         self.seqs.append(seq)
 
-    def export_to_fastq(self, fasta_ofn = "/home/polivar/test.fa"):
+    def export_to_fasta(self, fasta_ofn = "/home/polivar/test.fa"):
         if not self.is_mapped:
-            cc = pd.Series(self.seqs).value_counts()
-            write_to_fasta(fasta_ofn, [[str(i)+self.umi, v] for i,v in zip(cc, cc.index)])
+            with open(fasta_ofn, 'w') as out_fa:
+                cc = pd.Series(self.seqs).value_counts()
+                index = 0
+                for count,seq in zip(cc, cc.index):
+                    for ii in range(count): 
+                        out_fa.write(">"+str(index)+"_"+self.umi+"\n" + seq+"\n")
+                        index+=1
+        else:
+            seqs = [ [i, ] for i in self.sams.keys()]
+
+
+    def export_to_fastq(self, fasta_ofn = "/home/polivar/test.fastq"):
+        if not self.is_mapped or True: # TODO remove this True to the else can work - > implement the else
+            with open(fasta_ofn, 'w') as out_fa:
+                merge_identical = False #TODO: decide how to deal with the quality for identical sequences
+                if merge_identical:
+                    cc = pd.Series(self.seqs).value_counts()
+                    index = 0
+                    for count, seq in zip(cc, cc.index):
+                        for ii in range(count): 
+                            out_fa.write("@"+str(index)+"_"+self.umi+"\n" + seq+"\n+\n" + qual + "\n")
+                            index+=1
+                else:
+                    cc = pd.Series(self.seqs).value_counts()
+                    for index, (seq, qual) in enumerate(zip(self.seqs, self.quals)):
+                        out_fa.write("@"+str(index)+"_"+self.umi+"\n" + seq + "\n+\n" + qual + "\n")
         else:
             seqs = [ [i, ] for i in self.sams.keys()]
 
@@ -223,7 +277,15 @@ class UM:
         #    return(False)
         #top_read = counted_reads.index[0]
         #return(top_read)
-
+    def return_kmer_counts(self, k):
+        kmer_counts = {}
+        for seq in self.seqs:
+            for mer in build_kmers(seq, k):
+                if mer not in kmer_counts.keys():
+                    kmer_counts[mer] = 0
+                kmer_counts[mer]+=1
+        return(kmer_counts)
+            
 def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=None):
     '''Constructs a paired Readset by transfering the UMI from R1 to R2 via the
     read id. TODO and converts R2 to the same strand''' 
@@ -250,23 +312,29 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None
     reads =     itertools.islice(fq, 1, end, 4)
     fq2 = gzip.open(fastq_ifn, 'rt') if fastq_ifn.endswith("fastq.gz") else open(fastq_ifn)#.readlines()
     rids =      itertools.islice(fq2, 0, end, 4)
-    if downsample:
-        reads_rids_it = [(x, y) for x,y in zip(reads, rids) if random.random() < threshold]
-    else:
-        reads_rids_it = [(x, y) for x,y in zip(reads, rids)]
+    fqq = gzip.open(fastq_ifn, 'rt') if fastq_ifn.endswith("fastq.gz") else open(fastq_ifn)#.readlines()
+    quals =      itertools.islice(fqq, 3, end, 4)
 
-    for i, (read, rid) in enumerate(reads_rids_it):
+    if downsample:
+        reads_rids_it = [(x, y, z) for x,y,z in zip(reads, rids, quals) if random.random() < threshold]
+    else:
+        reads_rids_it = [(x, y, z) for x,y,z in zip(reads, rids, quals)]
+
+    for i, (read, rid, qual) in enumerate(reads_rids_it):
         read = read.strip()
         if rid_umi == None:
             umi = read[umi_start:umi_len] 
             seq = read[umi_len:]
+            qual = qual[umi_len:]
         else:
             umi = rid_umi[rid.split(" ")[0]]
             seq = read.strip()
+            qual = qual.strip()
         if do_rc:
             seq = rev_comp(seq) 
+            qual = qual[::-1]
 
-        readset.add_umi(umi, seq)
+        readset.add_umi(umi, seq, qual = qual)
         readset.nreads += 1
 
         if keep_rid:
@@ -293,15 +361,41 @@ def bam_collapse_UMI(bam_ifn, umi_start=0, umi_len=12, end=None):
     if end != None:
         end = int(end)
     bam_it = itertools.islice(bamfile, 0, end)
+
     for i,bam in enumerate(bam_it):
         print("\r%s"%i, end='')
         read = bam.seq
         umi = read[umi_start:umi_len] 
         seq = read[umi_len-1:]
-        readset.add_umi(umi, seq, bam)
+        readset.add_umi(umi, seq, alignment=bam, qual = bam.qual)
         
     print(f"\r{i} reads were processed")
     return(readset)
+
+def bam10x_collapse_UMI(bam_ifn, umi_start=0, umi_len=12, end=None):
+    '''
+    Process a BAM file and collapse reads by UMI making use of their consensus seq
+    '''
+    print("processing %s" % bam_ifn)
+    umi_len = int(umi_len)
+    bamfile = pysam.pysam.AlignmentFile(bam_ifn)  
+    readset = Read_Set(name = bam_ifn)
+    readset.set_header(bamfile.header.copy())
+    if end != None:
+        end = int(end)
+    bam_it = itertools.islice(bamfile, 0, end)
+
+    for i,bam in enumerate(bam_it):
+        if bam.has_tag("UB") and bam.has_tag("CB"):
+            print("\r%s"%i, end='')
+            read = bam.seq
+            umi = bam.get_tag("CB")[0:-2]+bam.get_tag("UB")
+            seq = bam.seq
+            readset.add_umi(umi, seq, alignment=bam, qual = bam.qual)
+        
+    print(f"\r{i} reads were processed")
+    return(readset)
+
 
 def fit_header_to_umis(readset):
    self = readset
@@ -688,6 +782,7 @@ def hdist_all(seqs, jobs = 10):
     '''
     Pair-wise comparison of set of sequences
     '''
+    jobs = int(jobs)
     pool = multiprocessing.Pool(jobs)
     it = itertools.zip_longest(seqs, [[i, seqs] for i,v in enumerate(seqs)], fillvalue=seqs)
     dists = pool.map(compare_umi_to_pool, it)
@@ -941,8 +1036,6 @@ def rev_comp(seq):
     for c in reversed(seq):
         newSeq.append(revTbl[c])
     return "".join(newSeq)
-
-
 
 # for i in range(0, 50*(2), 2):
 #     ref_seq  = FF[i+1][:].upper()
