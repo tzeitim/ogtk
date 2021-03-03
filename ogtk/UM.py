@@ -99,7 +99,7 @@ class Read_Set:
             self.umis[umi] = UM(self.name, umi)
         self.umis[umi].seqs.append(seq)
         if qual != None:
-            self.umis[umi].quals.append(qual)
+            self.umis[umi].quals.append(qual.strip())
         if alignment.__class__.__name__ == 'AlignedSegment':
             if self.umis[umi].sams.get(alignment.cigarstring, 0) == 0:
                 self.umis[umi].sams[alignment.cigarstring] = []
@@ -286,11 +286,19 @@ class UM:
                 kmer_counts[mer]+=1
         return(kmer_counts)
             
-def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=None):
+def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=None, fuse = False):
     '''Constructs a paired Readset by transfering the UMI from R1 to R2 via the
     read id. TODO and converts R2 to the same strand''' 
     rset1 = fastq_collapse_UMI(fastq_ifn1, umi_len = umi_len, keep_rid = True, end = end)
     rset2 = fastq_collapse_UMI(fastq_ifn2, umi_len = umi_len, rid_umi = rset1.rid_umi, do_rc = False, end = end)
+
+    #TODO add support for controlling the strandednes of the pooling method, for now this just dumps read2s in to read1s
+    if fuse: 
+        for k, v in rset1.umis.items():
+            for read, qual in zip(rset2.umis[k].seqs, rset2.umis[k].quals):
+                rset1.add_umi(k, seq = read, qual=qual)
+        return(rset1)
+
     
     return([rset1, rset2])
     
@@ -734,6 +742,8 @@ def merge_umi_to_pool(args):
     '''
     Returns a pair that maps the old umi to the new one
     Expects UMIs sorted by ocurrence
+    args = (seq, rank, pool, errors, mode)
+    mode = "regex" "dist"
     '''
     seq = args[0]
     rank = args[1][0]
