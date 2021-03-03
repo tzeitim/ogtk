@@ -247,6 +247,7 @@ class UM:
 
 
     def export_to_fastq(self, fasta_ofn = "/home/polivar/test.fastq"):
+        print(f'Saving to {fasta_ofn}')
         if not self.is_mapped or True: # TODO remove this True to the else can work - > implement the else
             with open(fasta_ofn, 'w') as out_fa:
                 merge_identical = False #TODO: decide how to deal with the quality for identical sequences
@@ -289,8 +290,9 @@ class UM:
 def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=None, fuse = False):
     '''Constructs a paired Readset by transfering the UMI from R1 to R2 via the
     read id. TODO and converts R2 to the same strand''' 
+    do_rc = fuse
     rset1 = fastq_collapse_UMI(fastq_ifn1, umi_len = umi_len, keep_rid = True, end = end)
-    rset2 = fastq_collapse_UMI(fastq_ifn2, umi_len = umi_len, rid_umi = rset1.rid_umi, do_rc = False, end = end)
+    rset2 = fastq_collapse_UMI(fastq_ifn2, umi_len = umi_len, rid_umi = rset1.rid_umi, do_rc = do_rc, end = end)
 
     #TODO add support for controlling the strandednes of the pooling method, for now this just dumps read2s in to read1s
     if fuse: 
