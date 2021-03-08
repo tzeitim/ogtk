@@ -78,11 +78,16 @@ def fastq_to_contig(name, ifn1, ifn2, end = None, verbose = False):
                     #    outf.write('\t'.join([sample, umi.umi, str(s), str(len(seq)), seq])+'\n')
     
     
-def fastq10x_to_contig(name, outdir, ifn1, ifn2, K = 80, end = None, just_set = False, verbose = False, mincontig=100, mincountseed=100, fuse_readsets = False):
+def fastq10x_to_contig(name, outdir, ifn1, ifn2, K = 80, end = None, just_set = False, do_rc = False, verbose = False, mincontig='auto', mincountseed=100, fuse_readsets = False):
     import ogtk
     import pandas as pd
     import re
+    import os
 
+    if not os.path.exists(outdir):
+        print(f'Creating output dir')
+        os.makedirs(outdir)
+    print(f'Dumping results to {outdir}')
     K = int(K) 
     if mincontig != 'auto':
         mincontig = int(mincontig)
@@ -94,13 +99,18 @@ def fastq10x_to_contig(name, outdir, ifn1, ifn2, K = 80, end = None, just_set = 
                 fastq_ifn2=ifn2,
                 umi_len=28,
                 end = end,
+                do_rc = do_rc,
                 fuse = fuse_readsets)
+
+    if just_set:
+        if fuse_readsets:
+            prs = prs[1]
+        return(prs)
+ 
     if not fuse_readsets:
         prs = prs[1]
 
-    if just_set:
-        return(prs)
-    
+   
     with open(f'{outdir}/{name}_all.txt', 'w') as outf, open(f'{outdir}/{name}_contigs.fa', 'w') as fout, open(f'{outdir}/{name}_contigs.fastq', 'w') as fqout:
         tot_umis = len(prs.umis)
         total = 0
@@ -115,7 +125,8 @@ def fastq10x_to_contig(name, outdir, ifn1, ifn2, K = 80, end = None, just_set = 
             print(f"\r{100*(total/tot_umis):.4f}", end='')
             megastr = ''.join(umi.seqs)
             counts = pd.Series(umi.seqs).value_counts()
-            contigs = ogtk.UM.wrap_assemble(name= name, umi = umi, k = K, verbose = verbose, mincontig=mincontig, mincountseed=mincountseed)
+            contigs = ogtk.UM.wrap_assemble(name= name, umi = umi, 
+                    k = K, verbose = verbose, mincontig=mincontig, mincountseed=mincountseed)
             cbc_umi = umi.umi
             cbc = cbc_umi[0:16]
             umi_str = cbc_umi[16:]
@@ -362,7 +373,7 @@ def extract_10xcbc_whitelist(barcodes_tsv_ifn, output_filename = None):
 
 
 
-def  format_alleles_from_sam(ref_path, fa_ofn):
+def format_alleles_from_sam(ref_path, fa_ofn):
     # we add the right header #TODO improve
     import uuid
     from pyfaidx import Fasta

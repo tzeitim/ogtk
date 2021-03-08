@@ -60,6 +60,7 @@ def extract_reads(sitedb_yaml, use_unmapped = True, FORCE = False, with_chr = Tr
     import time
     import subprocess
     import pyaml
+    import ogtk
     ''' 
     expects a sitedb yaml file
        provides a hits reference in FASTA format fo be computed before
@@ -138,13 +139,13 @@ def extract_reads(sitedb_yaml, use_unmapped = True, FORCE = False, with_chr = Tr
     map(lambda x: x.terminate(), [c1,c2,c3,c4])
 
     # step 3
-    import ogtk
     # not true but almost
     #'minimap2 -a --cs --splice --sam-hit-only  ./mini_ref.fa umapped.fastq.gz hits_genes.fastq.gz | samtools sort | samtools view -b > fffyyy.bam'
     # added --sr --splice-flank=no
     ogtk.mp.mp2_map(ref = mini_ref, query = " ".join([hits_genes_fastq, umapped_fastq]), options = '-a --cs --splice --splice-flank=no --sam-hit-only --sr', outfn = all_hits_bam, verbose = True)
 
        
+
    
     
 def sitedb_return_coord_str(path_to_yaml, with_chr = True):
@@ -229,7 +230,6 @@ def generate_correction_dictionaries(sitedb_yaml, FORCE = False, verbose = False
 
         return(dd)
 
-
 def call_alleles(sitedb_yaml, correction_dictionaries, window = 120/2, n_reads = None):
     '''
     ifn_bam = output from minimap of a concatenated set of reads of hits on targets and unmapped reads. Reads are expected to include the CR and UR tags from the 10x bam 
@@ -237,15 +237,29 @@ def call_alleles(sitedb_yaml, correction_dictionaries, window = 120/2, n_reads =
         @NS500648:472:HF7WWAFX2:1:11102:17555:11614_CR:Z:AAAAAAAAAAAACAAT_UR:Z:AAAAAAAAAAAA
 
     n_reads = number of reads to consume from the bam; None means all.
+
+    real call:
+    _call_alleles(ifn_bam, ofn, loci, correction_dictionaries)
     '''
     import pyaml
     sitedb = pyaml.yaml.load(open(sitedb_yaml), Loader=pyaml.yaml.Loader)
     ifn_bam = sitedb['xp']['all_hits_bam'] 
     ofn = sitedb['xp']['allele_tab']
     loci = sitedb['loci']
+    
+    # this is just a wrapper so we call here the real function
+    _call_alleles(ifn_bam, ofn, loci, correction_dictionaries, n_reads, window)
+
+def _call_alleles(ifn_bam, ofn, loci, correction_dictionaries = None, n_reads = None, window = 120/2, region = None):
     weird = []
-    bam = itertools.islice(pysam.AlignmentFile(ifn_bam), 0 , n_reads)
+    bam = pysam.AlignmentFile(ifn_bam)
+    if region != None:
+        bam_i = bam.fetch(region)
+    else:
+        bam_i = itertools.islice(bam, 0 , n_reads)
+
     out = open(ofn, 'w')
+
     with open(ofn, 'w') as out:
         out.write('\t'.join(['chr', 'start', 'cr', 'cb', 'ur','ub', 'molid', 'cs', 'cigar', 'iv', 'dv', 'hallele', 'sallele', 'seq'])+'\n')
         for read in bam:
@@ -368,17 +382,28 @@ def call_alleles(sitedb_yaml, correction_dictionaries, window = 120/2, n_reads =
                         if chrom is None:
                             pdb.set_trace()
                         map_start = str(read.reference_start)
-                        cr = read.query_name.split(':Z:')[1].split("_")[0]
-                        if cr in correction_dictionaries['cell_barcodes'].keys():
-                            cb = correction_dictionaries['cell_barcodes'][cr]
-                        else:
-                            cb = "NA"
 
-                        ur = read.query_name.split(':Z:')[2]
-                        if ur in correction_dictionaries['umi_barcodes'].keys():
-                            ub = correction_dictionaries['umi_barcodes'][ur]
+                        if read.has_tag("CR"):
+                            cr = read.get_tag("CR")
                         else:
-                            ub = "NA"
+                            cr = read.query_name.split(':Z:')[1].split("_")[0]
+                        if read.has_tag("UR"):
+                            ur = read.get_tag("UR")
+                        else:
+                            ur = read.query_name.split(':Z:')[2]
+
+                        if correction_dictionaries != None:
+                            if cr in correction_dictionaries['cell_barcodes'].keys():
+                                cb = correction_dictionaries['cell_barcodes'][cr]
+                            else:
+                                cb = "NA"
+                            if ur in correction_dictionaries['umi_barcodes'].keys():
+                                ub = correction_dictionaries['umi_barcodes'][ur]
+                            else:
+                                ub = "NA"
+                        else:
+                            ub = 'NA'
+                            cb = 'NA'
 
                         molid = cr + ur
                         cs = cs_str
@@ -395,8 +420,5 @@ def call_alleles(sitedb_yaml, correction_dictionaries, window = 120/2, n_reads =
                             #print(read.query_name, '\n', read.cigarstring, '\n', read.cigartuples, '\n', allele, '\n', old_allele, '\n' , mm_al , '\n This is the allele cs', al_cs, '\n This is the mismatch cs', mm_al_cs, '\n', read.seq)
         if len(weird)>0:
             print(f'Warning: a total of {len(weird)} reads without CS tag were found! or that do not have a seq (?)')
-    #out.close()
 
-
-#call_alleles(verbose = True, end =None)
 
