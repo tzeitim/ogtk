@@ -277,6 +277,8 @@ def _call_alleles(ifn_bam, ofn, loci, correction_dictionaries = None, n_reads = 
                     foc_end =   guide_mini + window  
 
                     if read.reference_start >= foc_start and read.reference_start <= foc_end:
+                        import pdb
+                        #pdb.set_trace()
                         #print(chrom_str, loci[chrom_str]['start'], foc_start, '<',read.reference_start, '<', foc_end )
                         allele = cs_str.split(':')
                         mm_al = []

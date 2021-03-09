@@ -289,6 +289,14 @@ class UM:
                 kmer_counts[mer]+=1
         return(kmer_counts)
             
+
+def count_umis_fastq(ifn_fastq):
+    ''' memory efficient readset that only keeps record of umis without storing any other information of the read'''    
+def count_umis_bam10x(ifn_bam):
+    ''' memory efficient readset that only keeps record of umis without storing any other information of the read'''    
+
+
+
 def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=None, fuse = False, do_rc = False):
     '''Constructs a paired Readset by transfering the UMI from R1 to R2 via the
     read id. TODO and converts R2 to the same strand''' 
@@ -424,7 +432,8 @@ def merge_10x_fastqs(indir, r1, end = None):
         i2 = itertools.islice(grouper(R2, 4), 0, end)
         for read1,read2 in zip(i1, i2):
             read3 = list(read2)
-            read3[0] = read3[0].split()[0] + ":umi:"+ read1[1]
+            umi_str = read1[1][0:28]
+            read3[0] = read3[0].split()[0] + ":umi:"+ umi_str + "\n"#read1[1][0:28]
             for i in read3:
                 R3.write(i)
             #print(f"read1{read1}\nread2{read2}\nread3{read3}")
