@@ -192,9 +192,9 @@ class Read_Set:
         dists = hdist_all(seqs)
         return(dists)
        
-    def assemble_umis(self, threads= 10, temp_dir = '/tmp/tadpole'):
-        if not os.path.exists(temp_dir):
-            os.makedirs(temp_dir)
+    def assemble_umis(self, threads= 10):
+        
+        temp_dir = create_tmp_dir_per_user(category = 'tadpole')
         ''' parallel call to tadpole to assemble contigs for each UMI'''
         umis =list(self.umis.keys())
         with multiprocessing.Pool(threads) as pool:
@@ -207,14 +207,30 @@ class Read_Set:
             #for k,contigs in zip(umis,cc):
             #    self.umis[k].contigs = contigs
 
-def wrap_assemble(name, umi, k = 31, mincontig='auto', mincountseed=1, verbose = False):
-    temp_dir= f'/tmp/tadpole/tadpole_{name}_'
+def create_tmp_dir_per_user(category = 'tadpole'):
+    '''creates and returns a tmp dir in a user-specific manner '''
+    username = os.environ['USER']
+    tmp_dir = f"/tmp/{category}_{username}/"
+    if not os.path.exists(tmp_dir):
+        print(f"Created tmp dir {tmp_dir}")
+        os.makedirs(tmp_dir)
+    subprocess.run("chmod -R g+rw {tmp_dir}".split())
+    return(tmp_dir)
+    
+
+def wrap_assemble(name, umi, k = 31, mincontig='auto', mincountseed=1, verbose = False, keep_tmp = True):
+    username = os.environ['USER']
+    temp_dir= create_tmp_dir_per_user(category = 'tadpole')
+    temp_prefix= f'{temp_dir}/tadpole_{name}_'
     if len(set(umi.seqs))>1:
-       fasta_ofn = temp_dir+"_"+umi.umi+"_temp.fastq"
+       fasta_ofn = temp_prefix+"_"+umi.umi+"_temp.fastq"
        umi.export_to_fastq(fasta_ofn = fasta_ofn)
        contigs = tadpole_fastqs(fasta_ofn, out=fasta_ofn.replace('temp', 'contig').replace('fastq', 'fa'), return_contigs=True, k = k, verbose = verbose, mincontig=mincontig, mincountseed=mincountseed)
     else:
        contigs = False
+    if not keep_tmp:
+        print(f'Remocing temp dir {temp_dir}')
+        subprocess.run("rm {temp_dir}".split())
     return(contigs)
 
 class UM:
@@ -313,7 +329,7 @@ def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=Non
     
     return([rset1, rset2])
     
-def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None, keep_rid=False, rid_umi=None, do_rc = False, downsample = False, threshold = 1):
+def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None, keep_rid=False, rid_umi=None, do_rc = False, downsample = False, threshold = 1, verbose = False):
 
     '''
     Process a fastq file and collapses reads by UMI making use of their consensus seq
@@ -365,7 +381,8 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None
     top10 = " ".join([i for i in map( lambda x: f'{x:.2f}%', top10[0:9])]) 
     sat = readset.saturation()
     #print(sat[1]/sat[0], sat[0]/sat[1])
-    #print(f"A total of {readset.nreads} reads were processed with {len(ucounts)} umis. top10 {top10} ")
+    if verbose:
+        print(f"A total of {readset.nreads} reads were processed with {len(ucounts)} umis. top10 {top10} ")
     return(readset)
 
 def bam_collapse_UMI(bam_ifn, umi_start=0, umi_len=12, end=None):
