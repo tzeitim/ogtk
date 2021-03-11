@@ -10,6 +10,7 @@ import regex
 import itertools
 import multiprocessing
 import pandas as pd
+import pickle
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
@@ -214,7 +215,7 @@ def create_tmp_dir_per_user(category = 'tadpole'):
     if not os.path.exists(tmp_dir):
         print(f"Created tmp dir {tmp_dir}")
         os.makedirs(tmp_dir)
-    subprocess.run("chmod -R g+rw {tmp_dir}".split())
+    subprocess.run(f"chmod -R g+rw {tmp_dir}".split())
     return(tmp_dir)
     
 
@@ -229,9 +230,43 @@ def wrap_assemble(name, umi, k = 31, mincontig='auto', mincountseed=1, verbose =
     else:
        contigs = False
     if not keep_tmp:
-        print(f'Remocing temp dir {temp_dir}')
+        print(f'Removing temp dir {temp_dir}')
         subprocess.run("rm {temp_dir}".split())
     return(contigs)
+
+def monitor_assembly_umi_list(umi_list, rs, pickle_ofn, k = 80, monitor_rate = 100):
+    '''Provided a umi list and a readset it attempts to assemble the umis while keeping a pickled record '''
+    contigs = {}
+    for umi_str in umi_list:
+        umi = rs.umis[umi_str]
+        contigs[umi.umi] = wrap_assemble(umi.umi, umi, k = k)
+        if len(contigs) % monitor_rate or len(contigs) == 1:
+            counts = [len(i) for i in contigs.values() if i]
+            print(pd.Series(counts).value_counts())
+            with open(pickle_ofn, 'wb') as pcklout:
+                pickle.dump(contigs, pcklout)
+    
+def qc_assembly_pickle(pickle_ifn):
+    '''Perform QCs for an assembly pickled dictionary'''
+    df = import_assembly_dict(pickle_ifn)
+
+
+def import_assembly_dict(pickle_ifn):
+    pcklhdl = open(pickle_ifn, 'rb')
+    contigs = pickle.load(pcklhdl)
+    records = []
+    for k,v in contigs.items():
+        if v:
+            for ii, i in enumerate(v):
+                length = float(i[0].split(',')[1].split("=")[1])
+                cov = float(i[0].split(',')[2].split("=")[1])
+                gc = float(i[0].split(',')[3].split("=")[1])
+                seq = i[1]
+                records.append([k, ii, length , cov, gc, seq])
+    df = pd.DataFrame.from_records(records, columns=["umi", "i", "length", "cov", "gc", "seq"])
+    return(df)
+                      
+        
 
 class UM:
     def __init__(self, sample, umi):
