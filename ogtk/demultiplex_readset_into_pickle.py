@@ -21,7 +21,7 @@ if __name__=="__main__":
     sdf['fullpath'] = sdf[['wd', 'r1']].apply(lambda x: '/'.join(x), axis=1)
     sdf['name'] = sdf[['bc', 'alias', 'mother', 'father', 'injected']].apply(lambda x: '_'.join(x).replace('series', ''), axis=1)
     xps = sdf.groupby('fullpath')
-    end = args.e
+    end = args.end
     if end == 0:
         end = None
     fig_dir = args.figdir #
