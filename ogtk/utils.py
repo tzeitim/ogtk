@@ -81,11 +81,11 @@ def print_open_children():
     print(subprocess.Popen('ps -u polivar | grep ipython | wc -l', shell=True, stdout=subprocess.PIPE,stderr=subprocess.STDOUT).communicate()[0].decode())
 
 
-def tadpole_fastqs(f1, out, verbose = False, k=66, tadpole_bin = 'tadpole.sh', bm1=1, bm2=1, mincontig = "auto", mincountseed = 100, return_contigs=False):
+def tadpole_fastqs(f1, out, verbose = False, k=66, threads =1, tadpole_bin = 'tadpole.sh', bm1=1, bm2=1, mincontig = "auto", mincountseed = 100, return_contigs=False):
     ''' use tadpole from bbtools to assemble a cloud of sequences controlled by a UMI
     '''
     #tadpole.sh in=tmp/f1_ACTTCGCCAGAGTTGG_GTGCGAGAGGGTA.fastq out=mini k=66 overwrite=True bm1=1 bm2=1 mincountseed=4
-    cmd = f"{tadpole_bin} in={f1} out={out} k={k} overwrite=True bm1={bm1} bm2={bm2} t=5 -Xmx6g mincontig={mincontig} mincountseed={mincountseed} rcomp=f"
+    cmd = f"{tadpole_bin} in={f1} out={out} k={k} overwrite=True bm1={bm1} bm2={bm2} t={threads} -Xmx6g mincontig={mincontig} mincountseed={mincountseed} rcomp=f"
     if verbose:
         print(cmd)
     pp = subprocess.run(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -126,4 +126,22 @@ def tadpole_fastqs(f1, out, verbose = False, k=66, tadpole_bin = 'tadpole.sh', b
 
         return(True)
 
+def bam_coverage(bam_path, region):
+    ''' returns a panda dataframe for a given region of a given bam file
+        The hardcoded -d = 0 means to not cap the coverage (this makes this function very slow).
+    '''
+    import pysam
+    import pandas as pd
+    cached_fn =bam_path+".cached_cov.pd.pickle" 
+    if os.path.exists(cached_fn):
+        print(f'loading from cache {cached_fn}')
+        df = pd.read_pickle(cached_fn)
+        return(df)
+        
+    cov = pysam.samtools.depth("-a", "-d", "0", "-r", region, bam_path)
+    df = pd.DataFrame([i.split('\t') for i in cov.split('\n')], columns = ['chr', 'start', 'cov'])
+    df['cov'] = pd.to_numeric(df['cov'])
+    df['start'] = pd.to_numeric(df['start'])
 
+    df.to_pickle(cached_fn) 
+    return(df)

@@ -98,38 +98,39 @@ def star_map(conf_fn, fq_reads, prefix = '',  force = False, prepare_workspace =
     else:
         print("Found pre-existing aligment: %s" %(prefix+"Aligned.out.bam"))
 
-def mp2_map(ref, query, options, outfn, verbose = False):
+def mp2_map(ref, query, options, outfn, verbose = False, force = False):
         '''
         Wrapper for minimap2  and samtools commands to sort, index and binarize output
         '''
-        import re
-        rebam = re.compile('\.bam|\.sam|\.BAM|\.SAM')
-        mp2_cmd = f"minimap2 {options} {ref} {query} -o {outfn}"
-        subprocess.run(mp2_cmd.split())
+        if not os.path.exists(outfn) or force:
+            import re
+            rebam = re.compile('\.bam|\.sam|\.BAM|\.SAM')
+            mp2_cmd = f"minimap2 {options} {ref} {query} -o {outfn}"
+            subprocess.run(mp2_cmd.split())
 
-        if rebam.search(outfn):
-            import uuid
-            unique_filename = "rm_me_"+str(uuid.uuid4())
-            bam_cmd = f'samtools view -h -b {outfn} -o {unique_filename}'
-            sort_cmd = f'samtools sort {unique_filename} -o {outfn}'
-            index_cmd = f'samtools index {outfn}'
+            if rebam.search(outfn):
+                import uuid
+                unique_filename = "rm_me_"+str(uuid.uuid4())
+                bam_cmd = f'samtools view -h -b {outfn} -o {unique_filename}'
+                sort_cmd = f'samtools sort {unique_filename} -o {outfn}'
+                index_cmd = f'samtools index {outfn}'
 
-            if verbose:
-                print(bam_cmd)
-            subprocess.run(bam_cmd.split())
+                if verbose:
+                    print(bam_cmd)
+                subprocess.run(bam_cmd.split())
 
-            if verbose:
-                print(sort_cmd)
-            subprocess.run(sort_cmd.split())
+                if verbose:
+                    print(sort_cmd)
+                subprocess.run(sort_cmd.split())
 
-            if verbose:
-                print(index_cmd)
-            subprocess.run(index_cmd.split())
+                if verbose:
+                    print(index_cmd)
+                subprocess.run(index_cmd.split())
 
-            subprocess.run(f'rm {unique_filename}*'.split())
-        else:
-            print('Unsupported feature. output filename not sam/bam')
-            return(None)
+                subprocess.run(f'rm {unique_filename}*'.split())
+            else:
+                print('Unsupported feature. output filename not sam/bam')
+                return(None)
 
  
 def embos_align_reads_to_ref(name, fa_ifn, fa_ofn, ref_path, ref_name = 'hspdrv7_scgstl', mode='needleman', gapopen = 20, gapextend = 1, verbose = False, thorough = False, trim_start = None, trim_end = None, omit_ref = True, out_format = 'sam'):

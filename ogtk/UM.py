@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 from .aln_to_mat import Alg as Alg
 import random
 from .utils import *
+from .mp import *
 import gzip
 
 
@@ -194,8 +195,6 @@ class Read_Set:
         return(dists)
        
     def assemble_umis(self, threads= 10):
-        
-        temp_dir = create_tmp_dir_per_user(category = 'tadpole')
         ''' parallel call to tadpole to assemble contigs for each UMI'''
         umis =list(self.umis.keys())
         with multiprocessing.Pool(threads) as pool:
@@ -207,9 +206,19 @@ class Read_Set:
             return(cc)
             #for k,contigs in zip(umis,cc):
             #    self.umis[k].contigs = contigs
+    def export_to_fastq(self):
+        return(print(' Not implemented yet, transfer the standalone function here'))
+
+def rs_export_to_fastq(rs, outfn):
+    with gzip.open(outfn, 'wt') as fqout:
+        for umi in rs.umis.keys():
+            oumi = rs.umis[umi]
+            for (i,seq), qual in zip(enumerate(oumi.seqs), oumi.quals):
+                str_out = "\n".join([f'@{umi}_{i}', seq, "+", qual])
+                fqout.write(str_out + '\n')
 
 def create_tmp_dir_per_user(category = 'tadpole'):
-    '''creates and returns a tmp dir in a user-specific manner '''
+    '''creates and returns a tmpr in a user-specific manner '''
     username = os.environ['USER']
     tmp_dir = f"/tmp/{category}_{username}/"
     if not os.path.exists(tmp_dir):
@@ -234,22 +243,128 @@ def wrap_assemble(name, umi, k = 31, mincontig='auto', mincountseed=1, verbose =
         subprocess.run("rm {temp_dir}".split())
     return(contigs)
 
-def monitor_assembly_umi_list(umi_list, rs, pickle_ofn, k = 80, monitor_rate = 100):
+def monitor_assembly_umi_list(umi_list, rs, pickle_ofn, k = 80, monitor_rate = 100, verbose = False):
     '''Provided a umi list and a readset it attempts to assemble the umis while keeping a pickled record '''
     contigs = {}
     for umi_str in umi_list:
         umi = rs.umis[umi_str]
-        contigs[umi.umi] = wrap_assemble(umi.umi, umi, k = k)
-        if len(contigs) % monitor_rate or len(contigs) == 1:
+        contigs[umi.umi] = wrap_assemble(umi.umi, umi, k = k, verbose = verbose)
+        if len(contigs) % monitor_rate == 0 or len(contigs) == 5 or len(contigs) == 1:
             counts = [len(i) for i in contigs.values() if i]
             print(pd.Series(counts).value_counts())
             with open(pickle_ofn, 'wb') as pcklout:
                 pickle.dump(contigs, pcklout)
-    
-def qc_assembly_pickle(pickle_ifn):
-    '''Perform QCs for an assembly pickled dictionary'''
-    df = import_assembly_dict(pickle_ifn)
 
+def assemble_pickled(pickle_in, k = 80, verbose = False):
+    print(pickle_in)
+
+    rs = pickle.load(open(pickle_in, 'rb'))
+    if len(rs) ==2:
+        rs = rs[1]
+    ucounts = rs.umi_counts()
+    ucounts = ucounts[ucounts >1]
+    pickle_out = pickle_in.replace('readset', 'contigs')
+    print(pickle_out)
+    monitor_assembly_umi_list(umi_list = ucounts.index , rs = rs,
+       pickle_ofn = pickle_out,  k = k, monitor_rate = 100, verbose = verbose)
+
+    
+def qc_compare_raw_contigs(raw_bam_path, contig_bam_path, region, left, right, patches_bed = None, png_out = None):
+
+    df_raw = bam_coverage(raw_bam_path, region)
+    df_contig = bam_coverage(contig_bam_path, region)
+    
+    f, ax = plt.subplots(dpi=100, figsize=(20,5))
+   
+    raw = ax.plot(df_raw['start'], df_raw['cov']/np.sum(df_raw['cov']), linewidth=1)
+    cont = ax.plot(df_contig['start'], df_contig['cov']/np.sum(df_contig['cov']), linewidth=1)
+    ax.set_xlim(left = left, right = right)
+    
+    if patches_bed != None:
+        from matplotlib import patches
+        features = pd.read_table(patches_bed, header = None, names= ["chrom", "start", "end", "name"])
+        features['i'] = range(len(features.index))
+        feat_patches = features[['i','start', 'end']].apply(lambda x: alternating_patches(x, baseline=-0.0001), axis =1)
+
+        for rect in feat_patches:
+          ax.add_patch(rect)
+
+
+    ax.title.set_text(os.path.basename(raw_bam_path.replace('bam','')))
+#    f.suptitle(os.path.basename(raw_bam_path.replace('bam','')), y = 1.05, fontsize=12)
+    ax.grid(True, linewidth=0.51, linestyle=':')
+    ax.legend(['raw', 'assembled'], bbox_to_anchor = (1.0, 0.5))
+    box = ax.get_position()
+    ax.set_position([0.3, 1.0, box.width*0.3, box.height])
+    ax.set_xlabel('chrom coord')
+    ax.set_ylabel('fraction')
+
+
+    if png_out != None:
+         plt.savefig(png_out, bbox_inches='tight', dpi=150) #, loc=(1.1, 0.5))
+         plt.close()
+    else:
+        return((f, ax, raw, cont))
+    
+def qc_assembly_pickle(pickle_ifn, png_out = None):
+    '''Perform QCs for an assembly pickled dictionary'''
+    from scipy.stats import gaussian_kde
+
+
+    df = import_assembly_dict(pickle_ifn)
+    bc = os.path.basename(pickle_ifn)
+    
+    if len(df.index) <=1:
+        print(f'file {pickle_ifn} seems to contain no data. its data frame only has {len(df.index)} rows')
+        return(None)
+    qc_plot = plt.subplots(1, 2, figsize=(15,5))
+    fig, (ax1, ax2) = qc_plot
+    fig.suptitle(bc)
+
+    # Calculate the point density
+    xy = np.vstack([df['cov'], df['length']])
+    z = gaussian_kde(xy)(xy)
+    # Sort the points by density, so that the densest points are plotted last
+    idx = z.argsort()
+
+    ax1.title.set_text('Contig length histogram')
+    ax1.set_xlabel('Contig length (bp)')
+    ax1.set_ylabel('Counts')
+    ax1.grid(True, linewidth=0.51, linestyle=':')
+
+    ax2.title.set_text('Cov vs Length')
+    ax2.set_xlabel('Contig length (bp)')
+    ax2.set_ylabel('(log) Coverage')
+    ax2.grid(True, linewidth=0.51, linestyle=':')
+
+    ax1.hist(sorted(df['length']))
+    ax2.set_yscale('log')
+    ax2.scatter(df['length'][idx], df['cov'][idx], c=z[idx], s=100, edgecolor=None)
+
+    if png_out != None:
+        plt.savefig(png_out, bbox_inches='tight', dpi=100) #, loc=(1.1, 0.5))
+        plt.close()
+    else:
+        return(qc_plot)
+
+def map_assembly_pickle(pickle_ifn, ref):
+    '''loads a pickled contig dict, exports it to fa and maps it using minimap2 '''
+    def contigdf_to_fasta(x):
+        umi, i, seq = x
+        return('\n'.join([f'>{umi}_{i}', seq]))
+
+    fa_out_path = pickle_ifn.replace('pickle', 'fa')
+    bam_out_path = pickle_ifn.replace('pickle', 'bam')
+
+    print(fa_out_path)
+    print(bam_out_path)
+
+    df = import_assembly_dict(pickle_ifn)
+    if len(df.index) >1:
+        with open(fa_out_path, 'wt') as outfa: 
+            for i in df[['umi','i','seq']].apply(lambda x: contigdf_to_fasta(x), axis =1 ).to_list():
+                outfa.write(i+'\n')
+        mp2_map(ref = ref, query = fa_out_path, options = '-a --cs --splice --sam-hit-only', outfn = bam_out_path, force = True)
 
 def import_assembly_dict(pickle_ifn):
     pcklhdl = open(pickle_ifn, 'rb')
@@ -266,6 +381,17 @@ def import_assembly_dict(pickle_ifn):
     df = pd.DataFrame.from_records(records, columns=["umi", "i", "length", "cov", "gc", "seq"])
     return(df)
                       
+def subrs(name,umilist, rs, keep_intact = False):
+    '''Returns a new readset object from a given readset with the option of keeping the original readset intact or to remove the subset '''        
+    #TODO check for a more efficient way to not need to copy and delete when not keeping intact.
+    subrs = Read_Set(name = name)
+    for umi in umilist:
+        oumi = rs.umis[umi]
+        subrs.umis[oumi.umi] = copy.deepcopy(oumi)
+        if not keep_intact:
+            del oumi
+    print(f'extracted {len(subrs.umis)}')
+    return(subrs)
         
 
 class UM:
@@ -1186,3 +1312,17 @@ def rev_comp(seq):
 #         pdb.set_trace()
 
 
+def alternating_patches(x, baseline =-0.0002, delta= 0.0001):
+    ''' helper function to draw rectangles after applying it on a df usually via lambda'''
+    from matplotlib import patches
+    index, left, right = x
+    sign = 1 if index %2 ==0 else -1
+    delta = delta * sign    
+    
+    xcoords = [ [left, right] , [right, left]]
+    ycoords = [ [baseline + delta, baseline + delta], [baseline, baseline]]
+ 
+    xcoords = np.array(xcoords).flatten()
+    ycoords = np.array(ycoords).flatten()
+    coords = [i for i in zip(xcoords, ycoords)]
+    return(patches.Polygon(np.array(coords), fill = False))
