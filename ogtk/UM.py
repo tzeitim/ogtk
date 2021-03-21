@@ -599,7 +599,7 @@ def bam_from_merged_collapse_UMI(bam_ifn, end=None, region = None):
     print(f"\r{i} reads were processed")
     return(readset)
 
-def bam10x_collapse_UMI(bam_ifn, umi_start=0, umi_len=12, end=None):
+def bam10x_collapse_UMI(bam_ifn, umi_start=0, umi_len=28, end=None, use_uncorrected = False):
     '''
     Process a BAM file and collapse reads by UMI making use of their consensus seq
     '''
@@ -613,13 +613,22 @@ def bam10x_collapse_UMI(bam_ifn, umi_start=0, umi_len=12, end=None):
     bam_it = itertools.islice(bamfile, 0, end)
 
     for i,bam in enumerate(bam_it):
-        if bam.has_tag("UB") and bam.has_tag("CB"):
+        if len(readset.umis)%10000 == 0:
             print("\r%s"%i, end='')
+
+        if bam.has_tag("UB") and bam.has_tag("CB"):
             read = bam.seq
-            umi = bam.get_tag("CB")[0:-2]+bam.get_tag("UB")
             seq = bam.seq
+            umi = bam.get_tag("CB") + bam.get_tag("UB")
             readset.add_umi(umi, seq, alignment=bam, qual = bam.qual)
-        
+
+        elif use_uncorrected:
+            if bam.has_tag("UR") and bam.has_tag("CR"):
+                read = bam.seq
+                seq = bam.seq
+                umi = bam.get_tag("CR") + bam.get_tag("UR")
+                readset.add_umi(umi, seq, alignment=bam, qual = bam.qual)
+
     print(f"\r{i} reads were processed")
     return(readset)
 
