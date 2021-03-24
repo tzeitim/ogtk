@@ -10,6 +10,7 @@ import itertools
 import regex
 import numpy as np
 import pandas as pd
+import pdb
 
 
 def extract_intid_worker(args):
@@ -223,7 +224,8 @@ def preprocessing_split_10xfastq_by_intid(valid_intids, intid_len, fq1, fq2, anc
     for i in valid_intids:
         out_files_dic2[i].close()
     
-def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid2_R2_strand = None, threads = 100, end = 5000, ranked_min_cov = 5, consensus = False, umi_errors = 1, debug = False, jobs_corr=10):
+def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid2_R2_strand = None, threads = 100, end = 5000, ranked_min_cov = 5, consensus = False, umi_errors = 1, debug = False, jobs_corr=10, alg_gapopen = 20, alg_gapextend =1, correction_dict_path = None, correction_dict = None, trimming_pattern = None):
+    
     ''' Once 10x fastqs (fqm) have been merged and split by integration,
         process them into a table of barcodes for downstream analysis on R
         Two modalities to choose for a representative allelle: ranked (consensus = False) or consensus (consensus = True)'''
@@ -236,6 +238,9 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
  
     anchor2 = bint_db['anchor_plasmid2']
     rxanch2 = regex.compile("ANCHOR2{e<=3}".replace("ANCHOR2", anchor2))
+
+    ## for 10x
+    umi_len = 28
     
     if not os.path.isdir(outdir):
         os.makedirs(outdir, exist_ok=True)
@@ -260,8 +265,13 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
 
     yaml_out['desc']['alignment'] = "Parameters for the pairwise alignment of every recovered allele and the reference. The corrected files fix the issue of duplicated fasta entry names"
 
+    
+    alg_mode = 'needleman'
     yaml_out['alignment'] = {}
     yaml_out['alignment']['fa_correctedm'] = fa_correctedm
+    yaml_out['alignment']['alg_mode'] = alg_mode
+    yaml_out['alignment']['alg_gapopen'] = alg_gapopen
+    yaml_out['alignment']['alg_gapextend'] = alg_gapextend
 
     # more outfiles
     merged_tab_out =   outdir + '/{}_binned_barcodes_10x.txt'.format(name)
@@ -275,84 +285,138 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
     yaml_out['lineage']['allele_reps'] = allele_reps_fn
     yaml_out['lineage']['merged_tab'] = merged_tab_out
     yaml_out['lineage']['merged_full'] = merged_tab_out.replace('.txt','_full.txt')
+   
+    # Molecule data
+    umi_counts_ofn = outdir + '/{}_umi_counts.txt'.format(name)
+    yaml_out['mols'] = {}
+    yaml_out['mols']['umi_len'] = umi_len
+    yaml_out['mols']['umi_correction'] = umi_errors
+    yaml_out['mols']['counts'] = umi_counts_ofn 
     
-    # save run settings 
-    yaml_stream = open(yaml_out_fn, 'w')
-    pyaml.yaml.dump(yaml_out, yaml_stream)
-    yaml_stream.close() 
-    print("Run settings saved to config card:{}".format(yaml_out_fn))
-
     if end != None:
         print("Warning: end is not None; You are not processing all the data", end)
 
     # do a pass on the raw fastqs and group reads by UMI
-    ## for 10x
-    umi_len = 28
+
+    rssc = ogtk.UM.fastq_collapse_UMI(fqm, umi_len = umi_len, end = end, keep_rid = True, trimming_pattern = trimming_pattern)
     
+    print(f"loaded rs with trimming. total umis: {len(rssc.umis)}")
 
-    rsm = ogtk.UM.fastq_collapse_UMI(fqm, umi_len = umi_len, end = end, keep_rid = True)
+    # store the first round of molecule stats
+    #TODO the saturation stats should be outsourced somehow
+    yaml_out['mols']['saturation'] = {}
+    yaml_out['mols']['saturation']['unmerged'] = {}
+    yaml_out['mols']['nreads'] = {}
+    yaml_out['mols']['nreads']['umerged'] = rssc.nreads
+    yaml_out['mols']['desc'] = "number of umis whose rank1 sequence is a >= [1, 2, 3, 4, 5, 10, 100, 1000]"
+    yaml_out['mols']['saturation']['unmerged']['uncorrected'] = rssc.allele_saturation()
 
-    print("Correcting umis with a hdist of {}".format(umi_errors))
-    rsm.correct_umis(errors = umi_errors , silent = False, jobs = jobs_corr)
+
+    if umi_errors >0:
+        print("Correcting umis with a hdist of {}".format(umi_errors))
+        rssc.correct_umis(errors = umi_errors , silent = False, jobs = jobs_corr)
+        yaml_out['mols']['saturation']['unmerged']['corrected'] = rssc.saturation()
+    else:
+        print("Not correcting umis")
+    
     # TODO this is really important for 10x, long reads
     # The first step to call an allele consensus is to get a representative sequence for a given UMI
     # thus by_alignment == False to get a ranked based representative
-    rsm.consensus = ogtk.UM.do_fastq_pileup(rsm, min_cov = ranked_min_cov, threads = threads, trim_by = None, by_alignment = False)
-    # the second step is to call a consensus *of the representative molecules*
-   
+    rssc.consensus = ogtk.UM.do_fastq_pileup(rssc, min_cov = ranked_min_cov, threads = threads, trim_by = None, by_alignment = False)
     # save binary
+
+    print(f"called consensuses {len(rssc.consensus)}")
+
     with open(pickled_readset, 'wb') as pcklout:
-        pickle.dump(rsm, pcklout)
+        pickle.dump(rssc, pcklout)
     # determine cells based on the 10x bc
+ 
+    # the second step is to call a consensus *of the representative molecules*
+    celldb = {} #stores the candidate representative sequences per cell
+    cell_umis = {} #stores a list of umis that correspond to a given cell
 
-    celldb = {}
-    cell_umis = {}
+    # correction via correction dictionaries
+    if correction_dict_path != None or correction_dict != None:
+        hits_dic = []
+        print(f'Using cellranger dictionary', end = "...")
+        if correction_dict_path != None or correction_dict == None:
+            print(f'Loading correction dictionaries {correction_dict_path}')
+            crd = pickle.load(open(correction_dict_path, 'rb'))
+        elif correction_dict != None:
+            print("using provided")
+            crd = correction_dict
 
-    for tenex_umi in rsm.consensus.keys():
-        foc_cell = tenex_umi[0:16]
-        if not any([i == "N" for i in foc_cell]):
-            # TODO - whitelist cells
-            if celldb.get(foc_cell, 0) == 0:
-                celldb[foc_cell] = []
-                cell_umis[foc_cell] = []
-            # expand reads
-            cell_umis[foc_cell].append(tenex_umi) ## remove?
-            celldb[foc_cell].append(rsm.consensus[tenex_umi]) 
+        for tenex_umi in rssc.consensus.keys():
+            foc_cell = tenex_umi[0:16]
+            if foc_cell in crd['cell_barcodes'].keys():
+                hits_dic.append(1)
+                # convert cells to a cellrager-corrected cell barcode
+                foc_cell = crd['cell_barcodes'][foc_cell]
+                if celldb.get(foc_cell, 0) == 0:
+                    celldb[foc_cell] = []
+                    cell_umis[foc_cell] = []
+                cell_umis[foc_cell].append(tenex_umi) ## remove?
+                celldb[foc_cell].append(rssc.consensus[tenex_umi]) 
+            else:
+                hits_dic.append(0)
+        print(f'correction stats {sum(hits_dic)/len(hits_dic)}')
+    else:
+        for tenex_umi in rssc.consensus.keys():
+            foc_cell = tenex_umi[0:16]
+            if not any([i == "N" for i in foc_cell]):
+                if celldb.get(foc_cell, 0) == 0:
+                    celldb[foc_cell] = []
+                    cell_umis[foc_cell] = []
+                # expand reads
+                cell_umis[foc_cell].append(tenex_umi) ## remove?
+                celldb[foc_cell].append(rssc.consensus[tenex_umi]) 
 
     # This might change
-    msa_jobs = jobs_corr
+    msa_jobs = 50
     naive = False
-    
-    pool = multiprocessing.Pool(threads)
+ 
+    print(f"filled celldb {len(celldb)}")
+   
+    #pool = multiprocessing.Pool(threads)
     print("Calling allele consensus by aligning different UMI-controlled molecules per each cell. ")
     # fname, name, seqs, ranked_min_cov, jobs = args
     job_iter = []
 
     
     # TODO how can we filter good candidates?
-    if debug:
-        import pdb
-        import IPython
-        pdb.set_trace()
-    
     
     allele_reps = open(allele_reps_fn, "w")
-    for cell in celldb.keys():
-        rep_seqs = celldb[cell]
-        tenex_umis = cell_umis[cell]
-        cell_name = cell+"_reps"+str(len(tenex_umis))
-        for allele,umi_counts in zip(rep_seqs, tenex_umis):
-            #TODO add a real count metriccounts = int(umi_counts.split("_")[1])
-            counts = 1
-            umi = umi_counts[15:28]
-            reps = []
-            for times in range(counts):
-                reps.append(allele)
-            job_iter.append((outdir, cell_name, reps, ranked_min_cov, msa_jobs, naive))
-            allele_reps.write("{}\n".format("\t".join([cell, str(counts), umi, allele])))
+    cc = []
+    with open(allele_reps_fn, "w") as allele_reps:
+        for cell in celldb.keys():
+            repseqs_count_list = celldb[cell]
+            tenex_umis = cell_umis[cell]
+            if len(repseqs_count_list)>1:
+                df = pd.DataFrame(repseqs_count_list, columns = ('seqs','counts'))
+                df['raw_umi'] = tenex_umis
+                df['cell'] = cell
+                # TODO how to treat ties?
+                top = df['seqs'].value_counts().head(1)
+                cc.append((cell, str(top.index.to_list()[0])))
+                #get rep seq per cell and its corresponding counts.
+                #rep_seq, counts = repseqs_count_list[0]
+            else:
+                rep_seq, counts = repseqs_count_list[0]
+                cc.append((cell, rep_seq))
+
+            #cell_name = cell+"_reps"+str(len(tenex_umis))
+            cell_name = cell #+"_reps"+str(len(tenex_umis))
+            # 1 - keep a record on disk of the different candidates and their counts
+            # 2 - append to cc the "best" candidate for a given cell 
+            ##for allele, (umi, counts) in zip(rep_seqs, tenex_umis):
+            ##    #TODO add a real count metric
+            ##    #counts = int(umi_counts.split("_")[1])
+            ##    umi = umi[0][16:]
+            ##    reps = [allele for i in range(counts)]
+            ##    job_iter.append((outdir, cell_name, reps, ranked_min_cov, msa_jobs, naive))
+            ##    #allele_reps.write("{}\n".format("\t".join([cell, str(counts), umi, allele])))
+            ##    allele_reps.write("\t".join([cell, str(counts), umi, allele])+'\n')
         
-    allele_reps.close()
-    
     # used for debugging
     if False:
         debug_iter = [i for i in job_iter if len(i[2])>3 ]
@@ -360,9 +424,11 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
         for i in debug_iter:
             ogtk.UM.mafft_consensus(i)
 
-    cc = pool.map(ogtk.UM.mafft_consensus, iter(job_iter))
-    pool.close()
-    pool.join()
+    #cc = pool.map(ogtk.UM.mafft_consensus, iter(job_iter))
+    #pool.close()
+    #pool.join()
+ 
+    print(f"filled cc {len(cc)}")
     
     cell_consensus = dict(cc)
     cons_out = open(consensus_tab_out, 'w') 
@@ -370,22 +436,44 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
         cell_cons = cell_consensus[cell]
         cons_out.write("\t".join([cell, cell_cons])+'\n')
     cons_out.close() 
+   
+    if len(cell_consensus.keys()) == 0 :
+        yaml_out['success'] = False
+        print(f'Failed to generate representative sequences for each cell')
+        return(None)
+    else:
+        print(f'Success')
+        yaml_out['success'] = True
+ 
     ## make sure to include the intid on the reference to help the alignment
 
+    print("creating fasta ref")
     create_fasta_ref(ref_name, ref_seq, ref_path)
 
-    alg_mode = 'needleman'
-    alg_gapopen = 20
-    alg_gapextend = 1
 
-    align_reads_to_ref(name = outdir + "/"+intid, fa_ofn = fa_correctedm, 
+    print("aligning reads tp ref")
+    align_reads_to_ref(name = outdir+"/"+intid, fa_ofn = fa_correctedm, 
                             consensus_dict = cell_consensus, ref_path = ref_path, 
                             ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
                             gapextend = alg_gapextend)
 
-    compute_barcode_matrix_merged(fa_ifn = fa_correctedm, tab_out= merged_tab_out, bint_db_ifn = bint_db_ifn, do_rc=False)
 
-    
+    print(f"featurizing sequences to {merged_tab_out}")
+    compute_barcode_matrix_merged(fa_ifn = fa_correctedm, tab_out = merged_tab_out, bint_db_ifn = bint_db_ifn, do_rc = False)
+   
+    # save the count information for the UMIs 
+    with open(umi_counts_ofn, 'w') as fh:
+        fh.write(f'count\tumi\n')
+        counts = rssc.umi_counts()
+        for count,umi in zip(counts, counts.index):
+            fh.write(f'{count}\t{umi}\n')
+                
+    # save run settings 
+    yaml_stream = open(yaml_out_fn, 'w')
+    pyaml.yaml.dump(yaml_out, yaml_stream)
+    yaml_stream.close() 
+    print("Run settings saved to config card:{}".format(yaml_out_fn))
+
     
 def align_reads_to_ref(name, fa_ofn, consensus_dict, ref_path, ref_name = 'hspdrv7_scgstl', mode='needleman', gapopen = 20, gapextend = 1, verbose = False):
     pwalg_in = '{}_in_pair_algn.fa'.format(name)
@@ -395,7 +483,6 @@ def align_reads_to_ref(name, fa_ofn, consensus_dict, ref_path, ref_name = 'hspdr
         outf.write(">{}\n{}\n".format(k,v))
     outf.close()
 
-    print(gapopen)
     if mode == 'waterman':
         'water -gapextend 1 -gapopen 20 -datafile EDNAFULL -awidth3=100 -aformat3 fasta  -asequence ptol2-hspdrv7_scgstl.fa -bsequence msa_in.fa  -aaccshow3 yes -outfile ww.fasta -snucleotide2  -snucleotide1' 
     if mode == 'needleman':
@@ -436,19 +523,30 @@ def compute_barcode_matrix_merged(fa_ifn, tab_out,  bint_db_ifn, tab_full_out = 
     full_out = open(tab_full_out, 'w')
     #for i in range(0, int(len(fa_entries)/2), 2):
     #### !!!!!
+    hits_trash = []
+    trashed = []
     for i in range(0, len(fa_entries), 2):
             ref_seq  = FF[i+1][:].upper() if not do_rc else ogtk.UM.rev_comp(FF[i+1][:].upper()) 
             read_seq = FF[i][:].upper() if not do_rc else ogtk.UM.rev_comp(FF[i][:].upper()) 
 
             lineage_vector = get_lineage_vector((ref_seq, read_seq, bint_db_ifn, 'merged'))
 
-            if lineage_vector != "trash":
+            if "trash" not in lineage_vector:
+                hits_trash.append(1)
                 flineage_vector = '\t'.join(lineage_vector)
 
                 outf.write('{}\t{}\n'.format(fa_entries[i], flineage_vector))
                 full_out.write('{}\n'.format('\t'.join(["ref",  fa_entries[i], ref_seq, flineage_vector])))
                 full_out.write('{}\n'.format('\t'.join(["read", fa_entries[i], read_seq, flineage_vector])))
+            else:
+                trashed.append(lineage_vector)
+                hits_trash.append(0)
 
+    if len(trashed) >1:
+        trashed = pd.Series(trashed)
+        print(trashed.value_counts(normalize=True))
+        print(trashed.value_counts(normalize=False))
+        print(f'not trashed {sum(hits_trash)}/{len(hits_trash)} {sum(hits_trash)/len(hits_trash):.2f}')
     full_out.close()
     outf.close()
 
@@ -479,20 +577,28 @@ def make_unique_fa_ref_entries(fa_ifn, fa_ofn, ref_name = 'hspdrv7_scgstl'):
     ofa.close()
    
 def get_lineage_vector(args):
+    ''' with a given reference and red sequence pair, returns a lineage vector making use of a barcode interval db (bintdb)'''
     if len(args) <5:
         ref_seq, read_seq, bint_db_ifn, read_end, = args
         debug = False
     if len(args) == 5:
         ref_seq, read_seq, bint_db_ifn, read_end, debug = args
+    # mismatch filtering threshold
     max_mm = 50 
     bint_db = pyaml.yaml.load(open(bint_db_ifn), Loader=pyaml.yaml.FullLoader)
-    last_bint_len = 27
+    
+
+    last_bint_len = np.diff(list(bint_db['intervs'].values())[-1])[0]
+
+    debug= True
+
     ins = 0
     weird = 0
     mis = 0
     de = 0
     bint_dic = {}
     bint_keys = [i for i in bint_db['intervs'].keys()]
+
     # find if trimming the read is possible and do it if it is
     anchor1 = regex.compile("({}){{e<=3}}".format(bint_db['anchor_plasmid'].upper()))
     anchor2 = regex.compile("({}){{e<=3}}".format(bint_db['anchor_plasmid2'].upper()))
@@ -507,46 +613,50 @@ def get_lineage_vector(args):
         ref_seq = ref_seq[match1.span()[0]:]
 
     if not (match1 or match2):
-        return('trash')
+        return('trash-unmatched')
     
     for bint in bint_keys:
         bint_dic[bint] = Bint(name=bint)
 
-    for i, (ref, read) in enumerate(zip(ref_seq, read_seq)):
-        ref = ref.upper()
-        read = read.upper()
-        ref = ref.replace('N', '-') 
-        read = read.replace('N', '-') 
-        cur_bint = return_bint_index(bint_db['intervs'], i, last_bint_len)
-        if cur_bint != 0:
-            if ref == "-" and read == "-":
+    # Since ref and read seqs have been aligned we can iterate through them in parallel
+    # for each operation found (mis, ins, del) create a record ["type", position, "character"]
+    for i, (ref_chr, read_chr) in enumerate(zip(ref_seq, read_seq)):
+        ref_chr = ref_chr.upper()
+        read_chr = read_chr.upper()
+        ref_chr = ref_chr.replace('N', '-') 
+        read_chr = read_chr.replace('N', '-') 
+        cur_bint = return_bint_index(bint_l=bint_db['intervs'], current_position = i, last_bint_len = last_bint_len)
+        if cur_bint != 0: # 0 means that it couldn't find an overlapping bint
+            if ref_chr == "-" and read_chr == "-":
                 weird+=1
             else:
-                # insertions
-                if ref == "-":
+                ########## insertions
+                if ref_chr == "-":
                     ins+=1
                     # update the bint db by pushing down the coords by 1
                     for j in range(bint_keys.index(cur_bint), len(bint_keys)):
                         next_bint = bint_keys[j]
                         bint_db['intervs'][next_bint][0]+= 1
                     # save integration
-                    bint_dic[cur_bint].ins.append(['i', i, read])
-                # deletions
-                if read == "-":
+                    bint_dic[cur_bint].ins.append(['i', i, read_chr])
+                ########## deletions
+                if read_chr == "-":
                     de+=1
-                    bint_dic[cur_bint].dele.append(['d', i, ref])
-                # mismatches
-                if read != ref and ref != '-' and read != '-':
+                    bint_dic[cur_bint].dele.append(['d', i, ref_chr])
+                ########## mismatches
+                if read_chr != ref_chr and ref_chr != '-' and read_chr != '-':
                     mis+=1
-                    bint_dic[cur_bint].mis.append([ref, str(i), read])
+                    bint_dic[cur_bint].mis.append([ref_chr, i, read_chr])
     silent = True
     if silent == False:
         print("ins:", ins, "del:", de, "weird:", weird, "mis:", mis)
 
-    # Normalize coordinates relative to  bint:
+    # At this point all Bint objects inside the dictionary should have been filled up
+    # Start and end class atributes intialization 
     # - update coordinate data inside the class
+    #   the start coordinate is specified using the recorded 'intervs' list using each ith entry
+    #   the end coordinate is specified using the recorded 'intervs' list using i+1th for ith
     for bint in bint_dic.keys():
-
         bint_dic[bint].start = bint_db['intervs'][bint][0]
         if bint_keys.index(bint) == len(bint_keys)-1:
             # last case
@@ -555,15 +665,17 @@ def get_lineage_vector(args):
             next_bint = bint_keys[bint_keys.index(bint) + 1]
             bint_dic[bint].end = bint_db['intervs'][next_bint][0]-1
 
-    # - normalize
+    # Update coordinates of operations (ins, del, mis) relative to bint.start and bint.end:
     for bint in bint_dic.values():
-        bint.normalize_coords()
+        bint.transfer_coords_to_operation_records()
 
+    # TODO create class that stores Bints and internalize this functionality 
+    # when sequencing was paired end and reads couldn't be merged
     ## discard any non covered bint with the appropiate flag 
-    # insertions are accounted for by the updated coords
+    ## considering that insertions have already been accounted for by the updated coords
 
-    # otherwise is merged
     if read_end == 'read1' or read_end == 'read2':
+        # otherwise read_end == 'merged'
         bint_keys = [i for i in bint_dic.keys()]
         critical_pos = bint_db['read_length'][read_end] if read_end == 'read1' else len(ref_seq)-bint_db['read_length'][read_end]
         discard_index = bint_keys.index( return_bint_index(bint_db['intervs'], critical_pos, last_bint_len))#TODO change previus line to something more elegant
@@ -603,12 +715,13 @@ def get_lineage_vector(args):
         print("filterred out clear excisions/NA")
         print(bint_strings)
 
-    if any([i == "trash" for i in bint_strings]):
-        return("trash") 
+    if any(["trash" in i for i in bint_strings]):
+        return("trash-gen") 
+
     ## TODO How to get rid of uncovered bints that look like excisions?
     ## the logic is to assign as NAs any stretch of excisions for which we have no evidence of it's end, e.g. it reaches the last bint 
     if not match2:
-        # this means that we have no evidence for a real exicion, therefore turn into NAs the last observed excisions AND
+        # this means that we have no evidence for a real excision, therefore turn into NAs the last observed excisions AND
         # the next to last barcode
         corrected = False
         for i in range(len(bint_strings))[::-1]:
@@ -631,9 +744,8 @@ def return_bint_index(bint_l, current_position, last_bint_len):
     keys = [i for i in bint_l.keys()]
     for i in range(len(keys)):
         key  = keys[i]
-        # Magical number warning = 27bp
         if i == (len(keys)-1):
-            if current_position >= bint_l[keys[i]][0] and current_position <= bint_l[keys[i]][0] + last_bint_len :
+            if current_position >= bint_l[keys[i]][0] and current_position <= bint_l[keys[i]][0] + last_bint_len:
                 return(key)
         else:
             if current_position >= bint_l[keys[i]][0] and current_position <=bint_l[keys[i+1]][0]:
@@ -688,7 +800,7 @@ def consecutive_to_string(vec):
     polyG = regex.compile("GGGGGGGG")
     for i in range(len(bc_chains)):
         if polyA.search(bc_chains[i]) or polyG.search(bc_chains[i]):
-            return("trash")
+            return("trash-poly")
     return(''.join(bc_chains))    
 
 
@@ -699,6 +811,7 @@ class Bint():
         self.dele = []
         self.ins = []
 
+        # start and end are defined once a locus has been screened and they store the real start end of the barcode interval
         self.start = None
         self.end = None
     def print_bc_vectors(self):
@@ -707,11 +820,15 @@ class Bint():
         print(self.dele)
         print(self.ins)
 
-    def normalize_coords(self):
+    def transfer_coords_to_operation_records(self):
+        """ transfer the coordinates from .start and .end into the raw coordintaes of each operation """
+        # mismatches
         for i in range(len(self.mis)):
-            self.mis[i][1] = str(int(self.mis[i][1]) - self.start)
+            self.mis[i][1] = str(self.mis[i][1] - self.start)
+        # deletions
         for i in range(len(self.dele)):
             self.dele[i][1] = str(self.dele[i][1] - self.start)
+        # insertions
         for i in range(len(self.ins)):
             self.ins[i][1]= str(self.ins[i][1] - self.start)
 
