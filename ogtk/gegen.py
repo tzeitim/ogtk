@@ -178,7 +178,6 @@ def generate_correction_dictionaries(sitedb_yaml, FORCE = False, verbose = False
     import itertools
     import pickle 
     import pyaml
-
     import os
 
     sitesdb = pyaml.yaml.load(open(sitedb_yaml), Loader = pyaml.yaml.Loader)
