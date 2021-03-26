@@ -219,3 +219,56 @@ def merge_10x_fastq_dir(indir, force=False, read1_pattern = "_R1_"):
             print(r3)
             #print(mbam_path)
      
+def generate_correction_dictionaries(pickle_ofn, path_to_bam, force = False, verbose = False):
+    '''
+    Generates a cellbarcode correction dictionary based on the cellranger barcoded BAM tags
+    TODO: there is a small fraction of uncorrected cell barcodes that seem to map to more than one corrected cell barcode
+    '''
+    import pysam
+    import itertools
+    import pickle 
+    import pyaml
+    import os
+
+    # load a pre-computed dictionary of found
+    if os.path.exists(pickle_ofn) and not force:
+        dd =  pickle.load(open(pickle_ofn, 'rb')) 
+        print(dd['qc'])
+        return(dd)
+    else:
+    # make it if forced or not found
+        bam = pysam.AlignmentFile(path_to_bam)
+        cbc_corr = []
+        umi_corr = []
+
+        if verbose:
+            print(f'Opening bam file {path_to_bam} to screen for correction pairs', end = '....')
+
+        for read in bam:
+            if read.has_tag('CR') and read.has_tag('CB'):
+                cbc_corr.append((read.get_tag('CR'), read.get_tag('CB')))
+            if read.has_tag('UR') and read.has_tag('UB'):
+                umi_corr.append((read.get_tag('UR'), read.get_tag('UB')))
+
+        if verbose:
+            print(f'done')
+
+        dict_cbc = dict(cbc_corr)
+        dict_umi = dict(umi_corr)
+
+        # quick QCs
+        before_dict_cbc = set([i[1] for i in cbc_corr])
+        before_dict_umi = set([i[1] for i in umi_corr])
+
+        qc_str = f'Missed barcode cases = {len(before_dict_cbc) - len(set(dict_cbc.values()))}'
+        qc_str = qc_str + f'Missed umi cases = {len(before_dict_umi) - len(set(dict_umi.values()))}'
+
+        print(qc_str)
+
+        dd = {'cell_barcodes':dict_cbc, 'umi_barcodes':dict_umi, 'qc':qc_str}
+        with open(pickle_ofn, 'wb') as handle:
+            pickle.dump(dd, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+        return(dd)
+
+

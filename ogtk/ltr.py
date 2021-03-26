@@ -590,8 +590,6 @@ def get_lineage_vector(args):
 
     last_bint_len = np.diff(list(bint_db['intervs'].values())[-1])[0]
 
-    debug= True
-
     ins = 0
     weird = 0
     mis = 0
@@ -615,8 +613,8 @@ def get_lineage_vector(args):
     if not (match1 or match2):
         return('trash-unmatched')
     
-    for bint in bint_keys:
-        bint_dic[bint] = Bint(name=bint)
+    for i,bint in enumerate(bint_keys):
+        bint_dic[bint] = Bint(name=bint, index=i)
 
     # Since ref and read seqs have been aligned we can iterate through them in parallel
     # for each operation found (mis, ins, del) create a record ["type", position, "character"]
@@ -712,7 +710,7 @@ def get_lineage_vector(args):
     bint_strings = [bint.generate_barcode_string() for bint in bint_dic.values()] 
 
     if debug:
-        print("filterred out clear excisions/NA")
+        print("filtered out clear excisions/NA")
         print(bint_strings)
 
     if any(["trash" in i for i in bint_strings]):
@@ -805,11 +803,12 @@ def consecutive_to_string(vec):
 
 
 class Bint():
-    def __init__(self, name):
+    def __init__(self, name, index):
         self.name = name
         self.mis = []
         self.dele = []
         self.ins = []
+        self.index = index
 
         # start and end are defined once a locus has been screened and they store the real start end of the barcode interval
         self.start = None
@@ -835,12 +834,15 @@ class Bint():
     def generate_barcode_string(self):
         ''' '''
         if self.start == None:
-            raise ValueError('Unnormalized coordinates for indels. Update bints first and normalize')
+            raise ValueError('Uncorrected coordinates for indels. Update bints first and transfer the correct coordinate to the operations')
         mismatches = self.gen_mismatch_string()
         #mismatches = ''
         insertions = self.gen_insertion_string()
         deletions =  self.gen_deletion_string()
-        return(".".join([mismatches, insertions, deletions]))
+        allele_string = ".".join([mismatches, insertions, deletions])
+        return(allele_string)
+        #TODO return the bint index as part of the barcode
+        #return(f"b{self.index}@" + allele_string)
 
     def gen_mismatch_string(self):
         if len(self.mis)>1:
@@ -1047,3 +1049,59 @@ def mltb_bin_alleles(name, intid, intid2_R2_strand, config_card_dir, outdir, fq1
     print("Run settings saved to config card:\n{}".format(yaml_out_fn))
 
    
+def compute_dist_mat(mat, bcs, bias, cores = 50, dont_include = 3):
+    cores = int(cores)
+    #print(f"Warning: FORCED for  using {cores} cores")
+    print(f'got {len(bcs)} barcodes')
+    if cores == 0:
+        print("zero cores")
+        cc = similarity_score((mat, bcs, bias, dont_include)) 
+        return(cc)
+    else:
+        print("pooling cores")
+        chunks = np.array_split(bcs, cores)
+        it = iter([(mat, chunk, bias, dont_include) for chunk in chunks])
+        pool = multiprocessing.Pool(int(cores))
+        cc = pool.map(similarity_score, it)
+        pool.close()
+        pool.join()
+        cum_mat = cc[0]
+        for i in cc[1:]:
+            cum_mat = cum_mat + i
+        return(cum_mat)
+
+def similarity_score(args):
+    from scipy import sparse
+    mat, bcs, bias, dont_include = args
+    first = True
+    #bias = np.array([1.25, 1.25, 1.25, 1.25, 0.25, 0.25, 0.25 , 0.25, 0.25, 0.25])
+    #bias = np.array([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
+    w = 0.1
+    #bias = np.array([w, w, w, w, w, w, w, w, w, w])
+    #bias = np.array([5*w, 5*w, 5*w, 5*w, 5*w, w, w, w, w, w])
+    #bias = np.array([w/5, w/5, w/5, w/5, w/5, w, w, w, w, w])
+
+    bias = np.array([float(i) for i in bias])
+    bias = bias/len(bias)
+
+    for i,bc in enumerate(bcs):
+        if bc > int(dont_include):
+            # TODO fully understand the transition between the matrix types for the following three lines
+            mm = mat == bc
+            mm = sparse.csc_matrix(mm *bias)
+            ee = mm.dot(mm.transpose())
+            if first:
+                first = False
+                cum_mat = ee
+            else:
+                if i%500==0:
+                    print(len(bcs)/i)
+                cum_mat = cum_mat + (ee.todense()*1)
+    return(cum_mat)
+
+def to_numpy(mat, ofn):
+    import pickle
+    with open(ofn, 'wb') as out:
+        pickle.dump(mat, out)
+
+

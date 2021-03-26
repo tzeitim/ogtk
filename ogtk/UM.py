@@ -492,7 +492,7 @@ def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=Non
     
     return([rset1, rset2])
     
-def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None, keep_rid=False, rid_umi=None, do_rc = False, downsample = False, threshold = 1, verbose = False):
+def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None, keep_rid=False, rid_umi=None, do_rc = False, downsample = False, threshold = 1, verbose = False, trimming_pattern = None):
 
     '''
     Process a fastq file and collapses reads by UMI making use of their consensus seq
@@ -506,12 +506,23 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None
     umi_len = int(umi_len)
     readset = Read_Set(name=fastq_ifn)
     
+    if end != None:
+        end = end * 4
+
     fq = gzip.open(fastq_ifn, 'rt') if fastq_ifn.endswith("fastq.gz") else open(fastq_ifn)#.readlines()
     reads =     itertools.islice(fq, 1, end, 4)
     fq2 = gzip.open(fastq_ifn, 'rt') if fastq_ifn.endswith("fastq.gz") else open(fastq_ifn)#.readlines()
     rids =      itertools.islice(fq2, 0, end, 4)
     fqq = gzip.open(fastq_ifn, 'rt') if fastq_ifn.endswith("fastq.gz") else open(fastq_ifn)#.readlines()
     quals =      itertools.islice(fqq, 3, end, 4)
+
+    # TODO improve this routine, now it is hard coded for single patterns
+    if trimming_pattern != None:
+        if not isinstance(trimming_pattern, dict):
+            raise TypeError('Trimming patterns must be entered as a dict for each pattern to match (value) and group name to keep (key), for example `{"read":"ANCHOR1{e<=3}(<?read>.+)ANCHOR2{e<=3}"}`\ntrimming_pattern = {"read":"(ANCHOR1){e<=3}(?P<read>.+)(ANCHOR2){e<=3}"}')
+        keep_group = list(trimming_pattern.keys())[0]
+        trim_re = regex.compile(list(trimming_pattern.values())[0])
+        trim_matches = []
 
     if downsample:
         reads_rids_it = [(x, y, z) for x,y,z in zip(reads, rids, quals) if random.random() < threshold]
@@ -532,6 +543,14 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None
             seq = rev_comp(seq) 
             qual = qual[::-1]
 
+        if trimming_pattern != None:
+            match = trim_re.search(seq)
+            if match:
+                seq = "".join(match.groups())
+                trim_matches.append(1)
+            else:
+                trim_matches.append(0)
+
         readset.add_umi(umi, seq, qual = qual)
         readset.nreads += 1
 
@@ -546,6 +565,8 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None
     #print(sat[1]/sat[0], sat[0]/sat[1])
     if verbose:
         print(f"A total of {readset.nreads} reads were processed with {len(ucounts)} umis. top10 {top10} ")
+    if trimming_pattern != None:
+        print(f'trimming stats {sum(trim_matches)}/{len(trim_matches)} {sum(trim_matches)/len(trim_matches):.2f}')
     return(readset)
 
 def bam_collapse_UMI(bam_ifn, umi_start=0, umi_len=12, end=None):
@@ -773,7 +794,7 @@ def mafft_consensus(args):
 
             consensus = (name, umi_consensus)
         else:
-            if umi_counts[0] > min_cov:
+            if umi_counts[0] >= min_cov:
                 consensus = (name, seqs[0])
             else: 
                 #print("got only one allele and doesn't reach the min_cov {} with counts ".format(min_cov, umi_counts[0]))
@@ -808,8 +829,9 @@ def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_
             counts = pd.Series(readset.umis[umi].seqs).value_counts()
             if counts[0] >= min_cov:
                 #cc.append((umi + "_" + str(counts[0]), counts.index.to_list()[0]))
-                cc.append((umi,  counts.index.to_list()[0]))
-    consensuses = trim_by_regex(dict(cc) , trim_by, span_index=1) if trim_by != None else dict(cc) 
+                #commented this in favour of returning the counts too for the sc_analysis of lineates cc.append((umi,  counts.index.to_list()[0]))
+                cc.append((umi,  (counts.index.to_list()[0], counts[0])))
+    consensuses = trimdict_by_regex(dict(cc) , trim_by, span_index=1) if trim_by != None else dict(cc) 
     return(consensuses) 
 
  
@@ -1129,7 +1151,7 @@ def filter_qual(query, tolerance = 0, min_qual = "@"):
     bad_nts = sum([i for i in map(lambda x: x.encode("ascii") <= min_qual.encode("ascii"), query.strip())])
     return(bad_nts < tolerance)
 
-def trim_by_regex(dic, pattern, end = None, span_index = 0):
+def trimdict_by_regex(dic, pattern, end = None, span_index = 0):
     import regex
     dic = copy.deepcopy(dic)
     edge_cases = []
