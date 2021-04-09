@@ -1053,6 +1053,7 @@ def compute_dist_mat(mat, bcs, bias, cores = 50, dont_include = 3):
     cores = int(cores)
     #print(f"Warning: FORCED for  using {cores} cores")
     print(f'got {len(bcs)} barcodes')
+    #print(np.__config__.show())
     if cores == 0:
         print("zero cores")
         cc = similarity_score((mat, bcs, bias, dont_include)) 
@@ -1062,9 +1063,11 @@ def compute_dist_mat(mat, bcs, bias, cores = 50, dont_include = 3):
         chunks = np.array_split(bcs, cores)
         it = iter([(mat, chunk, bias, dont_include) for chunk in chunks])
         pool = multiprocessing.Pool(int(cores))
+        print(f"Firing up {cores} workers")
         cc = pool.map(similarity_score, it)
         pool.close()
         pool.join()
+        print("")
         cum_mat = cc[0]
         for i in cc[1:]:
             cum_mat = cum_mat + i
@@ -1074,15 +1077,7 @@ def similarity_score(args):
     from scipy import sparse
     mat, bcs, bias, dont_include = args
     first = True
-    #bias = np.array([1.25, 1.25, 1.25, 1.25, 0.25, 0.25, 0.25 , 0.25, 0.25, 0.25])
-    #bias = np.array([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
-    w = 0.1
-    #bias = np.array([w, w, w, w, w, w, w, w, w, w])
-    #bias = np.array([5*w, 5*w, 5*w, 5*w, 5*w, w, w, w, w, w])
-    #bias = np.array([w/5, w/5, w/5, w/5, w/5, w, w, w, w, w])
-
     bias = np.array([float(i) for i in bias])
-    bias = bias/len(bias)
 
     for i,bc in enumerate(bcs):
         if bc > int(dont_include):
@@ -1094,8 +1089,8 @@ def similarity_score(args):
                 first = False
                 cum_mat = ee
             else:
-                if i%500==0:
-                    print(len(bcs)/i)
+                if i%50==0:
+                    print(f'{i/len(bcs):.2f}', end = '\r')
                 cum_mat = cum_mat + (ee.todense()*1)
     return(cum_mat)
 
