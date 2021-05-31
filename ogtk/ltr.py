@@ -168,6 +168,7 @@ def preprocessing_split_10xfastq_by_intid(valid_intids, intid_len, fq1, fq2, anc
     rx2_str = rx2_str.replace('INTIDLEN', str(intid_len))
     rx2 = regex.compile(rx2_str)
     limit = None
+    undet = 0
     if limit != None:
         print("Warning this is a subset")
     i1 = itertools.islice(f1, 0, limit, 1)
@@ -215,20 +216,28 @@ def preprocessing_split_10xfastq_by_intid(valid_intids, intid_len, fq1, fq2, anc
                             if dist <= 3:
                                 intid1 = valid
                         out_files_dic2[intid1].write("\n".join([id[1], seq[0]+seq[1], plus[1], qual[0]+qual[1]]) +'\n')
+                    else:
+                        undet +=1
+                        print(f'\r{undet}/{i}', end = '')
     
                 id = []
                 seq = []
                 plus = []
                 qual = []
     
+    print(f'undet {undet}/{i}')
     for i in valid_intids:
         out_files_dic2[i].close()
+
     
 def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid2_R2_strand = None, threads = 100, end = 5000, ranked_min_cov = 5, consensus = False, umi_errors = 1, debug = False, jobs_corr=10, alg_gapopen = 20, alg_gapextend =1, correction_dict_path = None, correction_dict = None, trimming_pattern = None):
     
-    ''' Once 10x fastqs (fqm) have been merged and split by integration,
-        process them into a table of barcodes for downstream analysis on R
-        Two modalities to choose for a representative allelle: ranked (consensus = False) or consensus (consensus = True)'''
+    '''
+    Once 10x fastqs (fqm) have been split by integration,
+    process them into a table of barcodes for downstream analysis
+    Two modalities to choose for a representative allelle: ranked (consensus = False) 
+    or consensus (consensus = True)
+    '''
     # TODO add tadpole-based correction as an option
     
     bint_db = pyaml.yaml.load(open(bint_db_ifn), Loader=pyaml.yaml.FullLoader)
@@ -298,7 +307,12 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
 
     # do a pass on the raw fastqs and group reads by UMI
 
-    rssc = ogtk.UM.fastq_collapse_UMI(fqm, umi_len = umi_len, end = end, keep_rid = True, trimming_pattern = trimming_pattern)
+    rssc = ogtk.UM.fastq_collapse_UMI(
+            fqm, 
+            umi_len = umi_len, 
+            end = end, 
+            keep_rid = True, 
+            trimming_pattern = trimming_pattern)
     
     print(f"loaded rs with trimming. total umis: {len(rssc.umis)}")
 
@@ -312,7 +326,7 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
     yaml_out['mols']['saturation']['unmerged']['uncorrected'] = rssc.allele_saturation()
 
 
-    if umi_errors >0:
+    if umi_errors>0:
         print("Correcting umis with a hdist of {}".format(umi_errors))
         rssc.correct_umis(errors = umi_errors , silent = False, jobs = jobs_corr)
         yaml_out['mols']['saturation']['unmerged']['corrected'] = rssc.saturation()
@@ -322,11 +336,24 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
     # TODO this is really important for 10x, long reads
     # The first step to call an allele consensus is to get a representative sequence for a given UMI
     # thus by_alignment == False to get a ranked based representative
-    rssc.consensus = ogtk.UM.do_fastq_pileup(rssc, min_cov = ranked_min_cov, threads = threads, trim_by = None, by_alignment = False)
+    rssc.consensus = ogtk.UM.do_fastq_pileup(rssc, 
+                    min_cov = ranked_min_cov, 
+                    threads = threads, 
+                    trim_by = None, 
+                    by_alignment = False)
+
+    rep_read = [(len(rssc.umis[i].seqs), rssc.consensus[i][1]) for i in rssc.consensus.keys() ]
+    #import matplotlib.pyplot as plt
+    #plt.scatter(*zip(*rep_read))
+    reads_rank1 = pd.Series([v[1] for i,v in rssc.consensus.items()]).value_counts(normalize= False)
+ 
+    print('Coverage for top ranking seq')
+    print(reads_rank1.head(10)/sum(reads_rank1))
     # save binary
 
     print(f"called consensuses {len(rssc.consensus)}")
 
+    print(f'pickling rs as {pickled_readset}')
     with open(pickled_readset, 'wb') as pcklout:
         pickle.dump(rssc, pcklout)
     # determine cells based on the 10x bc
@@ -387,6 +414,7 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
     
     allele_reps = open(allele_reps_fn, "w")
     cc = []
+    #pdb.set_trace()
     with open(allele_reps_fn, "w") as allele_reps:
         for cell in celldb.keys():
             repseqs_count_list = celldb[cell]
@@ -397,7 +425,8 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
                 df['cell'] = cell
                 # TODO how to treat ties?
                 top = df['seqs'].value_counts().head(1)
-                cc.append((cell, str(top.index.to_list()[0])))
+                rep_seq = str(top.index.to_list()[0]) 
+                cc.append((cell, rep_seq))
                 #get rep seq per cell and its corresponding counts.
                 #rep_seq, counts = repseqs_count_list[0]
             else:
@@ -452,14 +481,23 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
 
 
     print("aligning reads tp ref")
-    align_reads_to_ref(name = outdir+"/"+intid, fa_ofn = fa_correctedm, 
-                            consensus_dict = cell_consensus, ref_path = ref_path, 
-                            ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
-                            gapextend = alg_gapextend)
+    align_reads_to_ref(
+            name = outdir+"/"+intid, 
+            fa_ofn = fa_correctedm, 
+            consensus_dict = cell_consensus, 
+            ref_path = ref_path, 
+            ref_name = ref_name, 
+            mode=alg_mode, 
+            gapopen = alg_gapopen, 
+            gapextend = alg_gapextend)
 
 
     print(f"featurizing sequences to {merged_tab_out}")
-    compute_barcode_matrix_merged(fa_ifn = fa_correctedm, tab_out = merged_tab_out, bint_db_ifn = bint_db_ifn, do_rc = False)
+    compute_barcode_matrix_merged(
+                fa_ifn = fa_correctedm, 
+                tab_out = merged_tab_out, 
+                bint_db_ifn = bint_db_ifn, 
+                do_rc = False)
    
     # save the count information for the UMIs 
     with open(umi_counts_ofn, 'w') as fh:
@@ -511,9 +549,11 @@ def align_reads_to_ref(name, fa_ofn, consensus_dict, ref_path, ref_name = 'hspdr
     
 
 def compute_barcode_matrix_merged(fa_ifn, tab_out,  bint_db_ifn, tab_full_out = None, do_rc = False):
-    '''Writes to disk a tabulated file with the corresponfing bint strings.
+    '''
+    Writes to disk a tabulated file with the corresponfing bint strings.
     Requires a fasta file that provides the pairwise aligment between a lineage
-    allele and the reference'''
+    allele and the reference
+    '''
 
     FF = pyfaidx.Fasta(fa_ifn, as_raw=True)
     fa_entries = [i for i in FF.keys()]
@@ -1079,6 +1119,7 @@ def similarity_score(args):
     first = True
     bias = np.array([float(i) for i in bias])
 
+    pct_i = int(len(bcs)/100)
     for i,bc in enumerate(bcs):
         if bc > int(dont_include):
             # TODO fully understand the transition between the matrix types for the following three lines
@@ -1089,8 +1130,8 @@ def similarity_score(args):
                 first = False
                 cum_mat = ee
             else:
-                if i%50==0:
-                    print(f'{i/len(bcs):.2f}', end = '\r')
+                if i%pct_i==0:
+                    print(f'{100*i/len(bcs):.2f}%', end = '\r')
                 cum_mat = cum_mat + (ee.todense()*1)
     return(cum_mat)
 

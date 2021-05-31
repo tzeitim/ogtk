@@ -823,7 +823,7 @@ def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_
         pool.join()
         #cc = [i for i in cc if "drop" not in i[0]]
     else:
-    # this option represents a ranked based approach where the only the most common sequence is used as the representative
+    # this option represents a ranked based approach where only the most common sequence is used as the representative
         cc = []
         for umi in readset.umis.keys():
             counts = pd.Series(readset.umis[umi].seqs).value_counts()
@@ -1031,7 +1031,9 @@ def compare_umi_to_pool(args):
 
 def merge_all(seqs, jobs = 10, errors = 1, mode = "regex"):
     jobs = int(jobs)
-    ''' parallel wrapper for merge_umi_to_pool - expects seqs sorted by ocurrence '''
+    ''' 
+    Parallel wrapper for merge_umi_to_pool - expects seqs sorted by ocurrence 
+    '''
     pool = multiprocessing.Pool(jobs)
     it = itertools.zip_longest(seqs, [[i, seqs, errors, mode] for i,v in enumerate(seqs)], fillvalue=seqs)
     ret = pool.map(merge_umi_to_pool, it)
@@ -1111,8 +1113,6 @@ def clean_fasta(fn, prefix):
     cmd = "mv %s %s"%(tmp_fa_fn, fn)
     subprocess.run(cmd.split())
 
-
-
 def fa_to_tabular(ifn, oufn, start, end):
     fa = Fasta(ifn)
     fout = open(oufn, 'w')
@@ -1128,8 +1128,6 @@ def fa_to_tabular(ifn, oufn, start, end):
     fout.close()
     fa.close()
 
-
-
 def fa_to_tabular(ifn, oufn, start, end):
     fa = Fasta(ifn)
     fout = open(oufn, 'w')
@@ -1144,8 +1142,6 @@ def fa_to_tabular(ifn, oufn, start, end):
         fout.write("\t".join([mm, hash_key, umi, counts, seq])+'\n')
     fout.close()
     fa.close()
-
-
     
 def filter_qual(query, tolerance = 0, min_qual = "@"):
     bad_nts = sum([i for i in map(lambda x: x.encode("ascii") <= min_qual.encode("ascii"), query.strip())])
@@ -1230,7 +1226,9 @@ class Bint():
 
 
 def return_bint_index(bint_l, current_position):
-    '''Helper function that returns the key for the bint (barcode interval) that covers a given position on a pairwise alignment'''
+    '''
+    Helper function that returns the key for the bint (barcode interval) that covers a given position on a pairwise alignment
+    '''
     bint_index = None
     keys = [i for i in bint_l.keys()]
     for i in range(len(keys)):
