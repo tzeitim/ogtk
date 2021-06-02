@@ -1,21 +1,21 @@
 name: ogtk
 channels:
- - bioconda
  - conda-forge
+ - bioconda
 # - sci-bots
 # - trent
  - dranew
  - agbiome 
+# - defaults
 dependencies:
+ - python>=3.7
  - numpy
  - pandas
  - matplotlib
  - jupyterlab
  - jupyterlab_server
- - blas
- - tmux
+ - ipython
  - pip
- - h5py=3.1.0
  - pip:
    - pyfasta
    - pysam
@@ -30,6 +30,12 @@ dependencies:
    - gvmagic
    - graphviz
    - python-igraph
+
+ - blas
+ - minimap2
+ - bioconda::samtools>=1.10
+ - tmux
+ - h5py=3.1.0
  - cairocffi
  - graphviz 
  - pyaml
@@ -49,22 +55,20 @@ dependencies:
  - r-digest # crytographic routines
  - r-furrr
  - r-purrr
- - bioconductor-lpsymphony
-   #- bioconductor-metacell
+   # - bioconductor-lpsymphony
+   #   #- bioconductor-metacell
  - hdbscan
- - samtools
  - sambamba 
  - clustalo
  - mafft 
  - emboss
- - ipython
  - star
  - bowtie2
  - blat
  - sra-tools
  - bioconductor-sradb 
  - pear
- #- ack-grep
+   # #- ack-grep
  - dos2unix
  - bcl2fastq 
  - bcftools
@@ -72,10 +76,10 @@ dependencies:
  - bbtools
  - bamnostic
  - umi_tools
- - bioconductor-rhdf5
- #- ucsc-twobittofa
- # - the-silver-searcher
-# - firefox
+   ## - bioconductor-rhdf5
+   ##- ucsc-twobittofa
+   ## - the-silver-searcher
+   ## - firefox
  - git
  - pandoc
  - fastqc 
@@ -88,7 +92,6 @@ dependencies:
  - seqtk 
  - bioconductor-biostrings
  - kat
- - minimap2
  - parasail-python
  - parasail
  - mappy
