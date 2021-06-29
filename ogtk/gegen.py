@@ -27,7 +27,7 @@ def sitedb_generate_miniref(sitedb_yaml):
     path_2bit = sitedb['ref']['path_2bit']
     out_fa =  sitedb['ref']['mini_ref']
 
-    # generate fasta file with the small reference sequence 
+    # generate fasta file with the small reference sequence
     with open(tmp_coords, 'w') as coords:
         for gene in genes:
             chrom = loci[gene]['chr'].replace('','')
@@ -56,11 +56,6 @@ def sitedb_generate_miniref(sitedb_yaml):
 
 
 def extract_reads(sitedb_yaml, use_unmapped = True, FORCE = False, with_chr = True):
-    import os
-    import time
-    import subprocess
-    import pyaml
-    import ogtk
     ''' 
     expects a sitedb yaml file
        provides a hits reference in FASTA format fo be computed before
@@ -78,6 +73,12 @@ def extract_reads(sitedb_yaml, use_unmapped = True, FORCE = False, with_chr = Tr
         5 - profit
 
     '''
+    import os
+    import time
+    import subprocess
+    import pyaml
+    import ogtk
+
     # globals
     sitedb = pyaml.yaml.load(open(sitedb_yaml), Loader = pyaml.yaml.Loader)
     workdir = sitedb['xp']['workdir'] 
@@ -100,6 +101,15 @@ def extract_reads(sitedb_yaml, use_unmapped = True, FORCE = False, with_chr = Tr
     umap_gzip = 'gzip'
     
     if use_unmapped:
+
+        if os.path.exists(umapped_fastq): 
+            print(f'A previous instance of {umapped_fastq} was found! skipping its computation. Use the FORCE = True argument to override this assertion...', end  = '')
+            if FORCE:
+                print(f'Removing it since FORCE = {FORCE}.')
+                subprocess.run(f'rm {umapped_fastq}'.split())
+            else:
+                print(f'Use the FORCE = True argument to override this assertion')
+
         if os.path.exists(umapped_fastq) == False or FORCE == True: 
             print(umap_cmd, "|", umap_fastq_cmd , "|", umap_format_cmd , "| gzip >", umapped_fastq)
             c1 = subprocess.Popen(umap_cmd.split(), stdout = subprocess.PIPE)
