@@ -1,0 +1,108 @@
+xp:
+ name: Type here the name of your experiment e.g. nm_b20
+ tenex_bam:  the path to a possition sorted 10x bam output e.g. /data/junker/users/nmitic/seq_data/20210209_10x_tdmr2/map_wt/b20_tdmr2_v3ng/outs/possorted_genome_bam.bam 
+ all_hits_bam: Specify the path to store the output of on target BAM entries e.g. /local/users/polivar/insilico_gen/nm_b20_hits_mapped.bam
+ workdir: This is the path where your experiments will be saved /local/users/polivar/insilico_gen/
+ allele_tab: This is the path to the allele table output e.g. /local/users/polivar/insilico_gen/nm_b20.alleles 
+ref:
+ path_2bit: /local/db/danrer11/trackdb/seq/danRer11.2bit
+ mini_ref: /local/users/polivar/insilico_gen/mini_ref.fa 
+loci: 
+ actb1:
+   name: actb1
+   chr: chr1
+   gene_start: 8649099
+   gene_end: 8653385
+   start: 8649373
+   end: 8649392 
+   seq: GGCAAAGTGGTAAACGCTTC
+   type: primary
+   secondary:
+     actb1s:
+       name: actb1s
+       chr: chr1_KZ114997v1_alt
+       start: 70875
+       end: 70894 
+       seq: GGCAAAGTGGTAAACGCTTC
+       type: secondary
+ actb2:
+   name: actb2 
+   chr: chr3
+   gene_start: 40526107
+   gene_end: 40529804
+   start: 40526169
+   end: 40526188
+   seq: GGCGGTGCCAGACATTTGGT
+   type: primary
+ rpl18a:
+   name: rpl18a 
+   chr: chr4
+   gene_start: 391297
+   gene_end: 398451
+   start: 398061
+   end: 398080
+   seq: GAAGATTTGCAGAAGTGTTT
+   type: primary
+ rpl39:
+   name: rpl39 
+   chr: chr14
+   gene_start: 33331083
+   gene_end: 33335049 
+   start: 33331914
+   end: 33331933
+   seq: GGGGATGCTGAAGTAAACAG
+   type: primary
+   secondary:
+     repl39s1:
+       name: rpl39s
+       chr: chr14_KZ115454v1_alt
+       start: 295783
+       end: 295802 
+       seq: GGGGATGCTGAAGTAAACAG 
+       type: secondary
+ cfl1:
+   name: cfl1 
+   chr: chr14
+   gene_start: 30795559
+   gene_end: 30801555
+   start: 30801147
+   end: 30801166
+   seq: GGACACGTATGAAGTTTAGA
+   type: primary
+ cirbpb:
+   name: cirbpb
+   chr: chr22
+   gene_start: 18542010
+   gene_end: 18546649
+   start: 18543557 
+   end: 18543576
+   seq: GCTTATCAAGCTTCTATTAG
+   type: primary
+   secondary:
+     CU660013.4:
+       name: CU660013.4 
+       chr: chr20
+       gene_start: 51389901
+       gene_end: 51391289
+       start: 51390908
+       end: 51390927
+       seq: GCTTATCAAGCTTCTATTAG
+       type: secondary
+ ube2e1:
+   name: ube2e1
+   chr: chr19
+   gene_start: 17358850
+   gene_end: 17376041
+   start: 17375727
+   end: 17375746 
+   seq: GGCGAGTCTAAAAGAGGAAC 
+   type: primary
+#  locusx:
+#    name: 
+#    chr: chr
+#    start: 
+#    end: 
+#    seq: 
+#
+#help:
+#   lazy:     for i in $(grep -v '#' sites.yaml | grep name  | cut -d ":" -f 2); do echo $i; grep $i /local/db/danrer11/trackdb/seq/gff/Danio_rerio.GRCz11.95.chr.gtf  | awk '{if($3 == "gene"){print $0;print "chr: chr"$1"\ngene_start: "$4"\ngene_end: "$5}}'; done
