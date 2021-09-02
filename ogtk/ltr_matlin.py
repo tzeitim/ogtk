@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 from colorhash import ColorHash
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
+from matplotlib.colors import ListedColormap, LinearSegmentedColormap
 
 class matlin():
     def __init__(self, bints = 7):
@@ -143,6 +143,7 @@ class matlin():
         z = self.df.stack().sort_values().drop_duplicates().apply(lambda x: color_dict[x]).to_list()
         # factorize indels
         cmap = ListedColormap(z)
+
         if self.__assert_none('bc'):
             self.__encode_mat()
         mat = self.bc
@@ -159,8 +160,8 @@ class matlin():
             vmax = len(z)
         if ax == None:
             fig, ax = plt.subplots()
-        ax.matshow(im, cmap=cmap,  aspect='auto', vmin=1, vmax=vmax)
-        ax.set_xticks([i-0.5 for i in range(0, im.shape[1], 7)])
+        ax.matshow(im, cmap=cmap,  aspect='auto', vmin=1, vmax=np.max(self.bc.to_numpy()))
+        ax.set_xticks([i-0.5 for i in range(0, im.shape[1], self.bins_per_intid)])
         ax.xaxis.grid(True, which='major')
         ax.set_xticklabels('')
 
@@ -171,7 +172,7 @@ class matlin():
             ax.matshow(np.log(df.loc[df.sum(axis=1).sort_values(ascending = False).index.to_list()].iloc[lowest_rank:,:]), aspect = 'auto')
         else:
             ax.matshow(df.loc[df.sum(axis=1).sort_values(ascending = False).index.to_list()].iloc[lowest_rank:,:], aspect = 'auto')
-        ax.set_xticks([i-0.5 for i in range(0, df.shape[1], 7)])
+        ax.set_xticks([i-0.5 for i in range(0, df.shape[1], self.bins_per_intid)])
         ax.xaxis.grid(True, which='major')
         ax.set_xticklabels('')
 
@@ -291,7 +292,7 @@ class matlin():
     def __omit_mm(self, bc):
         ''' Omits mismatch element from a barcode of the format mm.ins.del'''
         bcs = bc.split('.')
-        return(f'.{bcs[1]}.{bcs[2]}')
+        return(F'.{bcs[1]}.{bcs[2]}')
 
     def __encode_mat(self):
         bcs = self.df.stack()#.rank(method='dense')#.unstack()
