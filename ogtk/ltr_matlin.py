@@ -65,7 +65,13 @@ class matlin():
         if encode_mat:
             self.__encode_mat()
 
-    def filter_wl(self, wl):
+    def filter_wl(self, wl, copy = False):
+        if copy:
+            import copy
+            new_instance = copy.deepcopy(self)
+            new_instance.filter_wl(wl, copy = False)
+            return(new_instance)
+            
         self.df = self.df.loc[self.df.index.intersection(wl)]
 
     def unique_alleles(self):
