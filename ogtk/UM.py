@@ -809,9 +809,16 @@ def mafft_consensus(args):
     return(consensus) 
 
 def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_by = None, by_alignment = False):
-    ''' Generate consensus sequences of sets of reads, grouped by UMI '''
-    # collapsing reads by consensus seems to be incorrect, deprecating the use of such (e.g. mafft alignment) 
-    # in favor for just getting the most frequent sequence
+    ''' Generate consensus sequences of sets of reads, grouped by UMI \n\n\n
+    By aligment:\n\n
+    collapsing reads by consensus seems to be incorrect, deprecating the use of such (e.g. mafft alignment) 
+    in favor for just getting the most frequent sequence
+
+    By rank:\n\n
+    this option represents a ranked based approach where only the most common sequence is used as the representative\n
+    it returns a dictionary of the form (umi, (dominant_seq, reads_per_umi, reads_rank1))
+
+    '''
     # define the list of pool arguments
     # fname, name, seqs, min_cov, jobs  = args
     it = iter([(readset.name.replace('.fastq', ''), umi, readset.umis[umi].seqs, min_cov, threads_alg) for umi in readset.umis.keys()])
@@ -823,14 +830,16 @@ def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_
         pool.join()
         #cc = [i for i in cc if "drop" not in i[0]]
     else:
-    # this option represents a ranked based approach where only the most common sequence is used as the representative
+    # it returns a dictionary of the form (umi, (dominant_seq, reads_per_umi, reads_rank1))
         cc = []
         for umi in readset.umis.keys():
             counts = pd.Series(readset.umis[umi].seqs).value_counts()
             if counts[0] >= min_cov:
-                #cc.append((umi + "_" + str(counts[0]), counts.index.to_list()[0]))
-                #commented this in favour of returning the counts too for the sc_analysis of lineates cc.append((umi,  counts.index.to_list()[0]))
-                cc.append((umi,  (counts.index.to_list()[0], counts[0])))
+                dominant_seq = counts.index.to_list()[0]
+                reads_per_umi = len(readset.umis[umi].seqs)
+                reads_rank1 = counts[0]
+                foc = (umi, (dominant_seq, reads_per_umi, reads_rank1))
+                cc.append(foc)
     consensuses = trimdict_by_regex(dict(cc) , trim_by, span_index=1) if trim_by != None else dict(cc) 
     return(consensuses) 
 
