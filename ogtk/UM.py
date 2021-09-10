@@ -492,7 +492,7 @@ def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=Non
     
     return([rset1, rset2])
     
-def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None, keep_rid=False, rid_umi=None, do_rc = False, downsample = False, threshold = 1, verbose = False, trimming_pattern = None):
+def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_reads_per_umi =1, end=None, keep_rid=False, rid_umi=None, do_rc = False, downsample = False, threshold = 1, verbose = False, trimming_pattern = None):
 
     '''
     Process a fastq file and collapses reads by UMI making use of their consensus seq
@@ -517,7 +517,7 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None
     quals =      itertools.islice(fqq, 3, end, 4)
 
     # TODO improve this routine, now it is hard coded for single patterns
-    if trimming_pattern != None:
+    if trimming_pattern is not None:
         if not isinstance(trimming_pattern, dict):
             raise TypeError('Trimming patterns must be entered as a dict for each pattern to match (value) and group name to keep (key), for example `{"read":"ANCHOR1{e<=3}(<?read>.+)ANCHOR2{e<=3}"}`\ntrimming_pattern = {"read":"(ANCHOR1){e<=3}(?P<read>.+)(ANCHOR2){e<=3}"}')
         keep_group = list(trimming_pattern.keys())[0]
@@ -546,7 +546,9 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None
         if trimming_pattern != None:
             match = trim_re.search(seq)
             if match:
-                seq = "".join(match.groups())
+                spans = [match.span(i) for i in match.groupdict().keys()]
+                seq = "".join([seq[i:ii] for i,ii in spans])
+                qual = "".join([qual[i:ii] for i,ii in spans])
                 trim_matches.append(1)
             else:
                 trim_matches.append(0)
@@ -557,6 +559,11 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, end=None
         if keep_rid:
             readset.add_rid(umi, rid.split(" ")[0])
 
+    raw_rs_size = len(readset.umis)
+    badly_covered = [umi.umi for umi in readset.umis.values() if len(umi.seqs) <= min_reads_per_umi ]
+    readset.delete(badly_covered)
+
+    print(f'A total of {len(badly_covered)}::{100*len(badly_covered)/raw_rs_size:.2f}% umis were removed due to poor coverage')
 
     ucounts = readset.umi_counts()
     top10 = (100*ucounts[0:9]/readset.nreads).tolist()
