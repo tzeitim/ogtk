@@ -546,6 +546,7 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_read
         if trimming_pattern != None:
             match = trim_re.search(seq)
             if match:
+                # we append the different anatomical components of the read and their qualities
                 spans = [match.span(i) for i in match.groupdict().keys()]
                 seq = "".join([seq[i:ii] for i,ii in spans])
                 qual = "".join([qual[i:ii] for i,ii in spans])
