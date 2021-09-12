@@ -206,8 +206,34 @@ class Read_Set:
             return(cc)
             #for k,contigs in zip(umis,cc):
             #    self.umis[k].contigs = contigs
+
     def export_to_fastq(self):
         return(print(' Not implemented yet, transfer the standalone function here'))
+    
+    def compute_coverage_table(self, cell_umis):
+        '''
+        Basic data frame with  coverage stats per UMI:
+        fields returned: \t ["cell", "umi", "reads", "seqs", "r1_reads"]
+        '''
+        assert self.consensus, "consensus has not been generated: e.g. run .do_pileup to generate it"
+
+        if len(self.consensus) == 0:
+            return()
+
+        consensuses_dict = self.consensus
+        cov_df = [["cell", "umi", "reads", "seqs", "r1_reads"]]
+        for cell in list(cell_umis.keys()):
+            for umi in cell_umis[cell]:
+                if umi in consensuses_dict.keys():
+                    reads = len(self.umis[umi].seqs)
+                    seqs = len(np.unique(self.umis[umi].seqs))
+                    r1_reads = consensuses_dict[umi][2]  
+                    cov_df.append([cell, umi, reads, seqs, r1_reads])
+
+        cov_df = pd.DataFrame(cov_df[1:], columns=cov_df[0])
+        print('pipi')
+        return(cov_df)
+
 
 def rs_export_to_fastq(rs, outfn):
     with gzip.open(outfn, 'wt') as fqout:
@@ -226,7 +252,21 @@ def create_tmp_dir_per_user(category = 'tadpole'):
         os.makedirs(tmp_dir)
     subprocess.run(f"chmod -R g+rw {tmp_dir}".split())
     return(tmp_dir)
-    
+
+def wrap_kmer_correct(name, umi, k = 31, mincontig='auto', mincountseed=1, verbose = False, keep_tmp = True):
+    username = os.environ['USER']
+    temp_dir = create_tmp_dir_per_user(category = 'tadpole')
+    temp_prefix = f'{temp_dir}/tadpolecorr_{name}_'
+    if len(set(umi.seqs))>1:
+       fasta_ofn = temp_prefix+"_"+umi.umi+"_temp.fastq"
+       umi.export_to_fastq(fasta_ofn = fasta_ofn)
+       cseqs = tadpole_correct_fastqs(fasta_ofn, out=fasta_ofn.replace('temp', 'contig').replace('fastq', 'fa'), return_seqs=True, k = k, verbose = verbose, mincontig=mincontig, mincountseed=mincountseed)
+    else:
+       cseqs = False
+    if not keep_tmp:
+        print(f'Removing temp dir {temp_dir}')
+        subprocess.run("rm {temp_dir}".split())
+    return(cseqs)
 
 def wrap_assemble(name, umi, k = 31, mincontig='auto', mincountseed=1, verbose = False, keep_tmp = True):
     username = os.environ['USER']
@@ -242,6 +282,21 @@ def wrap_assemble(name, umi, k = 31, mincontig='auto', mincountseed=1, verbose =
         print(f'Removing temp dir {temp_dir}')
         subprocess.run("rm {temp_dir}".split())
     return(contigs)
+
+def monitor_kmer_corr_umi_list(umi_list, rs, pickle_ofn, k = 80, monitor_rate = 100, verbose = False):
+    '''Provided a umi list and a readset it attempts to assemble the umis while keeping a pickled record '''
+    # cseqs = corrected sequences
+    cseqs = {}
+    for umi_str in umi_list:
+        umi = rs.umis[umi_str]
+        cseqs[umi.umi] = wrap_kmer_correct(umi.umi, umi, k = k, verbose = verbose)
+        if len(cseqs) % monitor_rate == 0 or len(cseqs) == 5 or len(cseqs) == 1:
+            counts = [len(i) for i in cseqs.values() if i]
+            print(pd.Series(counts).value_counts())
+            with open(pickle_ofn, 'wb') as pcklout:
+                pickle.dump(cseqs, pcklout)
+    return(cseqs)
+
 
 def monitor_assembly_umi_list(umi_list, rs, pickle_ofn, k = 80, monitor_rate = 100, verbose = False):
     '''Provided a umi list and a readset it attempts to assemble the umis while keeping a pickled record '''
@@ -408,6 +463,8 @@ class UM:
      
         # stores sam entries using a cigar string as key
         self.sams = {}
+
+        self.consensus = None
         
     def add_seq(self, seq):
         self.seqs.append(seq)
@@ -837,19 +894,29 @@ def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_
         pool.close()
         pool.join()
         #cc = [i for i in cc if "drop" not in i[0]]
+        # TODO adapt to incorporate dictionary-based data aggregation
+        return(consensuses) 
     else:
     # it returns a dictionary of the form (umi, (dominant_seq, reads_per_umi, reads_rank1))
         cc = []
         for umi in readset.umis.keys():
             counts = pd.Series(readset.umis[umi].seqs).value_counts()
-            if counts[0] >= min_cov:
-                dominant_seq = counts.index.to_list()[0]
-                reads_per_umi = len(readset.umis[umi].seqs)
-                reads_rank1 = counts[0]
-                foc = (umi, (dominant_seq, reads_per_umi, reads_rank1))
-                cc.append(foc)
-    consensuses = trimdict_by_regex(dict(cc) , trim_by, span_index=1) if trim_by != None else dict(cc) 
-    return(consensuses) 
+            readset.umis[umi].consensus = {
+                "type": "rank",
+                "dominant_seq":counts.index.to_list()[0],
+                "dominant_reads": counts[0],
+                "reads_per_umi":len(readset.umis[umi].seqs),
+                "pool_size": len(counts),
+            }
+
+   #         if counts[0] >= min_cov:
+   #             dominant_seq = counts.index.to_list()[0]
+   #             reads_per_umi = len(readset.umis[umi].seqs)
+   #             reads_rank1 = counts[0]
+   #             foc = (umi, (dominant_seq, reads_per_umi, reads_rank1))
+   #  
+    # legacy code - this function used to return a dictionary 
+    #consensuses = trimdict_by_regex(dict(cc) , trim_by, span_index=1) if trim_by != None else dict(cc) 
 
  
 def do_pileup(readset, fa_ref = 'refs/rsa_plasmid.fa', start= 0 , end = None, region = 'chr_rsa:1898-2036', threads = 50, balance = True, min_cov = 5, prefix = None):
@@ -1337,3 +1404,51 @@ def alternating_patches(x, baseline =-0.0002, delta= 0.0001):
     ycoords = np.array(ycoords).flatten()
     coords = [i for i in zip(xcoords, ycoords)]
     return(patches.Polygon(np.array(coords), fill = False))
+
+
+def get_list_of_10xcells(rs, correction_dict_path = None, correction_dict = None):
+    '''
+    Returns a list of 10x-style cell barcodes. It can use a correction dictionary, if provided else it just strips the full UMI according to the range that corresponds to the CBC
+    '''
+    umi_list = rs.umis.keys()
+    valid_cells = []
+    valid_pairs = []
+    if correction_dict_path is not None or correction_dict is not None:
+        # UMI correction via correction dictionaries
+        hits_dic = []
+        print(f'Using cellranger dictionary', end = "...")
+        if correction_dict_path is not None:
+            print(f'Loading correction dictionaries {correction_dict_path}')
+            correction_dict = pickle.load(open(correction_dict_path, 'rb'))
+        if correction_dict is not None:
+            print("using provided")
+
+        for umi in umi_list:
+            candidate_cell = umi[0:16]
+            if candidate_cell in correction_dict['cell_barcodes'].keys():
+                candidate_cell = correction_dict['cell_barcodes'][candidate_cell]
+                hits_dic.append(1)
+                # correct raw cellbarcode with the cellranger-corrected cellbarcode
+                valid_cells.append(candidate_cell)
+                valid_pairs.append((candidate_cell, umi))
+            else:
+                hits_dic.append(0)
+        print(f'correction stats {sum(hits_dic)/len(hits_dic)}')
+    else:
+    # without correction
+        for umi in umi_list:
+            canditate_cell = umi[0:16]
+            if not any([i == "N" for i in candidate_cell]):
+                candidate_cell = candidate_cell +"-1"
+                valid_cells.append(candidate_cell)
+                valid_pairs.append((candidate_cell, umi))
+
+    cell_umi_dict = {}
+
+    for cell,umi in valid_pairs:
+        if cell not in cell_umi_dict.keys():
+            cell_umi_dict[cell] = []
+        cell_umi_dict[cell].append(umi)
+
+    return(cell_umi_dict)
+
