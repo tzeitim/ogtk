@@ -11,6 +11,7 @@ import regex
 import numpy as np
 import pandas as pd
 import pdb
+#import ltr_mtl <- how to import a script
 
 
 def extract_intid_worker(args):
@@ -187,7 +188,7 @@ def preprocessing_split_10xfastq_by_intid(valid_intids, intid_len, fq1, fq2, anc
     seen = {}
     for i,v in enumerate(zip(i1,i2)):
             if i%100000 == 0:
-                print("\r"+str(i), end='')
+                print(f'\rundet/tot {undet}/{i}', end = '')
             l1 = v[0].strip()
             l2 = v[1].strip()
     
@@ -218,19 +219,18 @@ def preprocessing_split_10xfastq_by_intid(valid_intids, intid_len, fq1, fq2, anc
                         out_files_dic2[intid1].write("\n".join([id[1], seq[0]+seq[1], plus[1], qual[0]+qual[1]]) +'\n')
                     else:
                         undet +=1
-                        print(f'\r{undet}/{i}', end = '')
     
                 id = []
                 seq = []
                 plus = []
                 qual = []
     
-    print(f'undet {undet}/{i}')
+    print(f'\nundet {undet}/{i}')
     for i in valid_intids:
         out_files_dic2[i].close()
 
     
-def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid2_R2_strand = None, threads = 100, end = 5000, ranked_min_cov = 5, consensus = False, umi_errors = 1, debug = False, jobs_corr=10, alg_gapopen = 20, alg_gapextend =1, correction_dict_path = None, correction_dict = None, trimming_pattern = None):
+def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_correct = True,  min_reads_per_umi = 4, intid2_R2_strand = None, threads = 100, end = 5000, ranked_min_cov = 5, consensus = False, umi_errors = 1, debug = False, jobs_corr=10, alg_gapopen = 20, alg_gapextend =1, correction_dict_path = None, correction_dict = None, trimming_pattern = None, use_cache = True):
     
     '''
     Once 10x fastqs (fqm) have been split by integration,
@@ -282,11 +282,13 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
     yaml_out['alignment']['alg_gapopen'] = alg_gapopen
     yaml_out['alignment']['alg_gapextend'] = alg_gapextend
 
+
     # more outfiles
     merged_tab_out =   outdir + '/{}_binned_barcodes_10x.txt'.format(name)
     consensus_tab_out =   outdir + '/{}_consensus_by_cell_10x.txt'.format(name)
-    allele_reps_fn =   outdir + '/{}_allele_reps.txt'.format(name)
+    allele_reps_fn =   outdir + '/{}_allele_reps.pickle'.format(name)
     pickled_readset= outdir + f'{name}_readset.corr.pickle'
+    pickled_cseqs = outdir + f'{name}_readset.kmer_cseqs.pickle'
  
     yaml_out['desc']['lineage'] = "Main output of the pre-processing scripts. Tabulated files that contain the bint barcode string"
     yaml_out['lineage'] = {}
@@ -297,27 +299,60 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
    
     # Molecule data
     umi_counts_ofn = outdir + '/{}_umi_counts.txt'.format(name)
+    umi_cov_ofn = outdir + '/{}_umi_cov.pickle'.format(name)
     yaml_out['mols'] = {}
     yaml_out['mols']['umi_len'] = umi_len
     yaml_out['mols']['umi_correction'] = umi_errors
     yaml_out['mols']['counts'] = umi_counts_ofn 
+    yaml_out['mols']['cov_pck'] = umi_cov_ofn 
     
     if end != None:
         print("Warning: end is not None; You are not processing all the data", end)
 
     # do a pass on the raw fastqs and group reads by UMI
 
-    rssc = ogtk.UM.fastq_collapse_UMI(
+
+    if os.path.exists(pickled_readset) and use_cache:
+        rssc = pickle.load(open(pickled_readset, 'rb'))
+        print(f"loaded cached ReadSet {pickled_readset}. total umis: {len(rssc.umis)}")
+    else:    
+        rssc = ogtk.UM.fastq_collapse_UMI(
             fqm, 
             umi_len = umi_len, 
             end = end, 
             keep_rid = True, 
+            min_reads_per_umi = min_reads_per_umi,
             trimming_pattern = trimming_pattern)
-    
-    print(f"loaded rs with trimming. total umis: {len(rssc.umis)}")
+
+        print(f"loaded rs with trimming={trimming_pattern != None}. total umis: {len(rssc.umis)}")
+        if umi_errors>0:
+            print("Correcting umis with a hdist of {}".format(umi_errors))
+            rssc.correct_umis(errors = umi_errors , silent = False, jobs = jobs_corr)
+            yaml_out['mols']['saturation']['unmerged']['corrected'] = rssc.saturation()
+        else:
+            print("Not correcting umis")
+        
+        if kmer_correct:
+            kmer = 50
+            print('starting kmer-based correction k={kmer}')
+            umi_list = rssc.umi_counts().index
+            cseqs = ogtk.UM.monitor_kmer_corr_umi_list(umi_list, rssc, pickle_ofn=pickled_cseqs, k = kmer)
+            for corr_umi in cseqs.keys():
+                quals = ['F'*len(seq) for seq in cseqs[corr_umi]]
+                rssc.umis[corr_umi].seqs = cseqs[corr_umi]
+                rssc.umis[corr_umi].quals = quals
+
 
     # store the first round of molecule stats
     #TODO the saturation stats should be outsourced somehow
+    #TODO eg the next fn 
+    def conf_dict_(conf, level, **kargs):
+        if level not in conf.keys():
+            conf[level] = {}
+        for k,v in kargs.items():
+            conf[level][k] = v
+        return(conf)
+
     yaml_out['mols']['saturation'] = {}
     yaml_out['mols']['saturation']['unmerged'] = {}
     yaml_out['mols']['nreads'] = {}
@@ -326,126 +361,148 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
     yaml_out['mols']['saturation']['unmerged']['uncorrected'] = rssc.allele_saturation()
 
 
-    if umi_errors>0:
-        print("Correcting umis with a hdist of {}".format(umi_errors))
-        rssc.correct_umis(errors = umi_errors , silent = False, jobs = jobs_corr)
-        yaml_out['mols']['saturation']['unmerged']['corrected'] = rssc.saturation()
-    else:
-        print("Not correcting umis")
-    
+
     # TODO this is really important for 10x, long reads
-    # The first step to call an allele consensus is to get a representative sequence for a given UMI
+    # The first step to call an allele consensus is to get a representative sequence at the molecule level
     # thus by_alignment == False to get a ranked based representative
-    rssc.consensus = ogtk.UM.do_fastq_pileup(rssc, 
+    # rssc.consensus = 
+    print(f'getting rank1 seq per UMI')
+    ogtk.UM.do_fastq_pileup(rssc, 
                     min_cov = ranked_min_cov, 
                     threads = threads, 
                     trim_by = None, 
                     by_alignment = False)
 
-    rep_read = [(len(rssc.umis[i].seqs), rssc.consensus[i][1]) for i in rssc.consensus.keys() ]
+
+    print(f'determining valid cells')
+    cell_umi_dict = ogtk.UM.get_list_of_10xcells(
+                    rssc, 
+                    correction_dict_path = correction_dict_path, 
+                    correction_dict = correction_dict)
+
+    print(f'collecting cell allele candidates', end = '...')
+    cell_alleles = cell_dominant_allele(rssc, cell_umi_dict, allele_reps_fn)
+
+    def get_rep_allele(x, min_mol = 3):
+        top_seqs = x['dominant_seq'].value_counts()
+        if top_seqs[0] >=min_mol:
+            return(top_seqs.index[0])
+        else:
+            return(False)
+
+    # TODO qc plot
+    if False: #or plot_qcs
+        def dist_rep_allele(x):
+            top_seqs = x['dominant_seq'].value_counts()
+            return(top_seqs.to_list()[0])
+
+        plt.close('all')
+        yd = cell_alleles.groupby('cell').apply(lambda x: dist_rep_allele(x)).value_counts(normalize = True)
+        xd = yd.index
+        plt.scatter(xd, np.cumsum(yd.to_list()))
+
+    print(f'determining best candidate')
+    cell_consensus = cell_alleles.groupby('cell').apply(lambda x: get_rep_allele(x, min_mol = 3))
+    cell_consensus = cell_consensus[cell_consensus != False]
+
+    cell_consensus.to_csv(consensus_tab_out, sep ='\t')
+    #>>>>>>>>>
+
+    # rscc.consensus hosts a dictionary of the form:
+    # (key = umi, value =(dominant_seq, reads_per_umi, reads_rank1))
+
+    #print(f"called consensuses {len(rssc.consensus)}")
+
+    # the second step is to call a consensus *of the representative molecules*
+    #celldb, cell_umis = compute_allele_pool_percell(consensuses_dict = rssc.consensus, correction_dict_path = correction_dict_path, correction_dict = correction_dict)
+
+    #pickle.dump(celldb, open('/local/users/polivar/celldb.pickle', 'wb'))
+
+    #cov_df = rssc.compute_coverage_table(cell_umis)
+
+    # as a control one can recompute the reads back from the UMI cover 
+    #rep_read = [(len(rssc.umis[i].seqs), rssc.consensus[i][1]) for i in rssc.consensus.keys()]
     #import matplotlib.pyplot as plt
     #plt.scatter(*zip(*rep_read))
-    reads_rank1 = pd.Series([v[1] for i,v in rssc.consensus.items()]).value_counts(normalize= False)
- 
-    print('Coverage for top ranking seq')
-    print(reads_rank1.head(10)/sum(reads_rank1))
-    # save binary
+    #reads_rank1 = pd.Series([v[2] for i,v in rssc.consensus.items()]).value_counts(normalize= False)
 
-    print(f"called consensuses {len(rssc.consensus)}")
+    #print('Coverage for top ranking seq in reads per seq (not per UMI)')
+    #print(reads_rank1.head(10)/sum(reads_rank1))
 
+    # save binaries
     print(f'pickling rs as {pickled_readset}')
     with open(pickled_readset, 'wb') as pcklout:
         pickle.dump(rssc, pcklout)
+
+    #print(f'pickling umi coverage info as {umi_cov_ofn}')
+    #cov_df.to_pickle(umi_cov_ofn)
+
     # determine cells based on the 10x bc
- 
-    # the second step is to call a consensus *of the representative molecules*
-    celldb = {} #stores the candidate representative sequences per cell
-    cell_umis = {} #stores a list of umis that correspond to a given cell
-
-    # correction via correction dictionaries
-    if correction_dict_path != None or correction_dict != None:
-        hits_dic = []
-        print(f'Using cellranger dictionary', end = "...")
-        if correction_dict_path != None or correction_dict == None:
-            print(f'Loading correction dictionaries {correction_dict_path}')
-            crd = pickle.load(open(correction_dict_path, 'rb'))
-        elif correction_dict != None:
-            print("using provided")
-            crd = correction_dict
-
-        for tenex_umi in rssc.consensus.keys():
-            foc_cell = tenex_umi[0:16]
-            if foc_cell in crd['cell_barcodes'].keys():
-                hits_dic.append(1)
-                # convert cells to a cellrager-corrected cell barcode
-                foc_cell = crd['cell_barcodes'][foc_cell]
-                if celldb.get(foc_cell, 0) == 0:
-                    celldb[foc_cell] = []
-                    cell_umis[foc_cell] = []
-                cell_umis[foc_cell].append(tenex_umi) ## remove?
-                celldb[foc_cell].append(rssc.consensus[tenex_umi]) 
-            else:
-                hits_dic.append(0)
-        print(f'correction stats {sum(hits_dic)/len(hits_dic)}')
-    else:
-        for tenex_umi in rssc.consensus.keys():
-            foc_cell = tenex_umi[0:16]
-            if not any([i == "N" for i in foc_cell]):
-                if celldb.get(foc_cell, 0) == 0:
-                    celldb[foc_cell] = []
-                    cell_umis[foc_cell] = []
-                # expand reads
-                cell_umis[foc_cell].append(tenex_umi) ## remove?
-                celldb[foc_cell].append(rssc.consensus[tenex_umi]) 
-
+    # we might need to filter at this level for cells that have more than one molecule ... but what about reads?
+    #pdb.set_trace()
     # This might change
     msa_jobs = 50
     naive = False
  
-    print(f"filled celldb {len(celldb)}")
+    #print(f"filled celldb {len(celldb)}")
    
     #pool = multiprocessing.Pool(threads)
-    print("Calling allele consensus by aligning different UMI-controlled molecules per each cell. ")
+    #print("Calling allele consensus by aligning different UMI-controlled molecules per each cell. ")
     # fname, name, seqs, ranked_min_cov, jobs = args
     job_iter = []
 
     
-    # TODO how can we filter good candidates?
+    # TODO merge the representative sequence information to the molecule counting
     
-    allele_reps = open(allele_reps_fn, "w")
-    cc = []
-    #pdb.set_trace()
-    with open(allele_reps_fn, "w") as allele_reps:
-        for cell in celldb.keys():
-            repseqs_count_list = celldb[cell]
-            tenex_umis = cell_umis[cell]
-            if len(repseqs_count_list)>1:
-                df = pd.DataFrame(repseqs_count_list, columns = ('seqs','counts'))
-                df['raw_umi'] = tenex_umis
-                df['cell'] = cell
-                # TODO how to treat ties?
-                top = df['seqs'].value_counts().head(1)
-                rep_seq = str(top.index.to_list()[0]) 
-                cc.append((cell, rep_seq))
-                #get rep seq per cell and its corresponding counts.
-                #rep_seq, counts = repseqs_count_list[0]
-            else:
-                rep_seq, counts = repseqs_count_list[0]
-                cc.append((cell, rep_seq))
+  ######################### 
+  ######################### 
+  ######################### 
 
-            #cell_name = cell+"_reps"+str(len(tenex_umis))
-            cell_name = cell #+"_reps"+str(len(tenex_umis))
-            # 1 - keep a record on disk of the different candidates and their counts
-            # 2 - append to cc the "best" candidate for a given cell 
-            ##for allele, (umi, counts) in zip(rep_seqs, tenex_umis):
-            ##    #TODO add a real count metric
-            ##    #counts = int(umi_counts.split("_")[1])
-            ##    umi = umi[0][16:]
-            ##    reps = [allele for i in range(counts)]
-            ##    job_iter.append((outdir, cell_name, reps, ranked_min_cov, msa_jobs, naive))
-            ##    #allele_reps.write("{}\n".format("\t".join([cell, str(counts), umi, allele])))
-            ##    allele_reps.write("\t".join([cell, str(counts), umi, allele])+'\n')
-        
+
+    
+    #cc = []
+
+    #cell_alleles = ["cell", "seq", "reads", "reads_umi", "pool_size"]
+    #with open(allele_reps_fn, "w") as allele_reps:
+    #    for cell in cell_umis.keys():
+    #        for umi in cell_umis[cell]:
+    #            umi_counts = pd.Series(rssc.umis[umi].seqs).value_counts()
+    #            rank1_reads = umi_counts.to_list()[0]
+    #            reads_umi = np.sum(umi_counts)
+    #            pool_size = len(umi_counts.index)
+    #            rep_seq = umi_counts.index.to_list()[0]
+    #            print(f'{cell}\t {umi}\n {rep_seq}\n seq reads {seq_reads}\n reads umi {reads_umi}\n reads umi2 {reads_umi2}\n pool size{pool_size}\n===')
+    #        pdb.set_trace()
+    #        repseqs_count_list = celldb[cell]
+    #        tenex_umis = cell_umis[cell]
+    #        if len(repseqs_count_list)>1:
+    #            df = pd.DataFrame(repseqs_count_list, columns = ('seqs','counts'))
+    #            df['raw_umi'] = tenex_umis
+    #            df['cell'] = cell
+    #            # TODO how to treat ties?
+    #            top = df['seqs'].value_counts().head(1)
+    #            rep_seq = str(top.index.to_list()[0]) 
+    #            cc.append((cell, rep_seq))
+    #            #get rep seq per cell and its corresponding counts.
+    #            #rep_seq, counts = repseqs_count_list[0]
+
+    #        #else: #<----
+    #        #    rep_seq, counts = repseqs_count_list[0]
+    #        #    cc.append((cell, rep_seq))
+
+    #        #cell_name = cell+"_reps"+str(len(tenex_umis))
+    #        cell_name = cell #+"_reps"+str(len(tenex_umis))
+    #        # 1 - keep a record on disk of the different candidates and their counts
+    #        # 2 - append to cc the "best" candidate for a given cell 
+    #        ##for allele, (umi, counts) in zip(rep_seqs, tenex_umis):
+    #        ##    #TODO add a real count metric
+    #        ##    #counts = int(umi_counts.split("_")[1])
+    #        ##    umi = umi[0][16:]
+    #        ##    reps = [allele for i in range(counts)]
+    #        ##    ob_iter.append((outdir, cell_name, reps, ranked_min_cov, msa_jobs, naive))
+    #        ##    #allele_reps.write("{}\n".format("\t".join([cell, str(counts), umi, allele])))
+    #        ##    allele_reps.write("\t".join([cell, str(counts), umi, allele])+'\n')
+    #    
     # used for debugging
     if False:
         debug_iter = [i for i in job_iter if len(i[2])>3 ]
@@ -457,16 +514,20 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
     #pool.close()
     #pool.join()
  
-    print(f"filled cc {len(cc)}")
+    #print(f"filled cc {len(cc)}")
     
-    cell_consensus = dict(cc)
-    cons_out = open(consensus_tab_out, 'w') 
-    for cell in cell_consensus.keys():
-        cell_cons = cell_consensus[cell]
-        cons_out.write("\t".join([cell, cell_cons])+'\n')
-    cons_out.close() 
-   
-    if len(cell_consensus.keys()) == 0 :
+    #cell_consensus = dict(cc)
+    #cons_out = open(consensus_tab_out, 'w') 
+    #for cell in cell_consensus.keys():
+    #    cell_cons = cell_consensus[cell]
+    #    cons_out.write("\t".join([cell, cell_cons])+'\n')
+    #cons_out.close() 
+  ######################### 
+  ######################### 
+  ######################### 
+
+    #if len(cell_consensus.keys()) == 0 :
+    if len(cell_consensus) == 0 :
         yaml_out['success'] = False
         print(f'Failed to generate representative sequences for each cell')
         return(None)
@@ -484,7 +545,7 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, intid
     align_reads_to_ref(
             name = outdir+"/"+intid, 
             fa_ofn = fa_correctedm, 
-            consensus_dict = cell_consensus, 
+            consensus_dict = cell_consensus.to_dict(), 
             ref_path = ref_path, 
             ref_name = ref_name, 
             mode=alg_mode, 
@@ -558,7 +619,7 @@ def compute_barcode_matrix_merged(fa_ifn, tab_out,  bint_db_ifn, tab_full_out = 
     FF = pyfaidx.Fasta(fa_ifn, as_raw=True)
     fa_entries = [i for i in FF.keys()]
     outf = open(tab_out, 'w')
-    if tab_full_out == None:
+    if tab_full_out is None:
         tab_full_out = tab_out.replace('.txt', "_full.txt")
     full_out = open(tab_full_out, 'w')
     #for i in range(0, int(len(fa_entries)/2), 2):
@@ -908,187 +969,7 @@ def create_fasta_ref(ref_name, ref_seq, ref_path):
     fout.write('>{}\n{}\n'.format(ref_name, ref_seq))
     fout.close()
 
-def mltb_bin_alleles(name, intid, intid2_R2_strand, config_card_dir, outdir, fq1, fq2, threads = 100, end = 5000, ranked_min_cov = 2, umi_len = 17, umi_errors = 1, alg_gapopen = 20, alg_gapextend =1):
-    '''Once fastq files have been split by: RPI/rev_id/intid process them into a table of barcodes for downstream analysis on R; ranked_min_cov determines the threshold to call a representative rank1 sequence as valid'''
-    intid2 = ogtk.UM.rev_comp(intid2_R2_strand)# same strand as initd1
-    # TODO consider generating a conf file out of the pre-processing step
-    # constant vars
-    ref_path = outdir+'/hspdrv7_scgstl_{}.fa'.format(name)
-    rcref_path = outdir+'/rc_hspdrv7_scgstl_{}.fa'.format(name)
-    ref_name = 'hspdrv7_scgstl_{}'.format(name)
-    #ref_seq = 'gcgccaccacctgttcctgtagaaat{}ccggactcagatctcgagctcaagcttcggacagcagtatcatcgactaTGGagtcgagagcgcgctcgtcgactaTGGagtcgtcagcagtactactgacgaTGGagtcgacagcagtgtgtgagtctaTGGagtcgagagcatagacatcgagtaTGGagtcgactacagtcgctacgactaTGGagtcgacagagatatcatgcagtaTGGagtcgacagcagtatctgctgtcaTGGagtcgactgcacgacagtcgactaTGGAGTCG{}cgagcgctatgagcgactatgc'.format(intid, intid2).upper()
-    ref_seq = 'gccaccacctgttcctgtagaaat{}ccggactcagatctcgagctcaagcttcggacagcagtatcatcgactaTGGagtcgagagcgcgctcgtcgactaTGGagtcgtcagcagtactactgacgaTGGagtcgacagcagtgtgtgagtctaTGGagtcgagagcatagacatcgagtaTGGagtcgactacagtcgctacgactaTGGagtcgacagagatatcatgcagtaTGGagtcgacagcagtatctgctgtcaTGGagtcgactgcacgacagtcgactaTGGAGTCG{}cgagcgctatgagcgactatgc'.format(intid, intid2).upper()
-    bint_db_ifn = '/local/users/polivar/src/projects/mltracer/conf/gstlt_barcode_intervsx10.yaml'
-
-    yaml_out_fn = config_card_dir + '/config_card_{}.yaml'.format(name)
-    yaml_out = {'name':name, 'desc':{}, 'intid1':intid, 'intid2':intid2, 'modality':'bulk'}
-    
-    # for intid in dataset
-    # merge
-    fqm =       outdir + '/{}_merged.fastq'.format(name)
-    fqum1 =     outdir + '/{}_unmerged_R1.fastq'.format(name)
-    fqum2 =     outdir + '/{}_unmerged_R2.fastq'.format(name)
-    ihist =     outdir + '/{}_ihist.txt'.format(name)
-    log_merge = outdir + '/{}_merge_stats.txt'.format(name)
-    cmd_merge = "bbmerge-auto.sh in1={} in2={} out={} outu={} outu2={} ihist={} ecct extend2=20 iterations=5 interleaved=false -Xmx2g ".format(fq1, fq2, fqm, fqum1, fqum2, ihist)
-    
-    yaml_out['desc']['read_merge'] = "Parameters used for the merging of read 1 and read 2"
-
-    umi_counts_ofn = outdir + '/{}_umi_counts.txt'.format(name)
-    yaml_out['mols'] = {}
-    yaml_out['mols']['umi_len'] = umi_len
-    yaml_out['mols']['umi_correction'] = umi_errors
-    yaml_out['mols']['counts'] = umi_counts_ofn 
-    
-    yaml_out['read_merge'] = {}
-    yaml_out['read_merge']['fqm'] = fqm
-    yaml_out['read_merge']['fqum1'] = fqum1
-    yaml_out['read_merge']['fqum2'] = fqum2
-    yaml_out['read_merge']['ihist'] = ihist
-    yaml_out['read_merge']['log_merge'] = log_merge
-
-    # align
-    fa_correctedm = outdir+'/{}_corrected_merged.fa'.format(name)
-    fa_corrected1 = outdir+'/{}_corrected_R1.fa'.format(name)
-    fa_corrected2 = outdir+'/{}_corrected_R2.fa'.format(name)
-
-    yaml_out['desc']['alignment'] = "Parameters for the pairwise alignment of every recovered allele and the reference. The corrected files fix the issue of duplicated fasta entry names"
-
-    yaml_out['alignment'] = {}
-    yaml_out['alignment']['fa_correctedm'] = fa_correctedm
-    yaml_out['alignment']['fa_corrected1'] = fa_corrected1
-    yaml_out['alignment']['fa_corrected2'] = fa_corrected2
-
-    # more outfiles
-    merged_tab_out =   outdir + '/{}_barcodes_merged.txt'.format(name)
- 
-    yaml_out['desc']['lineage'] = "Main output of the pre-processing scripts. Tabulated files that contain the bint barcode string"
-    yaml_out['lineage'] = {}
-    yaml_out['lineage']['merged_tab'] = merged_tab_out
-    yaml_out['lineage']['merged_full'] = merged_tab_out.replace('.txt','_full.txt')
-
-   
-    # merge paired end reads if possible
-
-    pp = subprocess.run(cmd_merge.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    fout = open(log_merge, 'wb')
-    fout.write(pp.stdout)
-    fout.write(pp.stderr)
-    fout.close()
-
-    if end != None:
-        print("Warning: end is not None; You are not processing all the data", end)
-
-    # do a pass on the raw fastqs and group reads by UMI
-    ## for merged (rsm) and unmerged (rs1, rs2)
-    rsm =           ogtk.UM.fastq_collapse_UMI(fqm, umi_len = umi_len, end = end, keep_rid = True)
-    rs1, rs2 =      ogtk.UM.pfastq_collapse_UMI(fqum1, fqum2, umi_len = umi_len, end = end)
-
-    # remove umis that exist on the merged set out of the unmerged
-    unmerged_by_error = set(rsm.umi_list()).intersection(set(rs1.umi_list()))
-    rs1.delete(unmerged_by_error)
-    rs2.delete(unmerged_by_error)
-
-    #TODO the saturation stats should be outsourced somehow and reported for all three cases not just the merged (rsm) 
-    yaml_out['mols']['saturation'] = {}
-    yaml_out['mols']['saturation']['merged'] = {}
-    yaml_out['mols']['saturation']['unmerged'] = {}
-    yaml_out['mols']['nreads'] = {}
-    yaml_out['mols']['nreads']['total'] = sum([rsm.nreads, rs1.nreads])
-    yaml_out['mols']['nreads']['merged'] = rsm.nreads
-    yaml_out['mols']['nreads']['umerged'] = rs1.nreads
-    yaml_out['mols']['desc'] = "number of umis whose rank1 sequence is a >= [1, 2, 3, 4, 5, 10, 100, 1000]"
-    yaml_out['mols']['saturation']['merged']['uncorrected'] = rsm.allele_saturation()
-    yaml_out['mols']['saturation']['unmerged']['uncorrected1'] = rs1.allele_saturation()
-    yaml_out['mols']['saturation']['unmerged']['uncorrected2'] = rs2.allele_saturation()
-
-    if umi_errors >0:
-        print("Correcting umis with a hdist of {}".format(umi_errors))
-        rsm.correct_umis(errors = umi_errors , silent = True, jobs = 80)
-        rs1.correct_umis(errors = umi_errors , silent = True, jobs = 80)
-        rs2.correct_umis(errors = umi_errors , silent = True, jobs = 80)
-        yaml_out['mols']['saturation']['merged']['corrected'] = rsm.saturation()
-        yaml_out['mols']['saturation']['unmerged']['corrected1'] = rs1.saturation()
-        yaml_out['mols']['saturation']['unmerged']['corrected2'] = rs2.saturation()
-
-    else:
-        print("Not correcting umis")
-
-    
-    rsm.consensus = ogtk.UM.do_fastq_pileup(rsm, min_cov = ranked_min_cov, threads = threads, trim_by = None)
-    rs1.consensus = ogtk.UM.do_fastq_pileup(rs1, min_cov = ranked_min_cov, threads = threads, trim_by = None)
-    rs2.consensus = ogtk.UM.do_fastq_pileup(rs2, min_cov = ranked_min_cov, threads = threads, trim_by = None)
-
-    # align allele to reference. merged and unmerged separately
-    ## make sure to include the intid on the reference to help the alignment
-    mlt_create_fasta_ref(ref_name, ref_seq, ref_path)
-    ## also on rev comp (not sure if this is really needed)
-    mlt_create_fasta_ref(ref_name+"RC", ogtk.UM.rev_comp(ref_seq), rcref_path)
-
-    alg_mode = 'needleman'
-    #alg_gapopen = 20
-    #alg_gapextend = 1
-
-    yaml_out['alignment']['alg_mode'] = alg_mode
-    yaml_out['alignment']['alg_gapopen'] = alg_gapopen
-    yaml_out['alignment']['alg_gapextend'] = alg_gapextend
-
-
-    if len(rsm.consensus.keys()) == 0 :
-        yaml_out['success'] = False
-        return(None)
-    else:
-        yaml_out['success'] = True
- 
-
-    mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"m", fa_ofn = fa_correctedm, 
-                            consensus_dict = rsm.consensus, ref_path = ref_path, 
-                            ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
-                            gapextend = alg_gapextend)
-
-    mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"1", fa_ofn = fa_corrected1, 
-                            consensus_dict = rs1.consensus, ref_path = ref_path, 
-                            ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
-                            gapextend = alg_gapextend)
-
-    mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"2", fa_ofn = fa_corrected2, 
-                            consensus_dict = rs2.consensus, ref_path = rcref_path, 
-                            ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
-                            gapextend = alg_gapextend)
-
-    
-    mlt_compute_barcode_matrix_merged(fa_ifn = fa_correctedm, tab_out= merged_tab_out, bint_db_ifn = bint_db_ifn, do_rc=False)
-
-    rs1c = list(rs1.consensus.keys())
-    rs2c = list(rs2.consensus.keys())
-    umi_whitelist = list(set(rs1c).intersection(set(rs2c)))
-
-    print("whitelist:", len(umi_whitelist))
-
-    if len(umi_whitelist)>0:
-        unmerged_tab_out = outdir + '/{}_barcodes_unmerged.txt'.format(name)
-        yaml_out['lineage']['paired_tab'] = unmerged_tab_out 
-        yaml_out['lineage']['paired_full'] = unmerged_tab_out.replace('.txt','_full.txt')
-
-        mlt_compute_barcode_matrix_paired(fa_ifn = fa_corrected1, fa_ifn2 = fa_corrected2, umi_whitelist = umi_whitelist, 
-                                           umi_blacklist = list(rsm.consensus.keys()), tab_out = unmerged_tab_out, bint_db_ifn = bint_db_ifn, do_rc = True)
-
-    # save the count information for the UMIs 
-    with open(umi_counts_ofn, 'w') as fh:
-        fh.write(f'count\tumi\n')
-        for i in (rsm, rs1):
-            counts = i.umi_counts()
-            for count,umi in zip(counts, counts.index):
-                fh.write(f'{count}\t{umi}\n')
-    
-    # save run settings 
-    yaml_stream = open(yaml_out_fn, 'w')
-    yaml.dump(yaml_out, yaml_stream)
-    yaml_stream.close() 
-    print("Run settings saved to config card:\n{}".format(yaml_out_fn))
-
-   
+  
 def compute_dist_mat(mat, bcs, bias, cores = 50, dont_include = 3):
     cores = int(cores)
     #print(f"Warning: FORCED for  using {cores} cores")
@@ -1120,6 +1001,9 @@ def similarity_score(args):
     bias = np.array([float(i) for i in bias])
 
     pct_i = int(len(bcs)/100)
+    if pct_i == 0:
+        pct_i = 1e-6
+
     for i,bc in enumerate(bcs):
         if bc > int(dont_include):
             # TODO fully understand the transition between the matrix types for the following three lines
@@ -1140,4 +1024,79 @@ def to_numpy(mat, ofn):
     with open(ofn, 'wb') as out:
         pickle.dump(mat, out)
 
+def compute_allele_pool_percell(consensuses_dict, correction_dict_path = None, correction_dict = None):
+    '''
+
+    '''
+
+    celldb = {} #stores the candidate representative sequences per cell using the .consensus of a readset
+    cell_umis = {} #stores a list of the original readset umis (CBC:UMI) that correspond to a given cell
+
+    # UMI correction via correction dictionaries
+    if correction_dict_path is not None or correction_dict is not None:
+        hits_dic = []
+        print(f'Using cellranger dictionary', end = "...")
+        if correction_dict_path is not None:
+            print(f'Loading correction dictionaries {correction_dict_path}')
+            correction_dict = pickle.load(open(correction_dict_path, 'rb'))
+        if correction_dict is not None:
+            print("using provided")
+
+        # umi is the whole tenex handle CBC:UMI
+        for umi in consensuses_dict.keys():
+            foc_cell = umi[0:16]
+            if foc_cell in correction_dict['cell_barcodes'].keys():
+                hits_dic.append(1)
+                # correct raw cellbarcode with the cellranger-corrected cellbarcode
+                foc_cell = correction_dict['cell_barcodes'][foc_cell]
+                if foc_cell not in celldb.keys():
+                    celldb[foc_cell] = []
+                    cell_umis[foc_cell] = []
+                cell_umis[foc_cell].append(umi) ## remove?
+                # consensus dict : key = umi, value =(dominant_seq, reads_per_umi, reads_rank1)
+                # we pass the dominant seq and numer of reads per umi
+                celldb[foc_cell].append(consensuses_dict[umi][0:2]) 
+            else:
+                hits_dic.append(0)
+        print(f'correction stats {sum(hits_dic)/len(hits_dic)}')
+    # without correction
+    else:
+        for umi in consensuses_dict.keys():
+            foc_cell = umi[0:16]
+            if not any([i == "N" for i in foc_cell]):
+                if celldb.get(foc_cell, 0) == 0:
+                    celldb[foc_cell] = []
+                    cell_umis[foc_cell] = []
+                # expand reads
+                cell_umis[foc_cell].append(umi) ## remove?
+                celldb[foc_cell].append(consensuses_dict[umi]) 
+    # at this point:
+    #   - celldb hosts the representative sequences for a given cell
+    #   - cell_umis hosts the pointers towards the readset in order to fetch any piece of information
+    # 
+
+    # create and export a dataframe with the coverage information
+
+    # rssc.consensus = (key = umi, value =(dominant_seq, reads_per_umi, reads_rank1))
+
+    return((celldb, cell_umis))
+
+
+def cell_dominant_allele(rs, cell_umi_dict, allele_reps_fn = None):
+    '''
+    returns [and writes] a cell-level table of dominant seqs and their stats
+    '''
+    cell_alleles = [["cell", "dominant_seq", "dominant_reads", "reads_per_umi", "pool_size"]]
+    for cell in cell_umi_dict.keys():
+        for umi in cell_umi_dict[cell]: 
+            umol = rs.umis[umi]
+            if umol.consensus is not None:
+                cons = umol.consensus
+                entry = [cell, cons['dominant_seq'], cons['dominant_reads'], cons['reads_per_umi'], cons['pool_size']]
+                cell_alleles.append(entry)
+    cell_alleles = pd.DataFrame(cell_alleles[1:], columns=cell_alleles[0])   
+    if allele_reps_fn is not None:
+        cell_alleles.to_pickle(allele_reps_fn)
+        print(f'saved cell_alleles {allele_reps_fn}')
+    return(cell_alleles)
 
