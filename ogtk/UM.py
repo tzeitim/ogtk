@@ -43,6 +43,8 @@ class Read_Set:
         self.conf = None
         self.prefix = ''
 
+        self.scurve = []
+
     def saturation(self):
         return(' '.join([ str(sum(self.umi_counts() >= mincov)) for mincov in [1, 2, 3, 4, 5, 10, 100, 1000] ]))
 
@@ -97,6 +99,9 @@ class Read_Set:
 
 
     def add_umi(self, umi, seq, alignment = None, qual = None):
+        self.nreads += 1
+        if self.nreads%10000 ==0:
+            self.scurve.append((len(self.umis), self.nreads))
         if self.umis.get(umi, 0) == 0:
             self.umis[umi] = UM(self.name, umi)
         self.umis[umi].seqs.append(seq)
@@ -253,16 +258,20 @@ def create_tmp_dir_per_user(category = 'tadpole'):
     subprocess.run(f"chmod -R g+rw {tmp_dir}".split())
     return(tmp_dir)
 
-def wrap_kmer_correct(name, umi, k = 31, mincontig='auto', mincountseed=1, verbose = False, keep_tmp = True):
+def wrap_kmer_correct(name, umi, k = 60, mincontig='auto', mincountseed=1, verbose = False, keep_tmp = True, sge_jobs = False, temp_prefix = None):
     username = os.environ['USER']
     temp_dir = create_tmp_dir_per_user(category = 'tadpole')
-    temp_prefix = f'{temp_dir}/tadpolecorr_{name}_'
-    if len(set(umi.seqs))>1:
-       fasta_ofn = temp_prefix+"_"+umi.umi+"_temp.fastq"
-       umi.export_to_fastq(fasta_ofn = fasta_ofn)
-       cseqs = tadpole_correct_fastqs(fasta_ofn, out=fasta_ofn.replace('temp', 'contig').replace('fastq', 'fa'), return_seqs=True, k = k, verbose = verbose, mincontig=mincontig, mincountseed=mincountseed)
+    if temp_prefix is None:
+        temp_prefix = f'{temp_dir}/tadpolecorr_{name}_'
+
+    fasta_ofn = temp_prefix+"_"+umi.umi+"_temp.fastq"
+    umi.export_to_fastq(fasta_ofn = fasta_ofn)
+
+    if sge_jobs:
+        cmds =  tadpole_correct_fastqs(fasta_ofn, out=fasta_ofn.replace('temp', 'contig').replace('fastq', 'fa'), return_seqs=True, k = k, verbose = verbose, mincontig=mincontig, mincountseed=mincountseed, return_cmd = True)
+        return(cmds)
     else:
-       cseqs = False
+        cseqs = tadpole_correct_fastqs(fasta_ofn, out=fasta_ofn.replace('temp', 'contig').replace('fastq', 'fa'), return_seqs=True, k = k, verbose = verbose, mincontig=mincontig, mincountseed=mincountseed)
     if not keep_tmp:
         print(f'Removing temp dir {temp_dir}')
         subprocess.run("rm {temp_dir}".split())
@@ -283,13 +292,25 @@ def wrap_assemble(name, umi, k = 31, mincontig='auto', mincountseed=1, verbose =
         subprocess.run("rm {temp_dir}".split())
     return(contigs)
 
-def monitor_kmer_corr_umi_list(umi_list, rs, pickle_ofn, k = 80, monitor_rate = 100, verbose = False):
+def kmer_corr_umi_list_sge(umi_list, rs, ofn, k = 60, monitor_rate = 100, verbose = False, temp_prefix = None):
     '''Provided a umi list and a readset it attempts to assemble the umis while keeping a pickled record '''
     # cseqs = corrected sequences
     cseqs = {}
-    for umi_str in umi_list:
+    for i,umi_str in enumerate(umi_list):
         umi = rs.umis[umi_str]
-        cseqs[umi.umi] = wrap_kmer_correct(umi.umi, umi, k = k, verbose = verbose)
+        if i%50 == 0 or i ==0 or i ==5 :
+            print(f'\r{100*i/len(umi_list):.4f}% out of {i}/{len(umi_list)}', end = '')
+        cseqs[umi.umi] = wrap_kmer_correct(umi.umi, umi, k = k, verbose = verbose, sge_jobs = True, temp_prefix = temp_prefix)
+    return(cseqs)
+
+
+def monitor_kmer_corr_umi_list(umi_list, rs, pickle_ofn, k = 80, monitor_rate = 100, verbose = False, temp_prefix = None):
+    '''Provided a umi list and a readset it attempts to assemble the umis while keeping a pickled record '''
+    # cseqs = corrected sequences
+    cseqs = {}
+    for i,umi_str in enumerate(umi_list):
+        umi = rs.umis[umi_str]
+        cseqs[umi.umi] = wrap_kmer_correct(umi.umi, umi, k = k, verbose = verbose, sge_jobs = False, temp_prefix = temp_prefix)
         if len(cseqs) % monitor_rate == 0 or len(cseqs) == 5 or len(cseqs) == 1:
             counts = [len(i) for i in cseqs.values() if i]
             print(pd.Series(counts).value_counts())
@@ -533,11 +554,11 @@ def count_umis_bam10x(ifn_bam):
 
 
 
-def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=None, fuse = False, do_rc = False):
+def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=None, fuse = False, do_rc = False, min_reads_per_umi=1):
     '''Constructs a paired Readset by transfering the UMI from R1 to R2 via the
     read id. TODO and converts R2 to the same strand''' 
-    rset1 = fastq_collapse_UMI(fastq_ifn1, umi_len = umi_len, keep_rid = True, end = end)
-    rset2 = fastq_collapse_UMI(fastq_ifn2, umi_len = umi_len, rid_umi = rset1.rid_umi, do_rc = do_rc, end = end)
+    rset1 = fastq_collapse_UMI(fastq_ifn1, umi_len = umi_len, keep_rid = True, end = end, min_reads_per_umi= min_reads_per_umi)
+    rset2 = fastq_collapse_UMI(fastq_ifn2, umi_len = umi_len, rid_umi = rset1.rid_umi, do_rc = do_rc, end = end, min_reads_per_umi= min_reads_per_umi)
 
     #TODO add support for controlling the strandednes of the pooling method, for now this just dumps read2s in to read1s
     if fuse: 
@@ -612,7 +633,6 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_read
                 trim_matches.append(0)
 
         readset.add_umi(umi, seq, qual = qual)
-        readset.nreads += 1
 
         if keep_rid:
             readset.add_rid(umi, rid.split(" ")[0])
