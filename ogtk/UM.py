@@ -101,7 +101,7 @@ class Read_Set:
     def add_umi(self, umi, seq, alignment = None, qual = None):
         self.nreads += 1
         if self.nreads%10000 ==0:
-            self.scurve.append((len(self.umis), self.nreads))
+            self.scurve.append((self.nreads, len(self.umis) ))
         if self.umis.get(umi, 0) == 0:
             self.umis[umi] = UM(self.name, umi)
         self.umis[umi].seqs.append(seq)
