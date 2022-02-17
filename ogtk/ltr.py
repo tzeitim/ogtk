@@ -588,74 +588,208 @@ def mlt_compute_barcode_matrix_paired(fa_ifn, fa_ifn2, umi_whitelist, umi_blackl
                 outf.write('{}\t{}\t{}\n'.format(fa_entries[i], '\t'.join(lineage_vector), '\t'.join(lineage_vector2)))
     outf.close()
     full_out.close()
+
+###########
+########### END
+###########
     
-def mltb_bin_alleles(name, intid, intid2_R2_strand, config_card_dir, outdir, fq1, fq2, 
-threads = 100, end = 5000, ranked_min_cov = 2, umi_len = 17, umi_errors = 1,
- alg_gapopen = 20, alg_gapextend =1):
-    '''Once fastq files have been split by: RPI/rev_id/intid process them into a table of barcodes 
-    for downstream analysis on R; ranked_min_cov determines the threshold to call a representative 
-    rank1 sequence as valid'''
+def bulk_bin_alleles(name, intid, intid2_R2_strand, 
+    config_card_dir, 
+    outdir, 
+    fq1, 
+    fq2, 
+    bint_db_ifn, 
+    min_reads_per_umi =4, 
+    threads = 100, 
+    end = 5000, 
+    ranked_min_cov = 5, 
+    umi_len = 17, 
+    umi_errors = 1,
+    trimming_pattern = None, 
+    alg_gapopen = 20, 
+    alg_gapextend =1):
+    '''Once bulk fastq files (R1 and R2) have been split (RPI>rev_id>intid) process them into a table of barcodes 
+    for downstream analysis.
+    Two modalities to choose for a representative allelle: ranked (consensus = False) 
+    or consensus (consensus = True)
+    '''
 
-    intid2 = ogtk.UM.rev_comp(intid2_R2_strand)# same strand as initd1
-    # TODO consider generating a conf file out of the pre-processing step
-    # constant vars
-    ref_path = outdir+'/hspdrv7_scgstl_{}.fa'.format(name)
-    rcref_path = outdir+'/rc_hspdrv7_scgstl_{}.fa'.format(name)
-    ref_name = 'hspdrv7_scgstl_{}'.format(name)
-    #ref_seq = 'gcgccaccacctgttcctgtagaaat{}ccggactcagatctcgagctcaagcttcggacagcagtatcatcgactaTGGagtcgagagcgcgctcgtcgactaTGGagtcgtcagcagtactactgacgaTGGagtcgacagcagtgtgtgagtctaTGGagtcgagagcatagacatcgagtaTGGagtcgactacagtcgctacgactaTGGagtcgacagagatatcatgcagtaTGGagtcgacagcagtatctgctgtcaTGGagtcgactgcacgacagtcgactaTGGAGTCG{}cgagcgctatgagcgactatgc'.format(intid, intid2).upper()
-    ref_seq = 'gccaccacctgttcctgtagaaat{}ccggactcagatctcgagctcaagcttcggacagcagtatcatcgactaTGGagtcgagagcgcgctcgtcgactaTGGagtcgtcagcagtactactgacgaTGGagtcgacagcagtgtgtgagtctaTGGagtcgagagcatagacatcgagtaTGGagtcgactacagtcgctacgactaTGGagtcgacagagatatcatgcagtaTGGagtcgacagcagtatctgctgtcaTGGagtcgactgcacgacagtcgactaTGGAGTCG{}cgagcgctatgagcgactatgc'.format(intid, intid2).upper()
-    bint_db_ifn = '/local/users/polivar/src/projects/mltracer/conf/gstlt_barcode_intervsx10.yaml'
+    # TODO add tadpole-based correction as an option
+    
+    if not os.path.isdir(outdir):
+        os.makedirs(outdir, exist_ok=True)
+        print("Created {}".format(outdir))
 
-    yaml_out_fn = config_card_dir + '/config_card_{}.yaml'.format(name)
-    yaml_out = {'name':name, 'desc':{}, 'intid1':intid, 'intid2':intid2, 'modality':'bulk'}
+    if not os.path.isdir(config_card_dir):
+        os.makedirs(config_card_dir, exist_ok=True)
+        print("Created {}".format(config_card_dir))
+    
+    out_prefix = f'{outdir}/{name}'
+        
+    # TODO clean this mess redirectin to who knows where
+    # TODO do we neeed thiss?
+    if intid2_R2_strand != None:
+        intid2 = ogtk.UM.rev_comp(intid2_R2_strand)# same strand as initd1
+    else:
+        intid2 = len(intid) * "N"
+   
+    ####bint_db_ifn = '/local/users/polivar/src/projects/mltracer/conf/gstlt_barcode_intervsx10.yaml'
+    bint_db = pyaml.yaml.load(open(bint_db_ifn), Loader=pyaml.yaml.FullLoader)
+
+    conf_fn = config_card_dir + '/config_card_{}.yaml'.format(name)
+    conf = {'name':name, 'desc':{}, 'outdir':outdir, 'intid1':intid, 'intid2': intid2, 'modality':'bulk'}
+
+    ref_seq = bint_db['ref_seq'].replace('{INTID1}', intid).replace('{INTID2}', intid2).upper()
+    ref_name = f'{bint_db["name_plasmid"]}_intid_{intid}'
+    ref_path = outdir+f'/{ref_name}.fa'
+    rcref_path = outdir+f'/rc_{ref_name}.fa'
+
+    #### config
+    conf = conf_dict_write(
+        conf,
+        level = 'inputs',
+        fq1 = fq1,
+        fq2 = fq2
+    )
+    ### bbmerge
+    conf = conf_dict_write(
+        conf,
+        level = 'bbmerge',
+        fastq_merged = f'{out_prefix}_merged.fastq.gz',
+        fastq_umerged1 = f'{out_prefix}_unmerged_R1.fastq.gz',
+        fastq_umerged2 = f'{out_prefix}_unmerged_R2.fastq.gz',
+        ihist =f'{out_prefix}_ihist.txt',
+        k = 60,
+        Xmx = '2g',
+        modality = 'ecct' # error-correct with Tadpole.sh
+        log = f'{out_prefix}_merge_stats.txt',
+    )
+    cmd_bbmerge = f"bbmerge-auto.sh in1={fq1} in2={fq2} out={conf['bbmerge']['fastq_merged']} \
+        k={conf['bbmerge']['k']} \
+        outu={conf['bbmerge']['fastq_umerged1']} \
+        outu2={conf['bbmerge']['fastq_umerged2']} \
+        ihist={conf['bbmerge']['ihist']} \
+        {conf['bbmerge']['modality']} \
+        extend2=20 iterations=5 interleaved=false -Xmx{conf['bbmerge']['Xmx']}"
+ 
+    conf - conf_dict_write(
+        conf,
+        cmd = cmd_bbmerge
+    )
+
+    ### filters
+    conf = conf_dict_write(
+        conf,
+        level = 'filters',
+        reads_sampled = end,
+        ranked_min_cov = ranked_min_cov,
+        min_reads_per_umi = min_reads_per_umi,
+        umi_errors = umi_errors,
+        trimming_pattern = trimming_pattern
+        )
+#### pair-wise alignment
+    conf = conf_dict_write(conf, level='desc', 
+        alignment =  
+        "Parameters for the pairwise alignment of every recovered allele "+
+        "and the reference. The corrected files fix the issue of duplicated"+ 
+        "fasta entry names"
+        )
+    
+    conf = conf_dict_write(
+        conf, 
+        level='alignment', 
+        fa_correctedm =f'{out_prefix}_corrected_merged.fa',
+        alg_mode = 'needleman',
+        alg_gapopen = alg_gapopen,
+        alg_gapextend = alg_gapextend,
+        ref_path  = f'{outdir}/{ref_name}.fa',
+        bint_db_ifn = bint_db_ifn,
+        ref_name = ref_name,
+        )
+               
+   #### cache
+    conf = conf_dict_write(
+        conf, 
+        level = 'cache',
+        readset = f'{out_prefix}_readset.corr.pickle',
+        cseqs = f'{out_prefix}_readset.kmer_cseqs.pickle'
+        )
+   #### main output
+    conf = conf_dict_write(
+        conf, 
+        level='desc', 
+        lineage = "Main output of the preprocessing scripts. Tabulated files that contain the bint barcode string",
+        )
+
+    conf = conf_dict_write(
+        conf,
+        level ='lineage',
+        consensus =    f'{out_prefix}_consensus_by_cell_10x.txt',
+        allele_reps =  f'{out_prefix}_allele_reps.pickle', 
+        merged_tab =   f'{out_prefix}_binned_barcodes_10x.txt',
+        merged_full =  f'{out_prefix}_binned_barcodes_10x_full.txt'
+        )
+   
+    # Molecule data
+    conf = conf_dict_write(
+        conf,
+        level = 'mols',
+        umi_len = umi_len,
+        counts =  outdir + f'{out_prefix}_umi_counts.txt',
+        cov_pck = outdir + f'{out_prefix}_umi_cov.pickle'
+        )
+
+
+
+####    yaml_out_fn = config_card_dir + '/config_card_{}.yaml'.format(name)
+####    yaml_out = {'name':name, 'desc':{}, 'intid1':intid, 'intid2':intid2, 'modality':'bulk'}
     
     # for intid in dataset
     # merge
-    fqm =       outdir + '/{}_merged.fastq'.format(name)
-    fqum1 =     outdir + '/{}_unmerged_R1.fastq'.format(name)
-    fqum2 =     outdir + '/{}_unmerged_R2.fastq'.format(name)
-    ihist =     outdir + '/{}_ihist.txt'.format(name)
-    log_merge = outdir + '/{}_merge_stats.txt'.format(name)
-    cmd_merge = "bbmerge-auto.sh in1={} in2={} out={} outu={} outu2={} ihist={} ecct extend2=20 iterations=5 interleaved=false -Xmx2g ".format(fq1, fq2, fqm, fqum1, fqum2, ihist)
+####    fqm =       outdir + '/{}_merged.fastq'.format(name)
+####    fqum1 =     outdir + '/{}_unmerged_R1.fastq'.format(name)
+####    fqum2 =     outdir + '/{}_unmerged_R2.fastq'.format(name)
+####    ihist =     outdir + '/{}_ihist.txt'.format(name)
+####    log_merge = outdir + '/{}_merge_stats.txt'.format(name)
+####    cmd_merge = "bbmerge-auto.sh in1={} in2={} out={} outu={} outu2={} ihist={} ecct extend2=20 iterations=5 interleaved=false -Xmx2g ".format(fq1, fq2, fqm, fqum1, fqum2, ihist)
     
-    yaml_out['desc']['read_merge'] = "Parameters used for the merging of read 1 and read 2"
-
-    umi_counts_ofn = outdir + '/{}_umi_counts.txt'.format(name)
-    yaml_out['mols'] = {}
-    yaml_out['mols']['umi_len'] = umi_len
-    yaml_out['mols']['umi_correction'] = umi_errors
-    yaml_out['mols']['counts'] = umi_counts_ofn 
-    
-    yaml_out['read_merge'] = {}
-    yaml_out['read_merge']['fqm'] = fqm
-    yaml_out['read_merge']['fqum1'] = fqum1
-    yaml_out['read_merge']['fqum2'] = fqum2
-    yaml_out['read_merge']['ihist'] = ihist
-    yaml_out['read_merge']['log_merge'] = log_merge
-
+####    yaml_out['desc']['read_merge'] = "Parameters used for the merging of read 1 and read 2"
+####
+####    umi_counts_ofn = outdir + '/{}_umi_counts.txt'.format(name)
+####    yaml_out['mols'] = {}
+####    yaml_out['mols']['umi_len'] = umi_len
+####    yaml_out['mols']['umi_correction'] = umi_errors
+####    yaml_out['mols']['counts'] = umi_counts_ofn 
+####    
+####    yaml_out['read_merge'] = {}
+####    yaml_out['read_merge']['fqm'] = fqm
+####    yaml_out['read_merge']['fqum1'] = fqum1
+####    yaml_out['read_merge']['fqum2'] = fqum2
+####    yaml_out['read_merge']['ihist'] = ihist
+####    yaml_out['read_merge']['log_merge'] = log_merge
+####
     # align
-    fa_correctedm = outdir+'/{}_corrected_merged.fa'.format(name)
-    fa_corrected1 = outdir+'/{}_corrected_R1.fa'.format(name)
-    fa_corrected2 = outdir+'/{}_corrected_R2.fa'.format(name)
-
-    yaml_out['desc']['alignment'] = "Parameters for the pairwise alignment of every recovered allele and the reference. The corrected files fix the issue of duplicated fasta entry names"
-
-    yaml_out['alignment'] = {}
-    yaml_out['alignment']['fa_correctedm'] = fa_correctedm
-    yaml_out['alignment']['fa_corrected1'] = fa_corrected1
-    yaml_out['alignment']['fa_corrected2'] = fa_corrected2
-
-    # more outfiles
-    merged_tab_out =   outdir + '/{}_barcodes_merged.txt'.format(name)
- 
-    yaml_out['desc']['lineage'] = "Main output of the pre-processing scripts. Tabulated files that contain the bint barcode string"
-    yaml_out['lineage'] = {}
-    yaml_out['lineage']['merged_tab'] = merged_tab_out
-    yaml_out['lineage']['merged_full'] = merged_tab_out.replace('.txt','_full.txt')
-
+####    fa_correctedm = outdir+'/{}_corrected_merged.fa'.format(name)
+####    fa_corrected1 = outdir+'/{}_corrected_R1.fa'.format(name)
+####    fa_corrected2 = outdir+'/{}_corrected_R2.fa'.format(name)
+####
+####    yaml_out['desc']['alignment'] = "Parameters for the pairwise alignment of every recovered allele and the reference. The corrected files fix the issue of duplicated fasta entry names"
+####
+####    yaml_out['alignment'] = {}
+####    yaml_out['alignment']['fa_correctedm'] = fa_correctedm
+####    yaml_out['alignment']['fa_corrected1'] = fa_corrected1
+####    yaml_out['alignment']['fa_corrected2'] = fa_corrected2
+####
+####    # more outfiles
+####    merged_tab_out =   outdir + '/{}_barcodes_merged.txt'.format(name)
+#### 
+####    yaml_out['desc']['lineage'] = "Main output of the pre-processing scripts. Tabulated files that contain the bint barcode string"
+####    yaml_out['lineage'] = {}
+####    yaml_out['lineage']['merged_tab'] = merged_tab_out
+####    yaml_out['lineage']['merged_full'] = merged_tab_out.replace('.txt','_full.txt')
+####
    
-    # merge paired end reads if possible
-
+    # merge paired-end reads if possible
     pp = subprocess.run(cmd_merge.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     print(f"merge log\n{log_merge}")
     fout = open(log_merge, 'wb')
@@ -780,17 +914,29 @@ threads = 100, end = 5000, ranked_min_cov = 2, umi_len = 17, umi_errors = 1,
     return(yaml_out_fn)
 
 
-###########
-########### END
-###########
-
-def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_correct = True,  
-    min_reads_per_umi = 4, intid2_R2_strand = None, threads = 100, end = 5000, ranked_min_cov = 5, 
-    consensus = False, umi_errors = 1, debug = False, jobs_corr=10, alg_gapopen = 20, alg_gapextend =1, 
-    correction_dict_path = None, correction_dict = None, trimming_pattern = None, use_cache = True):
+def sc_bin_alleles(name, intid, 
+    config_card_dir,
+    outdir, 
+    fqm, 
+    bint_db_ifn, 
+    kmer_correct = True,  
+    min_reads_per_umi = 4, 
+    intid2_R2_strand = None, 
+    threads = 100, 
+    end = 5000, 
+    ranked_min_cov = 5, 
+    consensus = False, 
+    umi_errors = 1,
+    debug = False, 
+    jobs_corr=10, 
+    alg_gapopen = 20,
+    alg_gapextend =1, 
+    correction_dict_path = None, 
+    correction_dict = None, 
+    trimming_pattern = None, 
+    use_cache = True):
     
-    '''
-    Once 10x fastqs (fqm) have been split by integration, merged into a single read and appended by the UMI,
+    '''Once 10x fastqs (fqm) have been split by integration, merged into a single read and appended by the UMI,
     process them into a table of barcodes for downstream analysis
     Two modalities to choose for a representative allelle: ranked (consensus = False) 
     or consensus (consensus = True)
@@ -805,6 +951,8 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_
         os.makedirs(config_card_dir, exist_ok=True)
         print("Created {}".format(config_card_dir))
         
+    out_prefix = f'{outdir}/{name}'
+
     # TODO clean this mess redirectin to who knows where
     # TODO do we neeed thiss?
     if intid2_R2_strand != None:
@@ -827,7 +975,8 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_
 
     ## for 10x
     umi_len = 28
-  
+
+    #### config
     conf = conf_dict_write(
         conf,
         level = 'inputs',
@@ -850,27 +999,27 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_
         "and the reference. The corrected files fix the issue of duplicated"+ 
         "fasta entry names"
         )
-    
+    #### pair-wise alignment
     conf = conf_dict_write(
         conf, 
         level='alignment', 
-        fa_correctedm =outdir+'/{}_corrected_merged.fa'.format(name),
+        fa_correctedm =f'{out_prefix}_corrected_merged.fa',
         alg_mode = 'needleman',
         alg_gapopen = alg_gapopen,
         alg_gapextend = alg_gapextend,
-        ref_path  = outdir+f'/{ref_name}.fa',
+        ref_path  = f'{outdir}/{ref_name}.fa',
         bint_db_ifn = bint_db_ifn,
         ref_name = ref_name,
         )
                 
-   # more outfiles
+   #### cache
     conf = conf_dict_write(
         conf, 
         level = 'cache',
-        readset = outdir + f'{name}_readset.corr.pickle',
-        cseqs = outdir + f'{name}_readset.kmer_cseqs.pickle'
+        readset = f'{out_prefix}_readset.corr.pickle',
+        cseqs = f'{out_prefix}_readset.kmer_cseqs.pickle'
         )
-   
+   #### main output
     conf = conf_dict_write(
         conf, 
         level='desc', 
@@ -880,10 +1029,10 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_
     conf = conf_dict_write(
         conf,
         level ='lineage',
-        consensus = outdir + '/{}_consensus_by_cell_10x.txt'.format(name),
-        allele_reps = outdir + '/{}_allele_reps.pickle'.format(name), 
-        merged_tab =  outdir + '/{}_binned_barcodes_10x.txt'.format(name),
-        merged_full = outdir + '/{}_binned_barcodes_10x_full.txt'.format(name)
+        consensus =    f'{out_prefix}_consensus_by_cell_10x.txt',
+        allele_reps =  f'{out_prefix}_allele_reps.pickle', 
+        merged_tab =   f'{out_prefix}_binned_barcodes_10x.txt',
+        merged_full =  f'{out_prefix}_binned_barcodes_10x_full.txt'
         )
    
     # Molecule data
@@ -891,18 +1040,10 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_
         conf,
         level = 'mols',
         umi_len = umi_len,
-        counts =  outdir + '/{}_umi_counts.txt'.format(name),
-        cov_pck = outdir + '/{}_umi_cov.pickle'.format(name)
+        counts =  outdir + f'{out_prefix}_umi_counts.txt',
+        cov_pck = outdir + f'{out_prefix}_umi_cov.pickle'
         )
 
-    ## make sure to include the intid on the reference to help the alignment
-    conf = conf_dict_write(
-        conf, 
-        level='alignment', 
-        ref_path  = outdir+f'/{ref_name}.fa',
-        ref_name = ref_name
-        )
- 
     print("creating fasta ref")
     create_fasta_ref(conf['alignment']['ref_name'], ref_seq, conf['alignment']['ref_path'])
 
