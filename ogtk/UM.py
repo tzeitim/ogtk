@@ -25,7 +25,7 @@ class Read_Set:
     '''
     Hosts a list UM instances and provides a number of functions to process them
     '''
-    def __init__(self, name = ''):
+    def __init__(self, name = '', scurve_levels = [0, 2, 4, 8, 16]):
         # gets filled with UM instances
         self.umis = {}
         self.name = name
@@ -43,7 +43,16 @@ class Read_Set:
         self.conf = None
         self.prefix = ''
 
-        self.scurve = []
+        self.scurve_levels = scurve_levels
+        self.scurve = {}
+        for i in self.scurve_levels:
+            self.scurve[i] = [(0, 0)]
+
+    def log_scurve(self):
+        counts = self.umi_counts()
+        for i in self.scurve_levels:
+            self.scurve[i].append((self.nreads, np.sum(counts>=i)))
+
 
     def saturation(self):
         return(' '.join([ str(sum(self.umi_counts() >= mincov)) for mincov in [1, 2, 3, 4, 5, 10, 100, 1000] ]))
@@ -96,12 +105,18 @@ class Read_Set:
                 consensuses_tab.write("%s\t%s\n"%("\t".join(entry.split("_")), self.consensus[entry].replace('\n', '')))
         print('save consensuses to %s' % (outfn))
         consensuses_tab.close()
+    def write_consensuses_fasta(self, fasta_fn):
+        ''' write to disk a tabulated file for each umi and its dominant sequence
+        '''
+        # TODO add assertion of correction
+        with open(fasta_fn, 'w') as outf:
+            for umi_str in self.umis.keys():
+                umi = self.umis[umi_str]
+                umi_seq = umi.consensus['dominant_seq']
+                outf.write(">{}\n{}\n".format(umi_str, umi_seq))
 
 
     def add_umi(self, umi, seq, alignment = None, qual = None):
-        self.nreads += 1
-        if self.nreads%10000 ==0:
-            self.scurve.append((self.nreads, len(self.umis) ))
         if self.umis.get(umi, 0) == 0:
             self.umis[umi] = UM(self.name, umi)
         self.umis[umi].seqs.append(seq)
@@ -570,7 +585,7 @@ def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=Non
     
     return([rset1, rset2])
     
-def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_reads_per_umi =1, end=None, keep_rid=False, rid_umi=None, do_rc = False, downsample = False, threshold = 1, verbose = False, trimming_pattern = None):
+def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_reads_per_umi =1, end=None, keep_rid=False, rid_umi=None, do_rc = False, downsample = False, threshold = 1, verbose = False, trimming_pattern = None, wl=None):
 
     '''
     Process a fastq file and collapses reads by UMI making use of their consensus seq
@@ -607,7 +622,15 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_read
     else:
         reads_rids_it = [(x, y, z) for x,y,z in zip(reads, rids, quals)]
 
+    if wl is not None:
+        wl_skipped=0
+        wl = set(wl)
+
     for i, (read, rid, qual) in enumerate(reads_rids_it):
+        readset.nreads += 1
+        if readset.nreads%10000 ==0:
+            #readset.scurve.append((readset.nreads, len(readset.umis.keys()) ))
+            readset.log_scurve()
         read = read.strip()
         if rid_umi == None:
             umi = read[umi_start:umi_len] 
@@ -632,13 +655,21 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_read
             else:
                 trim_matches.append(0)
 
+        if wl is not None:
+            if umi in wl:
+                readset.add_umi(umi, seq, qual = qual)
+            else:
+                wl_skipped+=1
+            continue
+
         readset.add_umi(umi, seq, qual = qual)
 
         if keep_rid:
             readset.add_rid(umi, rid.split(" ")[0])
 
+
     raw_rs_size = len(readset.umis)
-    badly_covered = [umi.umi for umi in readset.umis.values() if len(umi.seqs) <= min_reads_per_umi ]
+    badly_covered = [umi.umi for umi in readset.umis.values() if len(umi.seqs) < min_reads_per_umi ]
     readset.delete(badly_covered)
 
     print(f'A total of {len(badly_covered)}::{100*len(badly_covered)/raw_rs_size:.2f}% umis were removed due to poor coverage')
@@ -652,6 +683,9 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_read
         print(f"A total of {readset.nreads} reads were processed with {len(ucounts)} umis. top10 {top10} ")
     if trimming_pattern != None:
         print(f'trimming stats {sum(trim_matches)}/{len(trim_matches)} {sum(trim_matches)/len(trim_matches):.2f}')
+    if wl is not None:
+        print(f"A total of {readset.nreads} reads were processed but {wl_skipped} were omitted final size ={len(ucounts)}")
+
     return(readset)
 
 def bam_collapse_UMI(bam_ifn, umi_start=0, umi_len=12, end=None):

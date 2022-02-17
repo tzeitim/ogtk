@@ -62,7 +62,6 @@ class matlin():
         else:
             df = self.__read_table(tab, omit_mm = omit_mm)
             indi = self.df.index.union(df.index, sort=False)
-            pdb.set_trace()
             self.df = self.df.merge(df, left_index=True, right_index=True, how='outer', sort=False)
             self.df = self.df.loc[indi]
             self.df.columns = [f'bint{i}' for i in range(self.df.shape[1])]
@@ -330,7 +329,6 @@ class matlin():
         tt[f_na] = self.non_inf["NA"]
         tt[f_wt] = self.non_inf["wt"]
         tt[f_ex] = self.non_inf["ex"]
-        #pdb.set_trace()
         #tt = tt.apply(lambda x: [self.annotate_bint(i, x) for i in x], axis = 0)
         return(tt)
 
@@ -411,8 +409,7 @@ def return_matlins_per_viral_clone(matlin, xv, top_n = 5, do_plot = False):
     split_matlins.append(('code', viral_labels_code))
     return(dict(split_matlins))
 
-    
-def plott(X, truncate_mode = None, p = 30, freq = False, figsize = (15,5), dpi=150):
+def plott(X, truncate_mode = None, p = 30, add_trans = False, freq = False, figsize = (15,5), dpi=150, **kwargs):
     with plt.rc_context({'figure.figsize':figsize, 'figure.dpi':dpi, 'figure.autolayout':True}):
         for x in [i for i in X.values()]:
             if isinstance(x, matlin) or x.__class__.__name__ == 'matlin':
@@ -432,12 +429,17 @@ def plott(X, truncate_mode = None, p = 30, freq = False, figsize = (15,5), dpi=1
                     else:
                         return('::')
                 
-                inters = x.df.index.intersection(mm.index)
-                labels = [map_cluster(i) for i in x.df.index]
+
                 den_ax = ax[0]
-                x.dd= hierarchy.dendrogram(Z, p = p, labels = labels, ax = den_ax, truncate_mode = truncate_mode, orientation = 'left')
-                xlbls = den_ax.get_ymajorticklabels()
-                if truncate_mode is None:
+                if truncate_mode is None and add_trans:
+                    mm = kwargs['mm']
+                    sdata = kwargs['sdata']
+
+                    inters = x.df.index.intersection(mm.index)
+                    labels = [map_cluster(i) for i in x.df.index]
+                    x.dd= hierarchy.dendrogram(Z, p = p, labels = labels, ax = den_ax, truncate_mode = truncate_mode, orientation = 'left')
+
+                    xlbls = den_ax.get_ymajorticklabels()
                     for i,ii in enumerate(xlbls):
                         cluster  = ii.get_text()
                         if cluster == '::':
@@ -447,6 +449,9 @@ def plott(X, truncate_mode = None, p = 30, freq = False, figsize = (15,5), dpi=1
                             ii.set_color(sdata.uns['leiden_colors'][int(cluster)])
                             ii.set_text('---')
                     den_ax.set_yticklabels(['---' for i in xlbls])
+                else:
+                    x.dd= hierarchy.dendrogram(Z, p = p, ax = den_ax, truncate_mode = truncate_mode, orientation = 'left')
+
                 lims = den_ax.get_xlim()
                 lims = np.abs(np.diff(lims)[0])
                 print(lims)
@@ -457,5 +462,5 @@ def plott(X, truncate_mode = None, p = 30, freq = False, figsize = (15,5), dpi=1
             else:
                 print(x.__class__.__name__)
                 print('no')
-
+    
 

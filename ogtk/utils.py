@@ -12,31 +12,33 @@ def grouper(iterable, n, fillvalue=None):
     return itertools.zip_longest(*args, fillvalue=fillvalue)
 
 
-def bulk_merge_dir(raw_path, out_path, clean = True, force = False, errors =0, verbose = False):
-    ''' This wrapper makes use of bbmerge to merge fastqs locate in a given directory '''
+def bulk_merge_dir(raw_path, out_path, clean = True, force = False, errors =0, verbose = False, file_pattern = "fastq.gz"):
+    ''' 
+        This wrapper makes use of bbmerge to merge fastqs locate in a given directory. 
+        file_pattern can be 'fastq' or 'fastq.gz'
+    '''
+    #TODO implement arguments options
 
     if clean and os.path.exists(out_path):
         shutil.rmtree(out_path, ignore_errors=True)
         os.makedirs(out_path)
-        os.makedirs(out_path+"/merged")
         os.makedirs(out_path+"/umerged")
 
     if not os.path.exists(out_path):
         os.makedirs(out_path)
-        os.makedirs(out_path+"/merged")
         os.makedirs(out_path+"/umerged")
 
     ###
     returns = []
-    for i in glob.glob(raw_path+"/*R1*fastq"):
+    for i in glob.glob(raw_path+"/*R1*"+file_pattern):
         f1 = i
         f2 = i.replace('R1', 'R2')
         basename = f1.split('/')[-1]
         basename = basename.split('_R1')[0]
 
-        out_merged = "{}/{}_merged.fastq".format(out_path, basename)
-        out_unmerged1 = "{}/{}_unmerged_R1.fastq".format(out_path, basename)
-        out_unmerged2 = "{}/{}_unmerged_R2.fastq".format(out_path, basename)
+        out_merged = "{}/{}_merged.fastq.gz".format(out_path, basename)
+        out_unmerged1 = "{}/umerged/{}_unmerged_R1.fastq.gz".format(out_path, basename)
+        out_unmerged2 = "{}/umerged/{}_unmerged_R2.fastq.gz".format(out_path, basename)
         unmerged_samples = []
         
         if not os.path.exists(out_merged) or force:
@@ -47,7 +49,7 @@ def bulk_merge_dir(raw_path, out_path, clean = True, force = False, errors =0, v
     return(returns)
 
 def bbmerge_fastqs(f1, f2, out, outu, outu2, verbose = False, bbmerge_bin = 'bbmerge.sh'):
-    ''' use bbtools to merge amplicon derived reads 
+    ''' use bbtools to merge amplicon derived reads. Returns (total, joined, log_ofn) tuple per file found.
     docs: https://github.com/BioInfoTools/BBMap/blob/master/sh/bbmerge.sh
     ref: https://doi.org/10.1371/journal.pone.0185056
     If no present, install through conda bbtools
@@ -64,7 +66,8 @@ def bbmerge_fastqs(f1, f2, out, outu, outu2, verbose = False, bbmerge_bin = 'bbm
         joined = ''.join([i for i in pp.stderr.decode().split('\n') if "Joined" in i])
         joined = float(joined.split('\t')[-1].replace("%", ''))/100
         log = '\n'.join([i for i in pp.stderr.decode().split('\n')])
-        log_ofn =out.replace('fastq', 'log') 
+        log_ofn = out.replace('.gz', '') 
+        log_ofn = log_ofn.replace('fastq', 'log') 
         if verbose:
             print(pp.stderr.decode())
             print("bbmerge log %s" % (log_ofn))
@@ -126,13 +129,15 @@ def tadpole_fastqs(f1, out, verbose = False, k=66, threads =1, tadpole_bin = 'ta
 
         return(True)
 
-def tadpole_correct_fastqs(f1, out, verbose = False, k=66, threads =1, tadpole_bin = 'tadpole.sh', bm1=1, bm2=1, mincontig = "auto", mincountseed = 100, return_seqs=True):
+def tadpole_correct_fastqs(f1, out, verbose = False, k=66, threads =1, tadpole_bin = 'tadpole.sh', bm1=1, bm2=1, mincontig = "auto", mincountseed = 100, return_seqs=True, return_cmd = False):
     ''' use tadpole from bbtools to error-correct a cloud of sequences controlled by a UMI
     '''
     #tadpole.sh in=tmp/f1_ACTTCGCCAGAGTTGG_GTGCGAGAGGGTA.fastq out=mini k=66 overwrite=True bm1=1 bm2=1 mincountseed=4
     cmd = f"{tadpole_bin} in={f1} out={out} k={k} mode=correct overwrite=True bm1={bm1} bm2={bm2} t={threads} -Xmx6g mincontig={mincontig} mincountseed={mincountseed} rcomp=f"
     if verbose:
         print(cmd)
+    if return_cmd:
+        return(cmd)
     pp = subprocess.run(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     if "RuntimeException" in pp.stderr.decode():
@@ -194,6 +199,7 @@ def bam_coverage(bam_path, region):
 
 
 def sfind(path, pattern, options = "-iname"):
+    ''' wrapper for shell's find  '''
     import subprocess
 
     sys_call = subprocess.run(f'find {path} {options} {pattern}'.split(), stdout =subprocess.PIPE, text = True)
@@ -318,3 +324,102 @@ def generate_correction_dictionaries(pickle_ofn, path_to_bam, force = False, ver
         return(dd)
 
 
+def fill_sge_template(job_name, cmd, wd, pe = 'smp', ram = '7G', run_time = "00:10:00", job_reservation = False):
+    job_out = f'{wd}/{job_name}.stdout'
+    job_err = f'{wd}/{job_name}.stderr'
+    args = locals()
+    template = return_sge_template()
+    
+    for k in args.keys():
+        if k == 'job_reservation':
+            if args[k]:
+                args[k] = 'y'
+            else:
+                args[k] = 'n'
+        template = template.replace('{'+k.upper()+'}', str(args[k]))
+
+    return(template)
+
+def return_sge_template(**kargs):
+
+    '''Returns an empty job template
+    options = ['interconnects']
+    '''
+
+    options = {'interconnects': "#$ -l {INTER}            # select ib for infiniband or opa for omni-path\n"}
+    template = "\
+    #!/bin/bash\n\
+    \n\
+    #$ -N {JOB_NAME}       # specify a job name (script name as default)\n\
+    #$ -o {JOB_OUT}        #\n\
+    #$ -e {JOB_ERR}        #\n\
+    #$ -pe {PE}      # use parallel environments orte and 32 slots\n\
+    #$ -l m_mem_free={RAM} # max memory (RAM) per slot (4G as default on all.q)\n\
+    #$ -l h_rt={RUN_TIME} # max run time in hh:mm:ss (4 days as default on all.q)\n\
+    #$ -R {JOB_RESERVATION}             # use job reservation, needed for MPI jobs\n\
+    #$ -cwd             # start the job in current working directory\n\
+    "
+
+    guix_template='\n\
+    # Set user~@~Ys default guix profile:\n\
+    export GUIX_PROFILE="$HOME/.guix-profile"\n\
+    # Load the guix profile:\n\
+    source "$GUIX_PROFILE/etc/profile"\n\
+    # Use the guix locale, not of the host system\n\
+    export GUIX_LOCPATH="$GUIX_PROFILE/lib/locale"\n'
+
+    guix_original='\
+    source $GUIX_PROFILE/etc/profile\n\
+    /home/polivar/.guix-profile\n\
+    ### add guix environment variables\n\
+    source ~/.guix-profile/etc/profile\n\
+    ### stacksize unlimited, needed for large MPI jobs\n\
+    ulimit -s unlimited\n'
+
+    cmd_template = "\
+    ulimit -s unlimited\n\
+    ### Start the job\n\
+    {CMD}\n\
+    "
+    if len(kargs.keys()) >0:
+        for key in kargs.keys():
+            if key in options.keys():
+                template = template + options[key]
+
+    template = '\n'.join([template , guix_template])
+    template = '\n'.join([template , cmd_template])
+
+    return(template)
+
+def split_bam_by_tag(bam_ifn, tab, prefix, tag = 'CB', header = None):
+    import pysam
+    import pandas as pd 
+    import subprocess
+    time = subprocess.run('date')
+    df = pd.read_csv(tab, sep='\t', header=header)
+    df.columns = [tag, 'ann']
+    bam = pysam.AlignmentFile(bam_ifn, 'rb')
+    # map tag->ann
+    tag_ann_dict = dict(zip(df[tag], df['ann']))
+    anns = set(tag_ann_dict.values())
+    print(f" loaded {len(tag_ann_dict)} keys for {len(anns)} annotations")
+
+    # create dictionaty of outstreams
+    outs = {}
+    for ann in anns:
+        outs[ann] = pysam.AlignmentFile(f'{prefix}_{ann}.bam','wb', template = bam)
+    outs['undet'] = pysam.AlignmentFile(f'{prefix}_undet.bam','wb', template = bam)
+ 
+    for read in bam.fetch():
+        if read.has_tag(tag):
+            foc_tag = read.get_tag(tag)
+            
+            if foc_tag in tag_ann_dict.keys():
+                outs[tag_ann_dict[foc_tag]].write(read)
+            else:
+                outs['undet'].write(read)
+
+    for ann in outs.keys():
+        outs[ann].close()
+
+    time = subprocess.run('date')

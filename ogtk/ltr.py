@@ -11,7 +11,19 @@ import regex
 import numpy as np
 import pandas as pd
 import pdb
-#import ltr_mtl <- how to import a script
+import os
+import glob
+import pandas as pd
+import numpy as np
+import regex
+import itertools
+import ogtk
+import pdb
+import time, random
+import multiprocessing
+import gzip 
+
+#from .bin_alleles import Bin_Alleles
 
 
 def extract_intid_worker(args):
@@ -38,8 +50,13 @@ def extract_intid_pair_worker(args):
     return(hits)
 
 
-def detect_integrations_dual(ifn, intid_len =8, anchor1 = "CTGTTCCTGTAGAAAT", error1 = 3, anchor2 = "CCGGACTCAGATCTCGAGCT", error2 = 2, anchor3="CGAGCGCTATGAGCGACTATGGGA", error3=3, limit = None, cores = 50):
-    ''' process fastq/fastq.gz/bam file and detects number of integrations by means of anchoring seqs (anchor1, anchor2, anchor3)
+def detect_integrations_dual(ifn, n_intid = None, intid_len = 8, 
+    anchor1 = "CTGTTCCTGTAGAAAT", error1 = 3, \
+    anchor2 = "CCGGACTCAGATCTCGAGCT", error2 = 2, \
+    anchor3 = "CGAGCGCTATGAGCGACTATGGGA", error3 = 3, \
+    limit = None, cores = 50, verbose = False):
+    ''' process fastq/fastq.gz/bam file and detects number of integrations 
+    by means of anchoring seqs (anchor1, anchor2, anchor3)
     Supports fuzzy matching via the errors argument.
     Number cores can be adjusted
     '''
@@ -73,54 +90,51 @@ def detect_integrations_dual(ifn, intid_len =8, anchor1 = "CTGTTCCTGTAGAAAT", er
     pool = multiprocessing.Pool(cores)
 
     hits = np.array(pool.map(extract_intid_worker,  itertools.zip_longest([rxc], chunks, fillvalue=rxc)), dtype=object)
-    hits_paired = np.array(pool.map(extract_intid_pair_worker,  itertools.zip_longest([[rxc, rxc2]], chunks, fillvalue=[rxc, rxc2])))
+    hits_paired = np.array(pool.map(extract_intid_pair_worker,  itertools.zip_longest([[rxc, rxc2]], chunks, fillvalue=[rxc, rxc2])), dtype=object)
 
     pool.close()
     pool.join()
+    filtered_hits_s = detect_integrations_filter_hits(hits, n_intid, verbose = verbose)
+    filtered_hits_d = detect_integrations_filter_hits(hits_paired, n_intid, verbose = verbose)
+    # TODO how to deal with both modalities in one?
+    return(filtered_hits_d)
 
-    hits = [item for sublist in hits for item in sublist]
-    x = pd.Series(hits).value_counts()
-    xx = pd.Series([int(np.log10(i)) for i in x], index = x.index)
-
-    valid_ints = [i for i in x[xx>(xx[0]-1)].index]
-    print("Found {} valid integrations".format(len(valid_ints)))
-    if len(hits_paired) >0:
-        print("Paired ints found")
-        x = pd.Series([item for sublist in hits_paired for item in sublist]).value_counts()
-        xx = pd.Series([int(np.log10(i)) for i in x], index = x.index)
-        valid_ints = [i for i in x[xx>(xx[0]-1)].index]
-    print(valid_ints)
-    return(valid_ints)
-
-def export_ntop_intids_json(intid_series, n_top, ofn):
+def detect_integrations_export_ntop_intids_json(intid_series, n_top, ofn):
     import pyaml
     import pandas as pd
     df = pd.DataFrame({'intid_code':[f'intid_{i:02d}' for i in range(n_top)], 'intid':intid_series.head(n_top).index})
     df.to_json(ofn)    
     
-def detect_integrations_single(ifn, n_intid = None, intid_len =8, anchor1 = "CTGTTCCTGTAGAAAT", error1 = 3, anchor2 = "CCGGACTCAGATCTCGAGCT", error2 = 2, limit = None, cores = 50):
+def detect_integrations_single(ifn, n_intid = None, intid_len = 8,\
+        anchor1 = "CTGTTCCTGTAGAAAT", error1 = 3,\
+        anchor2 = "CCGGACTCAGATCTCGAGCT", error2 = 2,\
+        limit = None,\
+        cores = 50,\
+        do_rc = False, verbose = False):
     ''' For barcoded integrations with a single identifier.
-    Process fastq/fastq.gz/bam file and detects number of integrations by means of anchoring seqs (anchor1, anchor2)
-    Supports fuzzy matching via the errors argument.
-    Number cores can be adjusted
+        Process fastq/fastq.gz/bam file and detects number of integrations by means of anchoring seqs (anchor1, anchor2)
+        Supports fuzzy matching via the errors argument.
+        Number cores can be adjusted
     '''
     # Determine the iterator in order to fetch sequences
     if ifn.endswith("fastq"):
         with open(ifn) as ff:
             it = itertools.islice(ff, 1, limit, 4)
-            seqs = [i for i in it]
+            seqs = [ogtk.UM.rev_comp(i.strip())+'\n' if do_rc else i for i in it]
            
     if ifn.endswith("fastq.gz"):
         import gzip
         with gzip.open(ifn, 'rt') as ff:
             it = itertools.islice(ff, 1, limit, 4)
-            seqs = [i for i in it]
+            #seqs = [i for i in it]
+            seqs = [ogtk.UM.rev_comp(i.strip())+'\n' if do_rc else i for i in it]
 
     if ifn.endswith("bam"):
         import pysam
         it= pysam.AlignmentFile(ifn)
         it = [i.seq for i in it]
-        seqs = [i for i in it]
+        #seqs = [i for i in it]
+        seqs = [ogtk.UM.rev_comp(i.strip())+'\n' if do_rc else i for i in it]
         
     # we trim the first 100bp to reduce the memory footprint
     #seqs = [i[0:100] for i in it]
@@ -138,20 +152,43 @@ def detect_integrations_single(ifn, n_intid = None, intid_len =8, anchor1 = "CTG
 
     pool.close()
     pool.join()
+    filtered_hits = detect_integrations_filter_hits(hits, n_intid)
+    return(filtered_hits)
 
+
+#    hits = [item for sublist in hits for item in sublist]
+#    x = pd.Series(hits).value_counts()
+#    xx = pd.Series([int(np.log10(i)) for i in x], index = x.index)
+#    
+#    if n_intid != None:
+#        return(x.head(n_intid))
+#    else:
+#        print(f'No expected number of integrations provided, returning an guess based on the top ranking intid counts. ')
+#        valid_ints = [i for i in x[xx>(xx[0]-1)].index]
+#        print("Found {} valid integrations".format(len(valid_ints)))
+#        print(valid_ints)
+#        return(valid_ints)
+def detect_integrations_filter_hits(hits, n_intid = None, verbose=False):
+    ''' Helper function to filter out valid hits from an integration number detection stepi
+    '''
     hits = [item for sublist in hits for item in sublist]
-    x = pd.Series(hits).value_counts()
-    xx = pd.Series([int(np.log10(i)) for i in x], index = x.index)
-    
-    if n_intid != None:
-        return(x.head(n_intid))
-    else:
-        print(f'No expected number of integrations provided, returning an guess based on the top ranking intid counts. ')
-        valid_ints = [i for i in x[xx>(xx[0]-1)].index]
-        print("Found {} valid integrations".format(len(valid_ints)))
-        print(valid_ints)
-        return(valid_ints)
+    hit_counts = pd.Series(hits).value_counts()
+    hit_lcounts = pd.Series([int(np.log10(i)) for i in hit_counts], index = hit_counts.index)
 
+    if n_intid != None:
+        return(hit_counts.head(n_intid))
+    else:
+        if verbose:
+            print(f'No expected number of integrations provided, returning an guess based on the top ranking intid counts.')
+        if len(hit_lcounts) == 0 :
+            if verbose:
+                print("No valid integrations found")
+            return([])
+        valid_hits = hit_counts[hit_lcounts>(hit_lcounts[0]-1)]
+        valid_ints = [i for i in valid_hits.index]
+        if verbose:
+            print("Found {} valid integrations".format(len(valid_ints)))
+        return(valid_ints)
 
 def preprocessing_split_10xfastq_by_intid(valid_intids, intid_len, fq1, fq2, anchor1, anchor2, outdir, limit = None):
     '''Given a list of valid integration ids (5') it splits the fastq files accordingly. It also appends the 10x barcode to the split read'''
@@ -228,28 +265,537 @@ def preprocessing_split_10xfastq_by_intid(valid_intids, intid_len, fq1, fq2, anc
     print(f'\nundet {undet}/{i}')
     for i in valid_intids:
         out_files_dic2[i].close()
+###########
+########### BEGINNING
+###########
+def split_fastq_by_intid(valid_pairs_tab, fq1, fq2, dname, outdir, limit = None, len_sample_id = 6):
+    valid_pairs = open(valid_pairs_tab).readlines()
+    intid1_wl = {}
+    intid2_wl = {}
+
+    valids = {}
+    for i,line in enumerate(valid_pairs):
+        #pdb.set_trace()
+        i1, i2 = line.strip().split('\t')
+        key = i1+"_"+i2
+        valids[key] = key
+        #intid1_wl[i1] = i
+        #intid2_wl[i2] = i
+    #print(intid1_wl)
+    #print(intid2_wl)
+    #if len(intid1_wl.keys()) != len(intid2_wl.keys()):
+    #    print("error, didn't find the same whitelists")
+    #    return(0)
+
+    rx1 = return_default_regex()[0]
+    rx2 = return_default_regex()[1]
+    
+    f1 = gzip.open(fq1, 'rt') if fq1.endswith("fastq.gz") else open(fq1)
+    f2 = gzip.open(fq2, 'rt') if fq2.endswith("fastq.gz") else open(fq2)
+
+    if limit != None:
+        print("Warning this is a subset")
+    i1 = itertools.islice(f1, 0, limit, 1)
+    i2 = itertools.islice(f2, 0, limit, 1)
+
+    out_files_dic1 = {}
+    out_files_dic2 = {}
+
+    #print("intid1_wl, intid2_wl")
+    #print(intid1_wl, intid2_wl)
+
+    for ipair in valids.keys():#zip(intid1_wl.keys(), intid2_wl.keys()):
+        out_files_dic1[ipair] = open(f"{outdir}/splitraw_{dname}_intid_{ipair}_R1.fastq".format(outdir, dname, ipair), 'w')
+        out_files_dic2[ipair] = open(f"{outdir}/splitraw_{dname}_intid_{ipair}_R2.fastq".format(outdir, dname, ipair), 'w')
+
+    id =[]
+    seq = []
+    plus = []
+    qual = []
+    chimeric = 0
+
+    for i,v in enumerate(zip(i1,i2)):
+            if i%100000 == 0:
+                print("\r"+str(i), end='')
+            l1 = v[0].strip()
+            l2 = v[1].strip()
+
+            # this corresponds to read id
+            if i%4 == 0:
+                id = [l1, l2]
+            # this corresponds to read seq
+            if i%4 == 1:
+                seq = [l1, l2]
+            # this corresponds to read '+'
+            if i%4 == 2:
+                plus = [l1, l2]
+            # this corresponds to read qual
+            if i%4 == 3:
+                qual = [l1, l2]
+
+            if qual:
+                m1 = rx1.search(seq[0])
+                m2 = rx2.search(seq[1])
+                if m1 and m2:
+                    # if both integration ids are found and valid, select the reads
+                    #if m1.group('intid1') in intid1_wl.keys() and m2.group('intid2') in intid2_wl.keys():
+                    i1 = m1.group('intid1')
+                    i2 = m2.group('intid2')
+                    key = i1+"_"+i2
+                    if key in valids.keys():
+                        out_files_dic1[key].write("\n".join([id[0], seq[0], plus[0], qual[0]]) +'\n')
+                        out_files_dic2[key].write("\n".join([id[1], seq[1][len_sample_id-1:], plus[1], qual[1][len_sample_id-1:]]) +'\n')
+                        #print(intid1, intid2, m1.group('intid1'), m2.group('intid2'))
+                    else:
+                        chimeric += 1
+                            #if intid1 != intid2:
+                            #print('mismatch between integration ids')
+                            #raise AssertionError
+                       # else:
+                       # filter_good+=1
+                    #else:
+                    #    inv1.write("\n".join([id[0]+ " sample_id:%s"%(sample_id), seq[0], plus[0], qual[0]]) +'\n')
+                    #    inv2.write("\n".join([id[1]+ " sample_id:%s"%(sample_id), seq[1], plus[1], qual[1]]) +'\n')
+                    #    filter_bad+=1
+
+                id = []
+                seq = []
+                plus = []
+                qual = []
+    total = i/4
+    print(f"{fq1}: out of {total} reads, {chimeric} were chimeric ({chimeric/total:.2%})")
+    # close the file handles
+    for i in intid1_wl.values():
+       out_files_dic1[i].close()
+       out_files_dic2[i].close()
+
+
+def return_default_regex(umi_len = 19, intid_len =8):
+    rx1 = regex.compile("(?P<umi>.{"+str(umi_len)+"}).*(CTGTTCCTGTAGAAAT){e<=2}(?P<intid1>.{"+str(intid_len)+"}).*(CCGGACTCAGATCTCGA){e<=2}")
+    rx2 = regex.compile(".*(GCTCATAGCGCTCG){e<=3}(?P<intid2>.{"+str(intid_len)+"}).*(CGACTCCATAGTCGAC){e<=2}")
+    return(rx1, rx2)
+
+def guess_valid_intid_pairs(outdir, f1_fn, f2_fn, sample_name, sampling_depth, umi_len = 19, intid_len = 8, rx1 = None, rx2 = None, orderm = 1.5):
+    if rx1 == None:
+        rx1 = return_default_regex()[0]
+    if rx2 == None:
+        rx2 = return_default_regex()[1]
+
+    ## Trace the number and combination of valid integrations
+    f1 = gzip.open(f1_fn, 'rt') if f1_fn.endswith("fastq.gz") else open(f1_fn)
+    f2 = gzip.open(f2_fn, 'rt') if f2_fn.endswith("fastq.gz") else open(f2_fn)
+
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    print(f"dumping the integration pair table at the read level at:\n{outdir} using a stringency of base10({orderm})")
+    random_start = random.randrange(1e4)
+    random_start = random_start- random_start%4
+    i1 = itertools.islice(f1, random_start+1, int(sampling_depth), 4)
+    i2 = itertools.islice(f2, random_start+1, int(sampling_depth), 4)
+    pair_tab = '{}/int_pair_table.txt'.format(outdir)
+    o1 = open(pair_tab, 'w')
+    for r1,r2 in zip(i1,i2):
+        m1 = rx1.search(r1)
+        m2 = rx2.search(r2)
+        if m1 and m2:
+            o1.write("\t".join([m1.group('umi'), m1.group('intid1'), m2.group('intid2')])+'\n')
+    o1.close()
+    f1.close()
+    f2.close()
+    pairs = open(pair_tab)
+    
+    pp = []
+    for line in pairs:
+        int1, int2 = line.strip().split('\t')[1:3]
+        pp.append(int1+"_"+int2)
+    
+    pairs.close()
+
+    x = pd.Series(pp).value_counts()
+    xx = pd.Series([int(np.log10(i)) for i in x], index = x.index)
+    
+    valid_pair_path = "{}/valid_pairs".format(outdir)
+    valid_pair_tab = open(valid_pair_path, 'w')
+    if len(xx)==0:
+        return(valid_pair_path)
+    # keep only the most abundant pairs
+    # orderm defines the number of orders of magnitude base 10 for which to filter out
+    for i in x[xx>(xx[0]-orderm)].index:
+        intid1, intid2 = i.split("_")
+        #valid_pair_tab.write("\t".join([intid1, ogtk.UM.rev_comp(intid2)])+"\n")
+        valid_pair_tab.write("\t".join([intid1, intid2])+"\n")
+        print("\t".join([intid1, intid2]))
+    valid_pair_tab.close()
+    return(valid_pair_path)
+
+def demult_fastq_pair(args):
+    ''' wrapper for guessing and demultiplexing for pool.map()'''
+    outdir, f1_fn, f2_fn, sample_name, sampling_depth, umi_len, intid_len, rx1, rx2, orderm = args
+    print(f1_fn)
+
+    valid_pairs_tab = guess_valid_intid_pairs(outdir = outdir, f1_fn = f1_fn, f2_fn = f2_fn, 
+                            sample_name = sample_name, sampling_depth = sampling_depth,  
+                            umi_len = umi_len, intid_len = intid_len, rx1 = rx1, rx2 = rx2, orderm = orderm)
+
+    demult_outdir  = "/".join(valid_pairs_tab.split("/")[0:-1])
+    log = f'[{time.strftime("%c")}]\nDemultiplexing {sample_name} {valid_pairs_tab} outdir = {demult_outdir}'
+
+    print(log)
+    split_fastq_by_intid(valid_pairs_tab = valid_pairs_tab, fq1 = f1_fn, fq2 = f2_fn, dname = sample_name, 
+                    outdir = demult_outdir, limit = None, len_sample_id = 6)
+     
+def demult_per_illumina_index(rootdir, umi_len = 19, intid_len = 8, orderm = 1.5, sampling_depth = 1e5, threads = None):
+    ''' Iterates over rootdir, finds R1 fastqs, sampling them {sampling_depth} to guess {orderm} the number of valid pairs - then proceeds to split the fastq files'''
+    # TODO add support for gz
+    import glob
+    import time
+                                           
+    files_fq = glob.glob(rootdir+'/*R1*fastq*')
+    print(f'[{time.strftime("%c")}]\nProcessing {rootdir} umi_len = {umi_len} intid_len = {intid_len}')
+    rx1 = return_default_regex()[0]
+    rx2 = return_default_regex()[1]
+    
+    if threads == None:
+        threads = len(files_fq)
+    pool = multiprocessing.Pool(threads)
+    pool_cmds = []
+    ## Trace the number and combination of valid integrations
+    for f1_fn in files_fq:
+        f2_fn = f1_fn.replace('R1', 'R2')
+        sample_name = f1_fn.split("/")[-1].split(".")[0].split("_S")[0]
+        outdir = f"{rootdir}/by_intid/{sample_name}"
+        pool_cmds.append((outdir, f1_fn, f2_fn, sample_name, sampling_depth, umi_len, intid_len, rx1, rx2, orderm))
+
+    pool.map(demult_fastq_pair, iter(pool_cmds) )
+    pool.close()
+
+
+def mlt_create_fasta_ref(ref_name, ref_seq, ref_path):
+    fout = open(ref_path, 'w')
+    fout.write('>{}\n{}\n'.format(ref_name, ref_seq))
+    fout.close()
+
+def mltbc_make_unique_fa_ref_entries(fa_ifn, fa_ofn, ref_name = 'hspdrv7_scgstl'):
+    '''Small helper function that relabels reference entries on a pair-wise sequence alignments.
+        It appends the UMI to the ref name'''
+    FF = open(fa_ifn)
+    entries = []
+    whole_fa = []
+    for i,line in enumerate(FF):
+        if line[0] == ">":
+             entries.append(i)
+        whole_fa.append(line)
+    # if we don't set dtype to object, then the appended string is trimmed byt numpy
+    whole_fa = np.array(whole_fa, dtype=object)
+    start  =  1 if ref_name in whole_fa[0] else 0
+    offset = -1 if ref_name in whole_fa[0] else 1
+    umis = itertools.islice(entries, start, None, 2)
+    refs = itertools.islice(entries, start+offset, None, 2)
+    for umi,ref in zip(umis, refs):
+        umi = whole_fa[umi][1:].strip()
+        new_ref = "{}_{}\n".format(whole_fa[ref].strip(), umi)
+        whole_fa[ref] = new_ref
+    
+    ofa = open(fa_ofn, 'w')
+    for i in whole_fa:
+        ofa.write(i)
+    ofa.close()
+   
+
+def mltbc_align_reads_to_ref(name, fa_ofn, rs, ref_path, ref_name = 'hspdrv7_scgstl', 
+    mode='needleman', gapopen = 20, gapextend = 1, verbose = False):
+    pwalg_in = '{}_in_pair_algn.fa'.format(name)
+    pwalg_out = '{}_out_pair_algn.fa'.format(name)
+
+    rs.write_consensuses_fasta(pwalg_in)
+
+    print(gapopen)
+    if mode == 'waterman':
+        'water -gapextend 1 -gapopen 20 -datafile EDNAFULL -awidth3=100 -aformat3 fasta  -asequence ptol2-hspdrv7_scgstl.fa -bsequence msa_in.fa  -aaccshow3 yes -outfile ww.fasta -snucleotide2  -snucleotide1' 
+    if mode == 'needleman':
+        cmd_template = 'needleall -gapextend {} -gapopen {} -datafile EDNAFULL -awidth3=100  -minscore 90 -bsequence {} -asequence {} -aaccshow3 yes'.format(gapextend, gapopen, ref_path, pwalg_in)
+    
+        cmd_needleman = '{} -aformat3 {} -outfile {}'.format(cmd_template, "fasta", pwalg_out)
+        if verbose: print(cmd_needleman) 
+        oo= subprocess.run(cmd_needleman.split(), stdout=subprocess.PIPE, stderr= subprocess.PIPE)
+        if verbose: print(oo.stdout, oo.stderr)
+
+        cmd_needleman = '{} -aformat3 {} -outfile {}'.format(cmd_template, "score", pwalg_out.replace('fa', 'score'))
+        if verbose: print(cmd_needleman) 
+        oo= subprocess.run(cmd_needleman.split(), stdout=subprocess.PIPE, stderr= subprocess.PIPE)
+        if verbose: print(oo.stdout, oo.stderr)
+
+        #cmd_needleman = '{} -aformat3 {} -outfile {}'.format(cmd_template, "srs", pwalg_out.replace('fa', 'srs'))
+        #print(cmd_needleman)
+        #subprocess.run(cmd_needleman.split())
+
+        cmd_needleman = '{} -aformat3 {} -outfile {}'.format(cmd_template, "simple", pwalg_out.replace('fa', 'simple'))
+        if verbose: print(cmd_needleman) 
+        oo= subprocess.run(cmd_needleman.split(), stdout=subprocess.PIPE, stderr= subprocess.PIPE)
+        if verbose: print(oo.stdout, oo.stderr)
+    
+    mltbc_make_unique_fa_ref_entries(fa_ifn = pwalg_out, fa_ofn = fa_ofn, ref_name = ref_name)
+
+
+def mlt_compute_barcode_matrix_paired(fa_ifn, fa_ifn2, umi_whitelist, umi_blacklist, tab_out, bint_db_ifn, tab_full_out = None, do_rc = False):
+
+    '''Writes to disk a tabulated file with the corresponfing bint strings.
+    Requires a list of valid UMIs (whitelist:union set from R1 and R2), a list of
+    invalid UMIs (sometimes the same UMI cannot be merged and thus appears on both,
+    merged (gets priority and defines blacklist) and unmerged fractions,  and a
+    fasta file that provides the pairwise aligment between a lineage allele and the
+    reference'''
+
+    FF = pyfaidx.Fasta(fa_ifn, as_raw=True)
+    FF2 = pyfaidx.Fasta(fa_ifn2, as_raw=True)
+    
+    #TODO: make more elegant by subtracting intersection of white and blacklists
+    fa_entries = umi_whitelist#[i for i in FF.keys()]
+    outf = open(tab_out, 'w')
+    if tab_full_out == None:
+        tab_full_out = tab_out.replace('.txt', '_full.txt')
+    full_out = open(tab_full_out, 'w')
+
+    for i in range(0, int(len(fa_entries)/2), 2):
+        #if fa_entries[i] in umi_whitelist and fa_entries[i] not in umi_blacklist:
+    #TODO: make more elegant by subtracting intersection of white and blacklists
+        if fa_entries[i] not in umi_blacklist:
+            ref_seq  = FF[i+1][:].upper() #if not do_rc else ogtk.UM.rev_comp(FF[i+1][:].upper()) 
+            read_seq = FF[i][:].upper() #if not do_rc else ogtk.UM.rev_comp(FF[i][:].upper()) 
+
+            ref_seq2  = FF2[i+1][:].upper() if not do_rc else ogtk.UM.rev_comp(FF2[i+1][:].upper()) 
+            read_seq2 = FF2[i][:].upper() if not do_rc else ogtk.UM.rev_comp(FF2[i][:].upper()) 
+
+            lineage_vector = get_lineage_vector((ref_seq, read_seq, bint_db_ifn, 'read1'))
+            lineage_vector2 = get_lineage_vector((ref_seq2, read_seq2, bint_db_ifn, 'read2'))
+            if lineage_vector != "trash" and lineage_vector2 != "trash":
+                #full_out.write('{}\n'.format('\t'.join(["ref",  fa_entries[i], ref_seq, flineage_vector])))
+                #full_out.write('{}\n'.format('\t'.join(["read", fa_entries[i], read_seq, flineage_vector])))
+                flineage_vector = '\t'.join(lineage_vector)
+                flineage_vector2 = '\t'.join(lineage_vector2)
+
+
+                full_out.write('{}\n'.format('\t'.join(["ref",  fa_entries[i], ref_seq, flineage_vector])))
+                full_out.write('{}\n'.format('\t'.join(["read1",  fa_entries[i], read_seq, flineage_vector])))
+                full_out.write('{}\n'.format('\t'.join(["read2",  fa_entries[i], read_seq, flineage_vector2])))
+
+                #full_out.write('{}\n'.format(fa_entries[i]))
+                #full_out.write('{}\n'.format('\n'.join([ref_seq, read_seq])))
+                #full_out.write('{}\n'.format('\n'.join([read_seq2, ref_seq2])))
+                #full_out.write('\t'.join(lineage_vector)+'\n')
+                #full_out.write('\t'.join(lineage_vector2)+'\n')
+            
+                outf.write('{}\t{}\t{}\n'.format(fa_entries[i], '\t'.join(lineage_vector), '\t'.join(lineage_vector2)))
+    outf.close()
+    full_out.close()
+    
+def mltb_bin_alleles(name, intid, intid2_R2_strand, config_card_dir, outdir, fq1, fq2, 
+threads = 100, end = 5000, ranked_min_cov = 2, umi_len = 17, umi_errors = 1,
+ alg_gapopen = 20, alg_gapextend =1):
+    '''Once fastq files have been split by: RPI/rev_id/intid process them into a table of barcodes 
+    for downstream analysis on R; ranked_min_cov determines the threshold to call a representative 
+    rank1 sequence as valid'''
+
+    intid2 = ogtk.UM.rev_comp(intid2_R2_strand)# same strand as initd1
+    # TODO consider generating a conf file out of the pre-processing step
+    # constant vars
+    ref_path = outdir+'/hspdrv7_scgstl_{}.fa'.format(name)
+    rcref_path = outdir+'/rc_hspdrv7_scgstl_{}.fa'.format(name)
+    ref_name = 'hspdrv7_scgstl_{}'.format(name)
+    #ref_seq = 'gcgccaccacctgttcctgtagaaat{}ccggactcagatctcgagctcaagcttcggacagcagtatcatcgactaTGGagtcgagagcgcgctcgtcgactaTGGagtcgtcagcagtactactgacgaTGGagtcgacagcagtgtgtgagtctaTGGagtcgagagcatagacatcgagtaTGGagtcgactacagtcgctacgactaTGGagtcgacagagatatcatgcagtaTGGagtcgacagcagtatctgctgtcaTGGagtcgactgcacgacagtcgactaTGGAGTCG{}cgagcgctatgagcgactatgc'.format(intid, intid2).upper()
+    ref_seq = 'gccaccacctgttcctgtagaaat{}ccggactcagatctcgagctcaagcttcggacagcagtatcatcgactaTGGagtcgagagcgcgctcgtcgactaTGGagtcgtcagcagtactactgacgaTGGagtcgacagcagtgtgtgagtctaTGGagtcgagagcatagacatcgagtaTGGagtcgactacagtcgctacgactaTGGagtcgacagagatatcatgcagtaTGGagtcgacagcagtatctgctgtcaTGGagtcgactgcacgacagtcgactaTGGAGTCG{}cgagcgctatgagcgactatgc'.format(intid, intid2).upper()
+    bint_db_ifn = '/local/users/polivar/src/projects/mltracer/conf/gstlt_barcode_intervsx10.yaml'
+
+    yaml_out_fn = config_card_dir + '/config_card_{}.yaml'.format(name)
+    yaml_out = {'name':name, 'desc':{}, 'intid1':intid, 'intid2':intid2, 'modality':'bulk'}
+    
+    # for intid in dataset
+    # merge
+    fqm =       outdir + '/{}_merged.fastq'.format(name)
+    fqum1 =     outdir + '/{}_unmerged_R1.fastq'.format(name)
+    fqum2 =     outdir + '/{}_unmerged_R2.fastq'.format(name)
+    ihist =     outdir + '/{}_ihist.txt'.format(name)
+    log_merge = outdir + '/{}_merge_stats.txt'.format(name)
+    cmd_merge = "bbmerge-auto.sh in1={} in2={} out={} outu={} outu2={} ihist={} ecct extend2=20 iterations=5 interleaved=false -Xmx2g ".format(fq1, fq2, fqm, fqum1, fqum2, ihist)
+    
+    yaml_out['desc']['read_merge'] = "Parameters used for the merging of read 1 and read 2"
+
+    umi_counts_ofn = outdir + '/{}_umi_counts.txt'.format(name)
+    yaml_out['mols'] = {}
+    yaml_out['mols']['umi_len'] = umi_len
+    yaml_out['mols']['umi_correction'] = umi_errors
+    yaml_out['mols']['counts'] = umi_counts_ofn 
+    
+    yaml_out['read_merge'] = {}
+    yaml_out['read_merge']['fqm'] = fqm
+    yaml_out['read_merge']['fqum1'] = fqum1
+    yaml_out['read_merge']['fqum2'] = fqum2
+    yaml_out['read_merge']['ihist'] = ihist
+    yaml_out['read_merge']['log_merge'] = log_merge
+
+    # align
+    fa_correctedm = outdir+'/{}_corrected_merged.fa'.format(name)
+    fa_corrected1 = outdir+'/{}_corrected_R1.fa'.format(name)
+    fa_corrected2 = outdir+'/{}_corrected_R2.fa'.format(name)
+
+    yaml_out['desc']['alignment'] = "Parameters for the pairwise alignment of every recovered allele and the reference. The corrected files fix the issue of duplicated fasta entry names"
+
+    yaml_out['alignment'] = {}
+    yaml_out['alignment']['fa_correctedm'] = fa_correctedm
+    yaml_out['alignment']['fa_corrected1'] = fa_corrected1
+    yaml_out['alignment']['fa_corrected2'] = fa_corrected2
+
+    # more outfiles
+    merged_tab_out =   outdir + '/{}_barcodes_merged.txt'.format(name)
+ 
+    yaml_out['desc']['lineage'] = "Main output of the pre-processing scripts. Tabulated files that contain the bint barcode string"
+    yaml_out['lineage'] = {}
+    yaml_out['lineage']['merged_tab'] = merged_tab_out
+    yaml_out['lineage']['merged_full'] = merged_tab_out.replace('.txt','_full.txt')
+
+   
+    # merge paired end reads if possible
+
+    pp = subprocess.run(cmd_merge.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    print(f"merge log\n{log_merge}")
+    fout = open(log_merge, 'wb')
+    fout.write(pp.stdout)
+    fout.write(pp.stderr)
+    fout.close()
+
+    if end != None:
+        print("Warning: end is not None; You are not processing all the data", end)
+
+    # do a pass on the raw fastqs and group reads by UMI
+    ## for merged (rsm) and unmerged (rs1, rs2)
+    rsm =           ogtk.UM.fastq_collapse_UMI(fqm, umi_len = umi_len, end = end, keep_rid = True)
+    rs1, rs2 =      ogtk.UM.pfastq_collapse_UMI(fqum1, fqum2, umi_len = umi_len, end = end)
+
+    # remove umis that exist on the merged set out of the unmerged
+    unmerged_by_error = set(rsm.umi_list()).intersection(set(rs1.umi_list()))
+    rs1.delete(unmerged_by_error)
+    rs2.delete(unmerged_by_error)
+
+    #TODO the saturation stats should be outsourced somehow and reported for all three cases not just the merged (rsm) 
+    yaml_out['mols']['saturation'] = {}
+    yaml_out['mols']['saturation']['merged'] = {}
+    yaml_out['mols']['saturation']['unmerged'] = {}
+    yaml_out['mols']['nreads'] = {}
+    yaml_out['mols']['nreads']['total'] = sum([rsm.nreads, rs1.nreads])
+    yaml_out['mols']['nreads']['merged'] = rsm.nreads
+    yaml_out['mols']['nreads']['umerged'] = rs1.nreads
+    yaml_out['mols']['desc'] = "number of umis whose rank1 sequence is a >= [1, 2, 3, 4, 5, 10, 100, 1000]"
+    yaml_out['mols']['saturation']['merged']['uncorrected'] = rsm.allele_saturation()
+    yaml_out['mols']['saturation']['unmerged']['uncorrected1'] = rs1.allele_saturation()
+    yaml_out['mols']['saturation']['unmerged']['uncorrected2'] = rs2.allele_saturation()
+
+    if umi_errors >0:
+        print("Correcting umis with a hdist of {}".format(umi_errors))
+        rsm.correct_umis(errors = umi_errors , silent = True, jobs = 80)
+        rs1.correct_umis(errors = umi_errors , silent = True, jobs = 80)
+        rs2.correct_umis(errors = umi_errors , silent = True, jobs = 80)
+        yaml_out['mols']['saturation']['merged']['corrected'] = rsm.saturation()
+        yaml_out['mols']['saturation']['unmerged']['corrected1'] = rs1.saturation()
+        yaml_out['mols']['saturation']['unmerged']['corrected2'] = rs2.saturation()
+
+    else:
+        print("Not correcting umis")
 
     
-def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_correct = True,  min_reads_per_umi = 4, intid2_R2_strand = None, threads = 100, end = 5000, ranked_min_cov = 5, consensus = False, umi_errors = 1, debug = False, jobs_corr=10, alg_gapopen = 20, alg_gapextend =1, correction_dict_path = None, correction_dict = None, trimming_pattern = None, use_cache = True):
+    rsm.consensus = ogtk.UM.do_fastq_pileup(rsm, min_cov = ranked_min_cov, threads = threads, trim_by = None)
+    rs1.consensus = ogtk.UM.do_fastq_pileup(rs1, min_cov = ranked_min_cov, threads = threads, trim_by = None)
+    rs2.consensus = ogtk.UM.do_fastq_pileup(rs2, min_cov = ranked_min_cov, threads = threads, trim_by = None)
+
+    # align allele to reference. merged and unmerged separately
+    ## make sure to include the intid on the reference to help the alignment
+    mlt_create_fasta_ref(ref_name, ref_seq, ref_path)
+    ## also on rev comp (not sure if this is really needed)
+    mlt_create_fasta_ref(ref_name+"RC", ogtk.UM.rev_comp(ref_seq), rcref_path)
+
+    alg_mode = 'needleman'
+    #alg_gapopen = 20
+    #alg_gapextend = 1
+
+    yaml_out['alignment']['alg_mode'] = alg_mode
+    yaml_out['alignment']['alg_gapopen'] = alg_gapopen
+    yaml_out['alignment']['alg_gapextend'] = alg_gapextend
+
+# PO removed in refactoring
+#    if rsm.consensus.keys() is None:
+#        yaml_out['success'] = False
+#        return(None)
+#    else:
+#        yaml_out['success'] = True
+# 
+
+    mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"m", fa_ofn = fa_correctedm, 
+                            rs = rsm, ref_path = ref_path, 
+                            ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
+                            gapextend = alg_gapextend)
+
+    mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"1", fa_ofn = fa_corrected1, 
+                            rs = rs1, ref_path = ref_path, 
+                            ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
+                            gapextend = alg_gapextend)
+
+    mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"2", fa_ofn = fa_corrected2, 
+                            rs = rs2, ref_path = rcref_path, 
+                            ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
+                            gapextend = alg_gapextend)
+
+    
+    compute_barcode_matrix_merged(fa_ifn = fa_correctedm, tab_out= merged_tab_out, bint_db_ifn = bint_db_ifn, do_rc=False)
+# TODO PO verify if we need a list of corrected umis of whether they had been deleted 
+    rs1c = list(rs1.umis.keys())
+    rs2c = list(rs2.umis.keys())
+    umi_whitelist = list(set(rs1c).intersection(set(rs2c)))
+
+    print("whitelist:", len(umi_whitelist))
+
+    if len(umi_whitelist)>0:
+        unmerged_tab_out = outdir + '/{}_barcodes_unmerged.txt'.format(name)
+        yaml_out['lineage']['paired_tab'] = unmerged_tab_out 
+        yaml_out['lineage']['paired_full'] = unmerged_tab_out.replace('.txt','_full.txt')
+
+        mlt_compute_barcode_matrix_paired(fa_ifn = fa_corrected1, 
+                                           fa_ifn2 = fa_corrected2, 
+                                           umi_whitelist = umi_whitelist, 
+                                           umi_blacklist = list(rsm.umis.keys()), 
+                                           tab_out = unmerged_tab_out, 
+                                           bint_db_ifn = bint_db_ifn, 
+                                           do_rc = True)
+
+    # save the count information for the UMIs 
+    with open(umi_counts_ofn, 'w') as fh:
+        fh.write(f'count\tumi\n')
+        for i in (rsm, rs1):
+            counts = i.umi_counts()
+            for count,umi in zip(counts, counts.index):
+                fh.write(f'{count}\t{umi}\n')
+    
+    # save run settings 
+    with open(yaml_out_fn, 'w') as yaml_stream:
+        pyaml.yaml.dump(yaml_out, yaml_stream)
+        print("Run settings saved to config card:\n{}".format(yaml_out_fn))
+    return(yaml_out_fn)
+
+
+###########
+########### END
+###########
+
+def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_correct = True,  
+    min_reads_per_umi = 4, intid2_R2_strand = None, threads = 100, end = 5000, ranked_min_cov = 5, 
+    consensus = False, umi_errors = 1, debug = False, jobs_corr=10, alg_gapopen = 20, alg_gapextend =1, 
+    correction_dict_path = None, correction_dict = None, trimming_pattern = None, use_cache = True):
     
     '''
-    Once 10x fastqs (fqm) have been split by integration,
+    Once 10x fastqs (fqm) have been split by integration, merged into a single read and appended by the UMI,
     process them into a table of barcodes for downstream analysis
     Two modalities to choose for a representative allelle: ranked (consensus = False) 
     or consensus (consensus = True)
     '''
     # TODO add tadpole-based correction as an option
-    
-    bint_db = pyaml.yaml.load(open(bint_db_ifn), Loader=pyaml.yaml.FullLoader)
-    ref_seq = bint_db['ref_seq'].replace('{INTID1}', intid).upper()
-    ref_name = f'{bint_db["name_plasmid"]}_intid_{intid}'
-    ref_path = outdir+f'/{ref_name}.fa'
- 
-    anchor2 = bint_db['anchor_plasmid2']
-    rxanch2 = regex.compile("ANCHOR2{e<=3}".replace("ANCHOR2", anchor2))
-
-    ## for 10x
-    umi_len = 28
     
     if not os.path.isdir(outdir):
         os.makedirs(outdir, exist_ok=True)
@@ -266,75 +812,158 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_
     else:
         intid2 = len(intid) * "N"
    
-    yaml_out_fn = config_card_dir + '/config_card_{}.yaml'.format(name)
-    yaml_out = {'name':name, 'desc':{}, 'intid1':intid, 'modality':'sc'}
-    
-    # align
-    fa_correctedm = outdir+'/{}_corrected_merged.fa'.format(name)
 
-    yaml_out['desc']['alignment'] = "Parameters for the pairwise alignment of every recovered allele and the reference. The corrected files fix the issue of duplicated fasta entry names"
+    bint_db = pyaml.yaml.load(open(bint_db_ifn), Loader=pyaml.yaml.FullLoader)
 
-    
-    alg_mode = 'needleman'
-    yaml_out['alignment'] = {}
-    yaml_out['alignment']['fa_correctedm'] = fa_correctedm
-    yaml_out['alignment']['alg_mode'] = alg_mode
-    yaml_out['alignment']['alg_gapopen'] = alg_gapopen
-    yaml_out['alignment']['alg_gapextend'] = alg_gapextend
+    conf_fn = config_card_dir + '/config_card_{}.yaml'.format(name)
+    conf = {'name':name, 'desc':{}, 'outdir':outdir, 'intid1':intid, 'modality':'sc'}
 
-
-    # more outfiles
-    merged_tab_out =   outdir + '/{}_binned_barcodes_10x.txt'.format(name)
-    consensus_tab_out =   outdir + '/{}_consensus_by_cell_10x.txt'.format(name)
-    allele_reps_fn =   outdir + '/{}_allele_reps.pickle'.format(name)
-    pickled_readset= outdir + f'{name}_readset.corr.pickle'
-    pickled_cseqs = outdir + f'{name}_readset.kmer_cseqs.pickle'
+    ref_seq = bint_db['ref_seq'].replace('{INTID1}', intid).upper()
+    ref_name = f'{bint_db["name_plasmid"]}_intid_{intid}'
+    ref_path = outdir+f'/{ref_name}.fa'
  
-    yaml_out['desc']['lineage'] = "Main output of the pre-processing scripts. Tabulated files that contain the bint barcode string"
-    yaml_out['lineage'] = {}
-    yaml_out['lineage']['consensus'] = consensus_tab_out
-    yaml_out['lineage']['allele_reps'] = allele_reps_fn
-    yaml_out['lineage']['merged_tab'] = merged_tab_out
-    yaml_out['lineage']['merged_full'] = merged_tab_out.replace('.txt','_full.txt')
+    anchor2 = bint_db['anchor_plasmid2']
+    rxanch2 = regex.compile("ANCHOR2{e<=3}".replace("ANCHOR2", anchor2))
+
+    ## for 10x
+    umi_len = 28
+  
+    conf = conf_dict_write(
+        conf,
+        level = 'inputs',
+        fastq_merged = fqm
+    )
+    conf = conf_dict_write(
+        conf,
+        level = 'filters',
+        reads_sampled = end,
+        ranked_min_cov = ranked_min_cov,
+        min_reads_per_umi = min_reads_per_umi,
+        umi_errors = umi_errors,
+        trimming_pattern = trimming_pattern,
+        kmer_correct = kmer_correct
+        )
+
+    conf = conf_dict_write(conf, level='desc', 
+        alignment =  
+        "Parameters for the pairwise alignment of every recovered allele "+
+        "and the reference. The corrected files fix the issue of duplicated"+ 
+        "fasta entry names"
+        )
+    
+    conf = conf_dict_write(
+        conf, 
+        level='alignment', 
+        fa_correctedm =outdir+'/{}_corrected_merged.fa'.format(name),
+        alg_mode = 'needleman',
+        alg_gapopen = alg_gapopen,
+        alg_gapextend = alg_gapextend,
+        ref_path  = outdir+f'/{ref_name}.fa',
+        bint_db_ifn = bint_db_ifn,
+        ref_name = ref_name,
+        )
+                
+   # more outfiles
+    conf = conf_dict_write(
+        conf, 
+        level = 'cache',
+        readset = outdir + f'{name}_readset.corr.pickle',
+        cseqs = outdir + f'{name}_readset.kmer_cseqs.pickle'
+        )
+   
+    conf = conf_dict_write(
+        conf, 
+        level='desc', 
+        lineage = "Main output of the preprocessing scripts. Tabulated files that contain the bint barcode string",
+        )
+
+    conf = conf_dict_write(
+        conf,
+        level ='lineage',
+        consensus = outdir + '/{}_consensus_by_cell_10x.txt'.format(name),
+        allele_reps = outdir + '/{}_allele_reps.pickle'.format(name), 
+        merged_tab =  outdir + '/{}_binned_barcodes_10x.txt'.format(name),
+        merged_full = outdir + '/{}_binned_barcodes_10x_full.txt'.format(name)
+        )
    
     # Molecule data
-    umi_counts_ofn = outdir + '/{}_umi_counts.txt'.format(name)
-    umi_cov_ofn = outdir + '/{}_umi_cov.pickle'.format(name)
-    yaml_out['mols'] = {}
-    yaml_out['mols']['umi_len'] = umi_len
-    yaml_out['mols']['umi_correction'] = umi_errors
-    yaml_out['mols']['counts'] = umi_counts_ofn 
-    yaml_out['mols']['cov_pck'] = umi_cov_ofn 
+    conf = conf_dict_write(
+        conf,
+        level = 'mols',
+        umi_len = umi_len,
+        counts =  outdir + '/{}_umi_counts.txt'.format(name),
+        cov_pck = outdir + '/{}_umi_cov.pickle'.format(name)
+        )
+
+    ## make sure to include the intid on the reference to help the alignment
+    conf = conf_dict_write(
+        conf, 
+        level='alignment', 
+        ref_path  = outdir+f'/{ref_name}.fa',
+        ref_name = ref_name
+        )
+ 
+    print("creating fasta ref")
+    create_fasta_ref(conf['alignment']['ref_name'], ref_seq, conf['alignment']['ref_path'])
+
+
+    #>>>
+    _sc_bin_alleles(conf_fn, conf, use_cache = use_cache, threads = threads, correction_dict_path = correction_dict_path, correction_dict = correction_dict)
+
+
+def _sc_bin_alleles(conf_fn, conf, **kwargs):
+    '''
+        main function for binning alleles. For reference see sc_bin_alleles 
+    '''
+    intid = conf['intid1']
+    pickled_readset = conf['cache']['readset']
+    pickled_ceqes = conf['cache']['cseqs']
+    allele_reps_fn = conf['lineage']['allele_reps']
+    consensus_tab_out = conf['lineage']['consensus']
+    umi_counts_ofn = conf['mols']['counts']
+    umi_cov_ofn = conf['mols']['cov_pck']
+    merged_tab_out = conf['lineage']['merged_tab']
+    end = conf['filters']['reads_sampled']
+    ranked_min_cov = conf['filters']['ranked_min_cov']
+    trimming_pattern = conf['filters']['trimming_pattern']
+    umi_errors = conf['filters']['umi_errors']
+    kmer_correct = conf['filters']['kmer_correct']
+
+    # from kwargs
+    threads = kwargs['threads']
+    use_cache =kwargs['use_cache'] 
+    correction_dict_path = kwargs['correction_dict_path']
+    correction_dict = kwargs['correction_dict']
     
     if end != None:
         print("Warning: end is not None; You are not processing all the data", end)
 
     # do a pass on the raw fastqs and group reads by UMI
-
-
     if os.path.exists(pickled_readset) and use_cache:
         rssc = pickle.load(open(pickled_readset, 'rb'))
         print(f"loaded cached ReadSet {pickled_readset}. total umis: {len(rssc.umis)}")
     else:    
         rssc = ogtk.UM.fastq_collapse_UMI(
-            fqm, 
-            umi_len = umi_len, 
+            conf['inputs']['fastq_merged'], 
+            umi_len = conf['mols']['umi_len'], 
             end = end, 
             keep_rid = True, 
-            min_reads_per_umi = min_reads_per_umi,
+            min_reads_per_umi = conf['filters']['min_reads_per_umi'],
             trimming_pattern = trimming_pattern)
 
         print(f"loaded rs with trimming={trimming_pattern != None}. total umis: {len(rssc.umis)}")
         if umi_errors>0:
             print("Correcting umis with a hdist of {}".format(umi_errors))
             rssc.correct_umis(errors = umi_errors , silent = False, jobs = jobs_corr)
-            yaml_out['mols']['saturation']['unmerged']['corrected'] = rssc.saturation()
+            conf['mols']['saturation']['unmerged']['corrected'] = rssc.saturation()
         else:
             print("Not correcting umis")
         
         if kmer_correct:
             kmer = 50
             print('starting kmer-based correction k={kmer}')
+            umi_list = rssc.umi_counts()
+            umi_list = umi_list[umi_list > 1]
             umi_list = rssc.umi_counts().index
             cseqs = ogtk.UM.monitor_kmer_corr_umi_list(umi_list, rssc, pickle_ofn=pickled_cseqs, k = kmer)
             for corr_umi in cseqs.keys():
@@ -342,37 +971,15 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_
                 rssc.umis[corr_umi].seqs = cseqs[corr_umi]
                 rssc.umis[corr_umi].quals = quals
 
+    conf = store_molecule_saturation_stats(conf, rssc)
 
-    # store the first round of molecule stats
-    #TODO the saturation stats should be outsourced somehow
-    #TODO eg the next fn 
-    def conf_dict_(conf, level, **kargs):
-        if level not in conf.keys():
-            conf[level] = {}
-        for k,v in kargs.items():
-            conf[level][k] = v
-        return(conf)
-
-    yaml_out['mols']['saturation'] = {}
-    yaml_out['mols']['saturation']['unmerged'] = {}
-    yaml_out['mols']['nreads'] = {}
-    yaml_out['mols']['nreads']['umerged'] = rssc.nreads
-    yaml_out['mols']['desc'] = "number of umis whose rank1 sequence is a >= [1, 2, 3, 4, 5, 10, 100, 1000]"
-    yaml_out['mols']['saturation']['unmerged']['uncorrected'] = rssc.allele_saturation()
-
-
-
-    # TODO this is really important for 10x, long reads
     # The first step to call an allele consensus is to get a representative sequence at the molecule level
-    # thus by_alignment == False to get a ranked based representative
-    # rssc.consensus = 
     print(f'getting rank1 seq per UMI')
     ogtk.UM.do_fastq_pileup(rssc, 
                     min_cov = ranked_min_cov, 
                     threads = threads, 
                     trim_by = None, 
                     by_alignment = False)
-
 
     print(f'determining valid cells')
     cell_umi_dict = ogtk.UM.get_list_of_10xcells(
@@ -382,13 +989,6 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_
 
     print(f'collecting cell allele candidates', end = '...')
     cell_alleles = cell_dominant_allele(rssc, cell_umi_dict, allele_reps_fn)
-
-    def get_rep_allele(x, min_mol = 3):
-        top_seqs = x['dominant_seq'].value_counts()
-        if top_seqs[0] >=min_mol:
-            return(top_seqs.index[0])
-        else:
-            return(False)
 
     # TODO qc plot
     if False: #or plot_qcs
@@ -402,22 +1002,13 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_
         plt.scatter(xd, np.cumsum(yd.to_list()))
 
     print(f'determining best candidate')
-    cell_consensus = cell_alleles.groupby('cell').apply(lambda x: get_rep_allele(x, min_mol = 3))
+    cell_consensus = cell_alleles.groupby('cell').apply(lambda x: get_rep_allele(x, min_mol = 0, min_domix = 0.0))
+    print(f'a total of discarded entries {np.sum(cell_consensus == False)}/{len(cell_consensus)} {np.sum(cell_consensus == False)/len(cell_consensus):.2f}')
     cell_consensus = cell_consensus[cell_consensus != False]
 
     cell_consensus.to_csv(consensus_tab_out, sep ='\t')
     #>>>>>>>>>
-
-    # rscc.consensus hosts a dictionary of the form:
-    # (key = umi, value =(dominant_seq, reads_per_umi, reads_rank1))
-
     #print(f"called consensuses {len(rssc.consensus)}")
-
-    # the second step is to call a consensus *of the representative molecules*
-    #celldb, cell_umis = compute_allele_pool_percell(consensuses_dict = rssc.consensus, correction_dict_path = correction_dict_path, correction_dict = correction_dict)
-
-    #pickle.dump(celldb, open('/local/users/polivar/celldb.pickle', 'wb'))
-
     #cov_df = rssc.compute_coverage_table(cell_umis)
 
     # as a control one can recompute the reads back from the UMI cover 
@@ -426,9 +1017,24 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_
     #plt.scatter(*zip(*rep_read))
     #reads_rank1 = pd.Series([v[2] for i,v in rssc.consensus.items()]).value_counts(normalize= False)
 
-    #print('Coverage for top ranking seq in reads per seq (not per UMI)')
-    #print(reads_rank1.head(10)/sum(reads_rank1))
+    # determine cells based on the 10x bc
+    # we might need to filter at this level for cells that have more than one molecule ... but what about reads?
+    #pdb.set_trace()
+    
+    if False:
+        debug_iter = [i for i in job_iter if len(i[2])>3 ]
+        print("There are {} cells and {} with more than 3 representatives".format(len(job_iter), len(debug_iter)))
+        for i in debug_iter:
+            ogtk.UM.mafft_consensus(i)
 
+    if len(cell_consensus) == 0 :
+        conf['success'] = False
+        print(f'Failed to generate representative sequences for each cell')
+        return(None)
+    else:
+        print(f'Success')
+        conf['success'] = True
+ 
     # save binaries
     print(f'pickling rs as {pickled_readset}')
     with open(pickled_readset, 'wb') as pcklout:
@@ -437,127 +1043,22 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_
     #print(f'pickling umi coverage info as {umi_cov_ofn}')
     #cov_df.to_pickle(umi_cov_ofn)
 
-    # determine cells based on the 10x bc
-    # we might need to filter at this level for cells that have more than one molecule ... but what about reads?
-    #pdb.set_trace()
-    # This might change
-    msa_jobs = 50
-    naive = False
- 
-    #print(f"filled celldb {len(celldb)}")
-   
-    #pool = multiprocessing.Pool(threads)
-    #print("Calling allele consensus by aligning different UMI-controlled molecules per each cell. ")
-    # fname, name, seqs, ranked_min_cov, jobs = args
-    job_iter = []
-
-    
-    # TODO merge the representative sequence information to the molecule counting
-    
-  ######################### 
-  ######################### 
-  ######################### 
-
-
-    
-    #cc = []
-
-    #cell_alleles = ["cell", "seq", "reads", "reads_umi", "pool_size"]
-    #with open(allele_reps_fn, "w") as allele_reps:
-    #    for cell in cell_umis.keys():
-    #        for umi in cell_umis[cell]:
-    #            umi_counts = pd.Series(rssc.umis[umi].seqs).value_counts()
-    #            rank1_reads = umi_counts.to_list()[0]
-    #            reads_umi = np.sum(umi_counts)
-    #            pool_size = len(umi_counts.index)
-    #            rep_seq = umi_counts.index.to_list()[0]
-    #            print(f'{cell}\t {umi}\n {rep_seq}\n seq reads {seq_reads}\n reads umi {reads_umi}\n reads umi2 {reads_umi2}\n pool size{pool_size}\n===')
-    #        pdb.set_trace()
-    #        repseqs_count_list = celldb[cell]
-    #        tenex_umis = cell_umis[cell]
-    #        if len(repseqs_count_list)>1:
-    #            df = pd.DataFrame(repseqs_count_list, columns = ('seqs','counts'))
-    #            df['raw_umi'] = tenex_umis
-    #            df['cell'] = cell
-    #            # TODO how to treat ties?
-    #            top = df['seqs'].value_counts().head(1)
-    #            rep_seq = str(top.index.to_list()[0]) 
-    #            cc.append((cell, rep_seq))
-    #            #get rep seq per cell and its corresponding counts.
-    #            #rep_seq, counts = repseqs_count_list[0]
-
-    #        #else: #<----
-    #        #    rep_seq, counts = repseqs_count_list[0]
-    #        #    cc.append((cell, rep_seq))
-
-    #        #cell_name = cell+"_reps"+str(len(tenex_umis))
-    #        cell_name = cell #+"_reps"+str(len(tenex_umis))
-    #        # 1 - keep a record on disk of the different candidates and their counts
-    #        # 2 - append to cc the "best" candidate for a given cell 
-    #        ##for allele, (umi, counts) in zip(rep_seqs, tenex_umis):
-    #        ##    #TODO add a real count metric
-    #        ##    #counts = int(umi_counts.split("_")[1])
-    #        ##    umi = umi[0][16:]
-    #        ##    reps = [allele for i in range(counts)]
-    #        ##    ob_iter.append((outdir, cell_name, reps, ranked_min_cov, msa_jobs, naive))
-    #        ##    #allele_reps.write("{}\n".format("\t".join([cell, str(counts), umi, allele])))
-    #        ##    allele_reps.write("\t".join([cell, str(counts), umi, allele])+'\n')
-    #    
-    # used for debugging
-    if False:
-        debug_iter = [i for i in job_iter if len(i[2])>3 ]
-        print("There are {} cells and {} with more than 3 representatives".format(len(job_iter), len(debug_iter)))
-        for i in debug_iter:
-            ogtk.UM.mafft_consensus(i)
-
-    #cc = pool.map(ogtk.UM.mafft_consensus, iter(job_iter))
-    #pool.close()
-    #pool.join()
- 
-    #print(f"filled cc {len(cc)}")
-    
-    #cell_consensus = dict(cc)
-    #cons_out = open(consensus_tab_out, 'w') 
-    #for cell in cell_consensus.keys():
-    #    cell_cons = cell_consensus[cell]
-    #    cons_out.write("\t".join([cell, cell_cons])+'\n')
-    #cons_out.close() 
-  ######################### 
-  ######################### 
-  ######################### 
-
-    #if len(cell_consensus.keys()) == 0 :
-    if len(cell_consensus) == 0 :
-        yaml_out['success'] = False
-        print(f'Failed to generate representative sequences for each cell')
-        return(None)
-    else:
-        print(f'Success')
-        yaml_out['success'] = True
- 
-    ## make sure to include the intid on the reference to help the alignment
-
-    print("creating fasta ref")
-    create_fasta_ref(ref_name, ref_seq, ref_path)
-
-
-    print("aligning reads tp ref")
+    print("aligning cell alleles to ref")
     align_reads_to_ref(
-            name = outdir+"/"+intid, 
-            fa_ofn = fa_correctedm, 
+            name = conf['outdir']+"/"+intid, 
+            fa_ofn = conf['alignment']['fa_correctedm'], 
             consensus_dict = cell_consensus.to_dict(), 
-            ref_path = ref_path, 
-            ref_name = ref_name, 
-            mode=alg_mode, 
-            gapopen = alg_gapopen, 
-            gapextend = alg_gapextend)
-
+            ref_name = conf['alignment']['ref_name'],
+            ref_path = conf['alignment']['ref_path'],
+            mode = conf['alignment']['alg_mode'],
+            gapopen = conf['alignment']['alg_gapopen'], 
+            gapextend = conf['alignment']['alg_gapextend'])
 
     print(f"featurizing sequences to {merged_tab_out}")
     compute_barcode_matrix_merged(
-                fa_ifn = fa_correctedm, 
+                fa_ifn =conf['alignment']['fa_correctedm'], 
                 tab_out = merged_tab_out, 
-                bint_db_ifn = bint_db_ifn, 
+                bint_db_ifn = conf['alignment']['bint_db_ifn'], 
                 do_rc = False)
    
     # save the count information for the UMIs 
@@ -568,11 +1069,10 @@ def sc_bin_alleles(name, intid, config_card_dir, outdir, fqm, bint_db_ifn, kmer_
             fh.write(f'{count}\t{umi}\n')
                 
     # save run settings 
-    yaml_stream = open(yaml_out_fn, 'w')
-    pyaml.yaml.dump(yaml_out, yaml_stream)
-    yaml_stream.close() 
-    print("Run settings saved to config card:{}".format(yaml_out_fn))
-
+    with open(conf_fn, 'w') as yaml_stream:
+        pyaml.yaml.dump(conf, yaml_stream)
+    print("Run settings saved to config card:{}".format(conf_fn))
+    return(conf_fn)
     
 def align_reads_to_ref(name, fa_ofn, consensus_dict, ref_path, ref_name = 'hspdrv7_scgstl', mode='needleman', gapopen = 20, gapextend = 1, verbose = False):
     pwalg_in = '{}_in_pair_algn.fa'.format(name)
@@ -962,7 +1462,7 @@ class Bint():
             return(consecutive_to_string(self.dele))
         else:
             return("")
-
+# ========= end of Bint
 
 def create_fasta_ref(ref_name, ref_seq, ref_path):
     fout = open(ref_path, 'w')
@@ -983,8 +1483,9 @@ def compute_dist_mat(mat, bcs, bias, cores = 50, dont_include = 3):
         print("pooling cores")
         chunks = np.array_split(bcs, cores)
         it = iter([(mat, chunk, bias, dont_include) for chunk in chunks])
-        pool = multiprocessing.Pool(int(cores))
+
         print(f"Firing up {cores} workers")
+        pool = multiprocessing.Pool(int(cores))
         cc = pool.map(similarity_score, it)
         pool.close()
         pool.join()
@@ -1024,63 +1525,6 @@ def to_numpy(mat, ofn):
     with open(ofn, 'wb') as out:
         pickle.dump(mat, out)
 
-def compute_allele_pool_percell(consensuses_dict, correction_dict_path = None, correction_dict = None):
-    '''
-
-    '''
-
-    celldb = {} #stores the candidate representative sequences per cell using the .consensus of a readset
-    cell_umis = {} #stores a list of the original readset umis (CBC:UMI) that correspond to a given cell
-
-    # UMI correction via correction dictionaries
-    if correction_dict_path is not None or correction_dict is not None:
-        hits_dic = []
-        print(f'Using cellranger dictionary', end = "...")
-        if correction_dict_path is not None:
-            print(f'Loading correction dictionaries {correction_dict_path}')
-            correction_dict = pickle.load(open(correction_dict_path, 'rb'))
-        if correction_dict is not None:
-            print("using provided")
-
-        # umi is the whole tenex handle CBC:UMI
-        for umi in consensuses_dict.keys():
-            foc_cell = umi[0:16]
-            if foc_cell in correction_dict['cell_barcodes'].keys():
-                hits_dic.append(1)
-                # correct raw cellbarcode with the cellranger-corrected cellbarcode
-                foc_cell = correction_dict['cell_barcodes'][foc_cell]
-                if foc_cell not in celldb.keys():
-                    celldb[foc_cell] = []
-                    cell_umis[foc_cell] = []
-                cell_umis[foc_cell].append(umi) ## remove?
-                # consensus dict : key = umi, value =(dominant_seq, reads_per_umi, reads_rank1)
-                # we pass the dominant seq and numer of reads per umi
-                celldb[foc_cell].append(consensuses_dict[umi][0:2]) 
-            else:
-                hits_dic.append(0)
-        print(f'correction stats {sum(hits_dic)/len(hits_dic)}')
-    # without correction
-    else:
-        for umi in consensuses_dict.keys():
-            foc_cell = umi[0:16]
-            if not any([i == "N" for i in foc_cell]):
-                if celldb.get(foc_cell, 0) == 0:
-                    celldb[foc_cell] = []
-                    cell_umis[foc_cell] = []
-                # expand reads
-                cell_umis[foc_cell].append(umi) ## remove?
-                celldb[foc_cell].append(consensuses_dict[umi]) 
-    # at this point:
-    #   - celldb hosts the representative sequences for a given cell
-    #   - cell_umis hosts the pointers towards the readset in order to fetch any piece of information
-    # 
-
-    # create and export a dataframe with the coverage information
-
-    # rssc.consensus = (key = umi, value =(dominant_seq, reads_per_umi, reads_rank1))
-
-    return((celldb, cell_umis))
-
 
 def cell_dominant_allele(rs, cell_umi_dict, allele_reps_fn = None):
     '''
@@ -1099,4 +1543,43 @@ def cell_dominant_allele(rs, cell_umi_dict, allele_reps_fn = None):
         cell_alleles.to_pickle(allele_reps_fn)
         print(f'saved cell_alleles {allele_reps_fn}')
     return(cell_alleles)
+
+def get_rep_allele(x, min_mol = 3, min_domix = 0.75):
+    '''
+    Helper function for cell consensus calling.
+    To determine the allele present on a given cell one must select from a pool of candidate sequences (each belonging to a prefiltered UMI)
+    '''
+    top_seqs = x['dominant_seq'].value_counts()
+    domix = x['dominant_seq'].value_counts(normalize = True).to_list()[0]
+
+    if len(top_seqs) >= min_mol and domix >= min_domix:
+        return(top_seqs.index[0])
+    else:
+        return(False)
+
+def conf_dict_write(conf, level = None, **kargs):
+    if level is not None:  
+        if level not in conf.keys():
+            conf[level] = {}
+        for k,v in kargs.items():
+            conf[level][k] = v
+        return(conf)
+    else:
+        for k,v in kargs.items():
+            conf[k] = v
+        return(conf)
+
+def store_molecule_saturation_stats(conf, rs):
+    '''
+    Helper function to record the saturation stats.
+    '''
+    # TODO improve the objectives of this routine
+    conf = conf_dict_write(
+            conf, 
+            level='mols', 
+            nreads = {'unmerged':rs.nreads},
+            desc = "number of umis whose rank1 sequence is a >= [1, 2, 3, 4, 5, 10, 100, 1000]",
+            saturation = {'unmerged':{'uncorrected':rs.allele_saturation()}}
+            )
+    return(conf)
 
