@@ -1,4 +1,4 @@
-import ogtk
+#import ogtk
 import pickle
 import subprocess
 import pyaml
@@ -17,12 +17,11 @@ import pandas as pd
 import numpy as np
 import regex
 import itertools
-import ogtk
 import pdb
 import time, random
 import multiprocessing
 import gzip 
-
+import ogtk.bbin_alleles as bbin
 #from .bin_alleles import Bin_Alleles
 
 
@@ -502,14 +501,19 @@ def mltbc_make_unique_fa_ref_entries(fa_ifn, fa_ofn, ref_name = 'hspdrv7_scgstl'
     ofa.close()
    
 
-def mltbc_align_reads_to_ref(name, fa_ofn, rs, ref_path, ref_name = 'hspdrv7_scgstl', 
-    mode='needleman', gapopen = 20, gapextend = 1, verbose = False):
+def mltbc_align_reads_to_ref(name, fa_ofn, rs, ref_path, 
+    ref_name = 'hspdrv7_scgstl', 
+    mode='needleman', 
+    gapopen = 20, 
+    gapextend = 1, 
+    verbose = False):
     pwalg_in = '{}_in_pair_algn.fa'.format(name)
     pwalg_out = '{}_out_pair_algn.fa'.format(name)
 
     rs.write_consensuses_fasta(pwalg_in)
 
-    print(gapopen)
+    if verbose:
+        print('Running pair-wise alignment')
     if mode == 'waterman':
         'water -gapextend 1 -gapopen 20 -datafile EDNAFULL -awidth3=100 -aformat3 fasta  -asequence ptol2-hspdrv7_scgstl.fa -bsequence msa_in.fa  -aaccshow3 yes -outfile ww.fasta -snucleotide2  -snucleotide1' 
     if mode == 'needleman':
@@ -599,7 +603,7 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
     fq1, 
     fq2, 
     bint_db_ifn, 
-    min_reads_per_umi =4, 
+    min_reads_per_umi = 4, 
     threads = 100, 
     end = 5000, 
     ranked_min_cov = 5, 
@@ -607,7 +611,8 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
     umi_errors = 1,
     trimming_pattern = None, 
     alg_gapopen = 20, 
-    alg_gapextend =1):
+    alg_gapextend =1,
+    use_cache = True):
     '''Once bulk fastq files (R1 and R2) have been split (RPI>rev_id>intid) process them into a table of barcodes 
     for downstream analysis.
     Two modalities to choose for a representative allelle: ranked (consensus = False) 
@@ -625,6 +630,10 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
         print("Created {}".format(config_card_dir))
     
     out_prefix = f'{outdir}/{name}'
+    if not os.path.isdir(out_prefix):
+        os.makedirs(out_prefix, exist_ok=True)
+        print("Created {}".format(out_prefix))
+
         
     # TODO clean this mess redirectin to who knows where
     # TODO do we neeed thiss?
@@ -640,9 +649,9 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
     conf = {'name':name, 'desc':{}, 'outdir':outdir, 'intid1':intid, 'intid2': intid2, 'modality':'bulk'}
 
     ref_seq = bint_db['ref_seq'].replace('{INTID1}', intid).replace('{INTID2}', intid2).upper()
-    ref_name = f'{bint_db["name_plasmid"]}_intid_{intid}'
-    ref_path = outdir+f'/{ref_name}.fa'
-    rcref_path = outdir+f'/rc_{ref_name}.fa'
+    ref_name = f'{bint_db["name_plasmid"]}_intid_{intid}_{intid2}'
+    ref_path  = f'{out_prefix}/{ref_name}.fa'
+    rcref_path = f'{out_prefix}/rc_{ref_name}.fa'
 
     #### config
     conf = conf_dict_write(
@@ -661,7 +670,7 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
         ihist =f'{out_prefix}_ihist.txt',
         k = 60,
         Xmx = '2g',
-        modality = 'ecct' # error-correct with Tadpole.sh
+        modality = 'ecct', # error-correct with Tadpole.sh
         log = f'{out_prefix}_merge_stats.txt',
     )
     cmd_bbmerge = f"bbmerge-auto.sh in1={fq1} in2={fq2} out={conf['bbmerge']['fastq_merged']} \
@@ -672,7 +681,7 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
         {conf['bbmerge']['modality']} \
         extend2=20 iterations=5 interleaved=false -Xmx{conf['bbmerge']['Xmx']}"
  
-    conf - conf_dict_write(
+    conf = conf_dict_write(
         conf,
         cmd = cmd_bbmerge
     )
@@ -699,11 +708,15 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
         conf, 
         level='alignment', 
         fa_correctedm =f'{out_prefix}_corrected_merged.fa',
+        fa_corrected1 =f'{out_prefix}_corrected_R1.fa',
+        fa_corrected2 =f'{out_prefix}_corrected_R2.fa',
         alg_mode = 'needleman',
         alg_gapopen = alg_gapopen,
         alg_gapextend = alg_gapextend,
-        ref_path  = f'{outdir}/{ref_name}.fa',
+        ref_path  = ref_path,
+        ref_seq  = ref_seq,
         bint_db_ifn = bint_db_ifn,
+        rcref_path = rcref_path,
         ref_name = ref_name,
         )
                
@@ -711,7 +724,9 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
     conf = conf_dict_write(
         conf, 
         level = 'cache',
-        readset = f'{out_prefix}_readset.corr.pickle',
+        merged_readset = f'{out_prefix}_mreadset.corr.pickle',
+        readset1 = f'{out_prefix}_readset1.corr.pickle',
+        readset2 = f'{out_prefix}_readset2.corr.pickle',
         cseqs = f'{out_prefix}_readset.kmer_cseqs.pickle'
         )
    #### main output
@@ -724,10 +739,12 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
     conf = conf_dict_write(
         conf,
         level ='lineage',
-        consensus =    f'{out_prefix}_consensus_by_cell_10x.txt',
+        consensus =    f'{out_prefix}_consensus_by_cell.txt',
         allele_reps =  f'{out_prefix}_allele_reps.pickle', 
-        merged_tab =   f'{out_prefix}_binned_barcodes_10x.txt',
-        merged_full =  f'{out_prefix}_binned_barcodes_10x_full.txt'
+        merged_tab =   f'{out_prefix}_merged_binned.txt',
+        merged_full =  f'{out_prefix}_binned_full.txt',
+        paired_tab =   f'{out_prefix}_paired_binned.txt',
+        paired_full =  f'{out_prefix}_paired_binned_full.txt', # automatically defined by mlt_compute_barcode_matrix_paired
         )
    
     # Molecule data
@@ -735,10 +752,10 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
         conf,
         level = 'mols',
         umi_len = umi_len,
-        counts =  outdir + f'{out_prefix}_umi_counts.txt',
-        cov_pck = outdir + f'{out_prefix}_umi_cov.pickle'
+        counts =  f'{out_prefix}_umi_counts.txt',
+        cov_pck = f'{out_prefix}_umi_cov.pickle'
         )
-
+  
 
 
 ####    yaml_out_fn = config_card_dir + '/config_card_{}.yaml'.format(name)
@@ -787,23 +804,84 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
 ####    yaml_out['lineage'] = {}
 ####    yaml_out['lineage']['merged_tab'] = merged_tab_out
 ####    yaml_out['lineage']['merged_full'] = merged_tab_out.replace('.txt','_full.txt')
+####    yaml_out['alignment']['alg_mode'] = alg_mode
+####    yaml_out['alignment']['alg_gapopen'] = alg_gapopen
+####    yaml_out['alignment']['alg_gapextend'] = alg_gapextend
+
+
 ####
-   
+
     # merge paired-end reads if possible
-    pp = subprocess.run(cmd_merge.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    log_merge =conf['bbmerge']['log'] 
+    pp = subprocess.run(cmd_bbmerge.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     print(f"merge log\n{log_merge}")
-    fout = open(log_merge, 'wb')
-    fout.write(pp.stdout)
-    fout.write(pp.stderr)
-    fout.close()
+    with open(log_merge, 'wb') as fout:
+        fout.write(pp.stdout)
+        fout.write(pp.stderr)
+    
+    # >>>
+    _bulk_bin_alleles(conf_fn, conf, use_cache = use_cache, threads = threads)
+    return(None)
+
+def _bulk_bin_alleles(conf_fn, conf, **kwargs):
+    ''' main function for binning alleles from bulk data. For reference see bulk_bin_alleles
+    '''
+    outdir = conf['outdir']
+    name = conf['name']
+    intid = conf['intid1']
+    intid2 = conf['intid2']
+    intid2_rc = ogtk.UM.rev_comp(conf['intid2'])
+    pickled_merged_readset = conf['cache']['merged_readset']
+    pickled_readset1 = conf['cache']['readset1']
+    pickled_readset2 = conf['cache']['readset2']
+    pickled_ceqes = conf['cache']['cseqs']
+    allele_reps_fn = conf['lineage']['allele_reps']
+    consensus_tab_out = conf['lineage']['consensus']
+    umi_counts_ofn = conf['mols']['counts']
+    umi_cov_ofn = conf['mols']['cov_pck']
+    merged_tab_out = conf['lineage']['merged_tab']
+    end = conf['filters']['reads_sampled']
+    ranked_min_cov = conf['filters']['ranked_min_cov']
+    trimming_pattern = conf['filters']['trimming_pattern']
+    umi_errors = conf['filters']['umi_errors']
+    ref_seq = conf['alignment']['ref_seq']
+    ref_name = conf['alignment']['ref_name']
+    ref_path = conf['alignment']['ref_path']
+    rcref_path = conf['alignment']['rcref_path']
+    # from kwargs
+    threads = kwargs['threads']
+    use_cache =kwargs['use_cache'] 
 
     if end != None:
         print("Warning: end is not None; You are not processing all the data", end)
+    rs_paths = [pickled_merged_readset, pickled_readset1, pickled_readset2]
 
     # do a pass on the raw fastqs and group reads by UMI
+    if all([os.path.exists(i) for i in rs_paths]) and use_cache:
+        rsm = pickle.load(open(pickled_merged_readset, 'rb'))
+        rs1 = pickle.load(open(pickled_readset1, 'rb'))
+        rs2 = pickle.load(open(pickled_readset2, 'rb'))
+        print(f"loaded cached ReadSets: {'_'.join(rs_paths)}")
+        print(f"merged total umis: {len(rsm.umis)}")
+        print(f"R1 total umis: {len(rs1.umis)}")
+        print(f"R2 total umis: {len(rs2.umis)}")
+    else:  
     ## for merged (rsm) and unmerged (rs1, rs2)
-    rsm =           ogtk.UM.fastq_collapse_UMI(fqm, umi_len = umi_len, end = end, keep_rid = True)
-    rs1, rs2 =      ogtk.UM.pfastq_collapse_UMI(fqum1, fqum2, umi_len = umi_len, end = end)
+        rsm = ogtk.UM.fastq_collapse_UMI(
+            conf['bbmerge']['fastq_merged'],
+            umi_len = conf['mols']['umi_len'],
+            end = end, 
+            keep_rid = True,
+            min_reads_per_umi = conf['filters']['min_reads_per_umi'],
+            trimming_pattern = trimming_pattern)
+
+        print(f"loaded rs with trimming={trimming_pattern != None}. total umis: {len(rsm.umis)}")
+
+        rs1, rs2 = ogtk.UM.pfastq_collapse_UMI(
+            conf['bbmerge']['fastq_umerged1'],
+            conf['bbmerge']['fastq_umerged2'],
+            umi_len = conf['mols']['umi_len'],
+            end = end)
 
     # remove umis that exist on the merged set out of the unmerged
     unmerged_by_error = set(rsm.umi_list()).intersection(set(rs1.umi_list()))
@@ -811,30 +889,30 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
     rs2.delete(unmerged_by_error)
 
     #TODO the saturation stats should be outsourced somehow and reported for all three cases not just the merged (rsm) 
-    yaml_out['mols']['saturation'] = {}
-    yaml_out['mols']['saturation']['merged'] = {}
-    yaml_out['mols']['saturation']['unmerged'] = {}
-    yaml_out['mols']['nreads'] = {}
-    yaml_out['mols']['nreads']['total'] = sum([rsm.nreads, rs1.nreads])
-    yaml_out['mols']['nreads']['merged'] = rsm.nreads
-    yaml_out['mols']['nreads']['umerged'] = rs1.nreads
-    yaml_out['mols']['desc'] = "number of umis whose rank1 sequence is a >= [1, 2, 3, 4, 5, 10, 100, 1000]"
-    yaml_out['mols']['saturation']['merged']['uncorrected'] = rsm.allele_saturation()
-    yaml_out['mols']['saturation']['unmerged']['uncorrected1'] = rs1.allele_saturation()
-    yaml_out['mols']['saturation']['unmerged']['uncorrected2'] = rs2.allele_saturation()
+    ### TODO for the refactored version too
+    ###yaml_out['mols']['saturation'] = {}
+    ###yaml_out['mols']['saturation']['merged'] = {}
+    ###yaml_out['mols']['saturation']['unmerged'] = {}
+    ###yaml_out['mols']['nreads'] = {}
+    ###yaml_out['mols']['nreads']['total'] = sum([rsm.nreads, rs1.nreads])
+    ###yaml_out['mols']['nreads']['merged'] = rsm.nreads
+    ###yaml_out['mols']['nreads']['umerged'] = rs1.nreads
+    ###yaml_out['mols']['desc'] = "number of umis whose rank1 sequence is a >= [1, 2, 3, 4, 5, 10, 100, 1000]"
+    ###yaml_out['mols']['saturation']['merged']['uncorrected'] = rsm.allele_saturation()
+    ###yaml_out['mols']['saturation']['unmerged']['uncorrected1'] = rs1.allele_saturation()
+    ###yaml_out['mols']['saturation']['unmerged']['uncorrected2'] = rs2.allele_saturation()
 
     if umi_errors >0:
-        print("Correcting umis with a hdist of {}".format(umi_errors))
-        rsm.correct_umis(errors = umi_errors , silent = True, jobs = 80)
-        rs1.correct_umis(errors = umi_errors , silent = True, jobs = 80)
-        rs2.correct_umis(errors = umi_errors , silent = True, jobs = 80)
-        yaml_out['mols']['saturation']['merged']['corrected'] = rsm.saturation()
-        yaml_out['mols']['saturation']['unmerged']['corrected1'] = rs1.saturation()
-        yaml_out['mols']['saturation']['unmerged']['corrected2'] = rs2.saturation()
+        print(f"Correcting umis with a hdist of {umi_errors} using {threads} cores")
+        rsm.correct_umis(errors = umi_errors , silent = True, jobs = threads)
+        rs1.correct_umis(errors = umi_errors , silent = True, jobs = threads)
+        rs2.correct_umis(errors = umi_errors , silent = True, jobs = threads)
+        ###yaml_out['mols']['saturation']['merged']['corrected'] = rsm.saturation()
+        ###yaml_out['mols']['saturation']['unmerged']['corrected1'] = rs1.saturation()
+        ###yaml_out['mols']['saturation']['unmerged']['corrected2'] = rs2.saturation()
 
     else:
         print("Not correcting umis")
-
     
     rsm.consensus = ogtk.UM.do_fastq_pileup(rsm, min_cov = ranked_min_cov, threads = threads, trim_by = None)
     rs1.consensus = ogtk.UM.do_fastq_pileup(rs1, min_cov = ranked_min_cov, threads = threads, trim_by = None)
@@ -847,12 +925,15 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
     mlt_create_fasta_ref(ref_name+"RC", ogtk.UM.rev_comp(ref_seq), rcref_path)
 
     alg_mode = 'needleman'
-    #alg_gapopen = 20
-    #alg_gapextend = 1
 
-    yaml_out['alignment']['alg_mode'] = alg_mode
-    yaml_out['alignment']['alg_gapopen'] = alg_gapopen
-    yaml_out['alignment']['alg_gapextend'] = alg_gapextend
+    alg_mode = conf['alignment']['alg_mode']
+    alg_gapopen = conf['alignment']['alg_gapopen']
+    alg_gapextend = conf['alignment']['alg_gapextend']
+    fa_correctedm = conf['alignment']['fa_correctedm']
+    fa_corrected1 = conf['alignment']['fa_corrected1']
+    fa_corrected2 = conf['alignment']['fa_corrected2']
+    bint_db_ifn = conf['alignment']['bint_db_ifn']
+
 
 # PO removed in refactoring
 #    if rsm.consensus.keys() is None:
@@ -862,12 +943,14 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
 #        yaml_out['success'] = True
 # 
 
-    mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"m", fa_ofn = fa_correctedm, 
+    mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"m", 
+                            fa_ofn = fa_correctedm, 
                             rs = rsm, ref_path = ref_path, 
                             ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
                             gapextend = alg_gapextend)
 
-    mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"1", fa_ofn = fa_corrected1, 
+    mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"1", 
+                            fa_ofn = fa_corrected1, 
                             rs = rs1, ref_path = ref_path, 
                             ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
                             gapextend = alg_gapextend)
@@ -887,9 +970,7 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
     print("whitelist:", len(umi_whitelist))
 
     if len(umi_whitelist)>0:
-        unmerged_tab_out = outdir + '/{}_barcodes_unmerged.txt'.format(name)
-        yaml_out['lineage']['paired_tab'] = unmerged_tab_out 
-        yaml_out['lineage']['paired_full'] = unmerged_tab_out.replace('.txt','_full.txt')
+        unmerged_tab_out = conf['lineage']['paired_tab'] 
 
         mlt_compute_barcode_matrix_paired(fa_ifn = fa_corrected1, 
                                            fa_ifn2 = fa_corrected2, 
@@ -908,10 +989,10 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
                 fh.write(f'{count}\t{umi}\n')
     
     # save run settings 
-    with open(yaml_out_fn, 'w') as yaml_stream:
-        pyaml.yaml.dump(yaml_out, yaml_stream)
-        print("Run settings saved to config card:\n{}".format(yaml_out_fn))
-    return(yaml_out_fn)
+    with open(conf_fn, 'w') as yaml_stream:
+        pyaml.yaml.dump(conf, yaml_stream)
+        print("Run settings saved to config card:\n{}".format(conf_fn))
+    return(conf_fn)
 
 
 def sc_bin_alleles(name, intid, 
@@ -1085,12 +1166,12 @@ def _sc_bin_alleles(conf_fn, conf, **kwargs):
         print(f"loaded cached ReadSet {pickled_readset}. total umis: {len(rssc.umis)}")
     else:    
         rssc = ogtk.UM.fastq_collapse_UMI(
-            conf['inputs']['fastq_merged'], 
-            umi_len = conf['mols']['umi_len'], 
-            end = end, 
-            keep_rid = True, 
-            min_reads_per_umi = conf['filters']['min_reads_per_umi'],
-            trimming_pattern = trimming_pattern)
+                        conf['inputs']['fastq_merged'], 
+                        umi_len = conf['mols']['umi_len'], 
+                        end = end, 
+                        keep_rid = True, 
+                        min_reads_per_umi = conf['filters']['min_reads_per_umi'],
+                        trimming_pattern = trimming_pattern)
 
         print(f"loaded rs with trimming={trimming_pattern != None}. total umis: {len(rssc.umis)}")
         if umi_errors>0:
@@ -1176,7 +1257,7 @@ def _sc_bin_alleles(conf_fn, conf, **kwargs):
         print(f'Success')
         conf['success'] = True
  
-    # save binaries
+    ### cache: save binaries
     print(f'pickling rs as {pickled_readset}')
     with open(pickled_readset, 'wb') as pcklout:
         pickle.dump(rssc, pcklout)
@@ -1688,7 +1769,7 @@ def cell_dominant_allele(rs, cell_umi_dict, allele_reps_fn = None):
 def get_rep_allele(x, min_mol = 3, min_domix = 0.75):
     '''
     Helper function for cell consensus calling.
-    To determine the allele present on a given cell one must select from a pool of candidate sequences (each belonging to a prefiltered UMI)
+    To determine the allele present on a given cell, one must select from a pool of candidate sequences (each belonging to a prefiltered UMI)
     '''
     top_seqs = x['dominant_seq'].value_counts()
     domix = x['dominant_seq'].value_counts(normalize = True).to_list()[0]
