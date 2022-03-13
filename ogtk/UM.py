@@ -25,7 +25,7 @@ class Read_Set:
     '''
     Hosts a list UM instances and provides a number of functions to process them
     '''
-    def __init__(self, name = '', scurve_levels = [0, 2, 4, 8, 16]):
+    def __init__(self, name = '', scurve_levels = None, scurve_step = None):
         # gets filled with UM instances
         self.umis = {}
         self.name = name
@@ -43,10 +43,20 @@ class Read_Set:
         self.conf = None
         self.prefix = ''
 
+        if scurve_levels is None:
+            scurve_levels = [0, 2, 4, 8, 16]
+        if scurve_step is None:
+            scurve_step = 10000
+
         self.scurve_levels = scurve_levels
         self.scurve = {}
         for i in self.scurve_levels:
             self.scurve[i] = [(0, 0)]
+        if scurve_step >= 1e4:
+            self.scurve_step = int(1e4 * int(scurve_step/1e4))
+        else:
+            self.scurve_step = int(scurve_step)
+
 
     def log_scurve(self):
         counts = self.umi_counts()
@@ -569,11 +579,13 @@ def count_umis_bam10x(ifn_bam):
 
 
 
-def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=None, fuse = False, do_rc = False, min_reads_per_umi=1):
+def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=None, fuse = False, do_rc = False, min_reads_per_umi=1, **kwargs):
     '''Constructs a paired Readset by transfering the UMI from R1 to R2 via the
     read id. TODO and converts R2 to the same strand''' 
-    rset1 = fastq_collapse_UMI(fastq_ifn1, umi_len = umi_len, keep_rid = True, end = end, min_reads_per_umi= min_reads_per_umi)
-    rset2 = fastq_collapse_UMI(fastq_ifn2, umi_len = umi_len, rid_umi = rset1.rid_umi, do_rc = do_rc, end = end, min_reads_per_umi= min_reads_per_umi)
+    
+    rset1 = fastq_collapse_UMI(fastq_ifn1, umi_len = umi_len, keep_rid = True, end = end, min_reads_per_umi= min_reads_per_umi, scurve_levels = kwargs.get('scurve_levels', None), scurve_step = kwargs.get('scurve_step', None))
+
+    rset2 = fastq_collapse_UMI(fastq_ifn2, umi_len = umi_len, rid_umi = rset1.rid_umi, do_rc = do_rc, end = end, min_reads_per_umi= min_reads_per_umi, scurve_levels = kwargs.get('scurve_levels', None), scurve_step = kwargs.get('scurve_step', None))
 
     #TODO add support for controlling the strandednes of the pooling method, for now this just dumps read2s in to read1s
     if fuse: 
@@ -585,7 +597,7 @@ def pfastq_collapse_UMI(fastq_ifn1, fastq_ifn2, umi_start=0, umi_len=17, end=Non
     
     return([rset1, rset2])
     
-def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_reads_per_umi =1, end=None, keep_rid=False, rid_umi=None, do_rc = False, downsample = False, threshold = 1, verbose = False, trimming_pattern = None, wl=None):
+def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_reads_per_umi =1, end=None, keep_rid=False, rid_umi=None, do_rc = False, downsample = False, threshold = 1, verbose = False, trimming_pattern = None, wl=None, **kwargs):
 
     '''
     Process a fastq file and collapses reads by UMI making use of their consensus seq
@@ -597,7 +609,7 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_read
     if name == None:
         name = fastq_ifn
     umi_len = int(umi_len)
-    readset = Read_Set(name=fastq_ifn)
+    readset = Read_Set(name=fastq_ifn, scurve_levels =  kwargs.get('scurve_levels', None), scurve_step =  kwargs.get('scurve_step', None))
     
     if end != None:
         end = end * 4
@@ -628,7 +640,7 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_read
 
     for i, (read, rid, qual) in enumerate(reads_rids_it):
         readset.nreads += 1
-        if readset.nreads%10000 ==0:
+        if readset.nreads%readset.scurve_step ==0:
             #readset.scurve.append((readset.nreads, len(readset.umis.keys()) ))
             readset.log_scurve()
         read = read.strip()
@@ -1462,7 +1474,7 @@ def alternating_patches(x, baseline =-0.0002, delta= 0.0001):
 
 def get_list_of_10xcells(rs, correction_dict_path = None, correction_dict = None):
     '''
-    Returns a list of 10x-style cell barcodes. It can use a correction dictionary, if provided else it just strips the full UMI according to the range that corresponds to the CBC
+    Returns a CBC-> list(UMIs) dict of 10x-style cell barcodes. It can use a correction dictionary if provided, else it just strips the full UMI according to the range that corresponds to the CBC
     '''
     umi_list = rs.umis.keys()
     valid_cells = []
