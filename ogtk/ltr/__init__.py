@@ -1,25 +1,3 @@
-import ogtk
-import pickle
-import subprocess
-import pyaml
-import itertools
-import pyfaidx
-import os
-import multiprocessing
-import itertools
-import regex
-import numpy as np
-import pandas as pd
-import pdb
-import os
-import glob
-import pandas as pd
-import numpy as np
-import regex
-import itertools
-import pdb
-import time, random
-import multiprocessing
-import gzip 
-import ogtk.bbin_alleles as bbin
-#from .bin_alleles import Bin_Alleles
+from  ltr.bbin_alleles import *
+from  ltr.scbin_alleles import *
+from ltr.ltr_matlin import *

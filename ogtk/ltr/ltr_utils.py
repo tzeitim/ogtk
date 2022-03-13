@@ -21,7 +21,6 @@ import pdb
 import time, random
 import multiprocessing
 import gzip 
-import ogtk.bbin_alleles as bbin
 #from .bin_alleles import Bin_Alleles
 
 

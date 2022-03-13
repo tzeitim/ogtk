@@ -248,7 +248,7 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
     
     # >>>
     _bulk_bin_alleles(conf_fn, conf, use_cache = use_cache, threads = threads)
-    return(None)
+    return(conf_fn)
 
 def _bulk_bin_alleles(conf_fn, conf, **kwargs):
     ''' main function for binning alleles from bulk data. For reference see bulk_bin_alleles

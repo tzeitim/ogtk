@@ -22,7 +22,7 @@ import time, random
 import multiprocessing
 import gzip 
 
-from ogtk.ltr_utils import *
+from ltr.ltr_utils import *
 
 def sc_bin_alleles(name, intid, 
     config_card_dir,
