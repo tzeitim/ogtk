@@ -47,7 +47,6 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
     '''
 
     # TODO add tadpole-based correction as an option
-    
     if not os.path.isdir(outdir):
         os.makedirs(outdir, exist_ok=True)
         print("Created {}".format(outdir))
@@ -61,15 +60,11 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
         os.makedirs(out_prefix, exist_ok=True)
         print("Created {}".format(out_prefix))
 
-        
-    # TODO clean this mess redirectin to who knows where
-    # TODO do we neeed thiss?
     if intid2_R2_strand != None:
         intid2 = ogtk.UM.rev_comp(intid2_R2_strand)# same strand as initd1
     else:
         intid2 = len(intid) * "N"
    
-    ####bint_db_ifn = '/local/users/polivar/src/projects/mltracer/conf/gstlt_barcode_intervsx10.yaml'
     bint_db = pyaml.yaml.load(open(bint_db_ifn), Loader=pyaml.yaml.FullLoader)
 
     conf_fn = config_card_dir + '/config_card_{}.yaml'.format(name)
@@ -183,61 +178,6 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
         cov_pck = f'{out_prefix}_umi_cov.pickle'
         )
   
-
-
-####    yaml_out_fn = config_card_dir + '/config_card_{}.yaml'.format(name)
-####    yaml_out = {'name':name, 'desc':{}, 'intid1':intid, 'intid2':intid2, 'modality':'bulk'}
-    
-    # for intid in dataset
-    # merge
-####    fqm =       outdir + '/{}_merged.fastq'.format(name)
-####    fqum1 =     outdir + '/{}_unmerged_R1.fastq'.format(name)
-####    fqum2 =     outdir + '/{}_unmerged_R2.fastq'.format(name)
-####    ihist =     outdir + '/{}_ihist.txt'.format(name)
-####    log_merge = outdir + '/{}_merge_stats.txt'.format(name)
-####    cmd_merge = "bbmerge-auto.sh in1={} in2={} out={} outu={} outu2={} ihist={} ecct extend2=20 iterations=5 interleaved=false -Xmx2g ".format(fq1, fq2, fqm, fqum1, fqum2, ihist)
-    
-####    yaml_out['desc']['read_merge'] = "Parameters used for the merging of read 1 and read 2"
-####
-####    umi_counts_ofn = outdir + '/{}_umi_counts.txt'.format(name)
-####    yaml_out['mols'] = {}
-####    yaml_out['mols']['umi_len'] = umi_len
-####    yaml_out['mols']['umi_correction'] = umi_errors
-####    yaml_out['mols']['counts'] = umi_counts_ofn 
-####    
-####    yaml_out['read_merge'] = {}
-####    yaml_out['read_merge']['fqm'] = fqm
-####    yaml_out['read_merge']['fqum1'] = fqum1
-####    yaml_out['read_merge']['fqum2'] = fqum2
-####    yaml_out['read_merge']['ihist'] = ihist
-####    yaml_out['read_merge']['log_merge'] = log_merge
-####
-    # align
-####    fa_correctedm = outdir+'/{}_corrected_merged.fa'.format(name)
-####    fa_corrected1 = outdir+'/{}_corrected_R1.fa'.format(name)
-####    fa_corrected2 = outdir+'/{}_corrected_R2.fa'.format(name)
-####
-####    yaml_out['desc']['alignment'] = "Parameters for the pairwise alignment of every recovered allele and the reference. The corrected files fix the issue of duplicated fasta entry names"
-####
-####    yaml_out['alignment'] = {}
-####    yaml_out['alignment']['fa_correctedm'] = fa_correctedm
-####    yaml_out['alignment']['fa_corrected1'] = fa_corrected1
-####    yaml_out['alignment']['fa_corrected2'] = fa_corrected2
-####
-####    # more outfiles
-####    merged_tab_out =   outdir + '/{}_barcodes_merged.txt'.format(name)
-#### 
-####    yaml_out['desc']['lineage'] = "Main output of the pre-processing scripts. Tabulated files that contain the bint barcode string"
-####    yaml_out['lineage'] = {}
-####    yaml_out['lineage']['merged_tab'] = merged_tab_out
-####    yaml_out['lineage']['merged_full'] = merged_tab_out.replace('.txt','_full.txt')
-####    yaml_out['alignment']['alg_mode'] = alg_mode
-####    yaml_out['alignment']['alg_gapopen'] = alg_gapopen
-####    yaml_out['alignment']['alg_gapextend'] = alg_gapextend
-
-
-####
-
     # merge paired-end reads if possible
     log_merge =conf['bbmerge']['log'] 
     pp = subprocess.run(cmd_bbmerge.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -246,7 +186,6 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
         fout.write(pp.stdout)
         fout.write(pp.stderr)
     
-    # >>>
     _bulk_bin_alleles(conf_fn, conf, use_cache = use_cache, threads = threads)
     return(conf_fn)
 
@@ -317,26 +256,12 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
 
     #TODO the saturation stats should be outsourced somehow and reported for all three cases not just the merged (rsm) 
     ### TODO for the refactored version too
-    ###yaml_out['mols']['saturation'] = {}
-    ###yaml_out['mols']['saturation']['merged'] = {}
-    ###yaml_out['mols']['saturation']['unmerged'] = {}
-    ###yaml_out['mols']['nreads'] = {}
-    ###yaml_out['mols']['nreads']['total'] = sum([rsm.nreads, rs1.nreads])
-    ###yaml_out['mols']['nreads']['merged'] = rsm.nreads
-    ###yaml_out['mols']['nreads']['umerged'] = rs1.nreads
-    ###yaml_out['mols']['desc'] = "number of umis whose rank1 sequence is a >= [1, 2, 3, 4, 5, 10, 100, 1000]"
-    ###yaml_out['mols']['saturation']['merged']['uncorrected'] = rsm.allele_saturation()
-    ###yaml_out['mols']['saturation']['unmerged']['uncorrected1'] = rs1.allele_saturation()
-    ###yaml_out['mols']['saturation']['unmerged']['uncorrected2'] = rs2.allele_saturation()
 
     if umi_errors >0:
         print(f"Correcting umis with a hdist of {umi_errors} using {threads} cores")
         rsm.correct_umis(errors = umi_errors , silent = True, jobs = threads)
         rs1.correct_umis(errors = umi_errors , silent = True, jobs = threads)
         rs2.correct_umis(errors = umi_errors , silent = True, jobs = threads)
-        ###yaml_out['mols']['saturation']['merged']['corrected'] = rsm.saturation()
-        ###yaml_out['mols']['saturation']['unmerged']['corrected1'] = rs1.saturation()
-        ###yaml_out['mols']['saturation']['unmerged']['corrected2'] = rs2.saturation()
 
     else:
         print("Not correcting umis")
@@ -360,15 +285,6 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
     fa_corrected1 = conf['alignment']['fa_corrected1']
     fa_corrected2 = conf['alignment']['fa_corrected2']
     bint_db_ifn = conf['alignment']['bint_db_ifn']
-
-
-# PO removed in refactoring
-#    if rsm.consensus.keys() is None:
-#        yaml_out['success'] = False
-#        return(None)
-#    else:
-#        yaml_out['success'] = True
-# 
 
     mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"m", 
                             fa_ofn = fa_correctedm, 
@@ -420,4 +336,3 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
         pyaml.yaml.dump(conf, yaml_stream)
         print("Run settings saved to config card:\n{}".format(conf_fn))
     return(conf_fn)
-
