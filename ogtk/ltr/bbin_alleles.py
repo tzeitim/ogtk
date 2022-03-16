@@ -22,7 +22,7 @@ import time, random
 import multiprocessing
 import gzip 
 
-from ltr.ltr_utils import *
+from .ltr_utils import *
 
 def bulk_bin_alleles(name, intid, intid2_R2_strand, 
     config_card_dir, 
@@ -220,6 +220,7 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
 
     if end != None:
         print("Warning: end is not None; You are not processing all the data", end)
+
     rs_paths = [pickled_merged_readset, pickled_readset1, pickled_readset2]
 
     # do a pass on the raw fastqs and group reads by UMI
@@ -227,7 +228,7 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
         rsm = pickle.load(open(pickled_merged_readset, 'rb'))
         rs1 = pickle.load(open(pickled_readset1, 'rb'))
         rs2 = pickle.load(open(pickled_readset2, 'rb'))
-        print(f"loaded cached ReadSets: {'_'.join(rs_paths)}")
+        print(f"!!! loaded cached ReadSets!!!: {'_'.join(rs_paths)}", end = '\n\n')
         print(f"merged total umis: {len(rsm.umis)}")
         print(f"R1 total umis: {len(rs1.umis)}")
         print(f"R2 total umis: {len(rs2.umis)}")
@@ -247,6 +248,7 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
             conf['bbmerge']['fastq_umerged1'],
             conf['bbmerge']['fastq_umerged2'],
             umi_len = conf['mols']['umi_len'],
+            min_reads_per_umi = conf['filters']['min_reads_per_umi'],
             end = end)
 
     # remove umis that exist on the merged set out of the unmerged
@@ -322,6 +324,13 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
                                            tab_out = unmerged_tab_out, 
                                            bint_db_ifn = bint_db_ifn, 
                                            do_rc = True)
+
+    ### cache: save binaries
+    for rs, pickled_readset in zip([rsm, rs1, rs2], rs_paths):
+        print(f'pickling rs as {pickled_readset}')
+        with open(pickled_readset, 'wb') as pcklout:
+            pickle.dump(rs, pcklout)
+
 
     # save the count information for the UMIs 
     with open(umi_counts_ofn, 'w') as fh:

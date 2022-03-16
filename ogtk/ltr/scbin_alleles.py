@@ -22,7 +22,7 @@ import time, random
 import multiprocessing
 import gzip 
 
-from ltr.ltr_utils import *
+from .ltr_utils import *
 
 def sc_bin_alleles(name, intid, 
     config_card_dir,
@@ -192,7 +192,7 @@ def _sc_bin_alleles(conf_fn, conf, **kwargs):
     # do a pass on the raw fastqs and group reads by UMI
     if os.path.exists(pickled_readset) and use_cache:
         rssc = pickle.load(open(pickled_readset, 'rb'))
-        print(f"loaded cached ReadSet {pickled_readset}. total umis: {len(rssc.umis)}")
+        print(f"!!! loaded cached ReadSet !!! {pickled_readset}. total umis: {len(rssc.umis)}", end = '\n\n')
     else:    
         rssc = ogtk.UM.fastq_collapse_UMI(
                         conf['inputs']['fastq_merged'], 
