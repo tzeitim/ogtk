@@ -702,7 +702,9 @@ def make_unique_fa_ref_entries(fa_ifn, fa_ofn, ref_name = 'hspdrv7_scgstl'):
     ofa.close()
    
 def get_lineage_vector(args):
-    ''' with a given reference and red sequence pair, returns a lineage vector making use of a barcode interval db (bintdb)'''
+    ''' with a given reference and red sequence pair, returns a lineage vector making use of a barcode interval db (bintdb)
+    Alleles are encoded in the format [mismatches, insertions, deletions] e.g. "mm.ins.dele" 
+    '''
     if len(args) <5:
         ref_seq, read_seq, bint_db_ifn, read_end, = args
         debug = False
