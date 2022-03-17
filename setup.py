@@ -18,6 +18,8 @@ setuptools.setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
+    install_requires = ['fastcluster',
+                        'colorhash'],
     python_requires='>=3.6',
 )
 # python3 setup.py sdist bdist_wheel
