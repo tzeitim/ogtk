@@ -79,6 +79,8 @@ class matlin():
             return(new_instance)
             
         self.df = self.df.loc[self.df.index.intersection(wl)]
+        self.__encode_mat()
+
 
     def unique_alleles(self):
         unique_alls = ~self.bc.duplicated()
@@ -166,7 +168,7 @@ class matlin():
         return(color_dict)
         
 
-    def plot_mat(self, r, rows = range(0, 100),  cells = None, vmax=None, add = False, ax = None):
+    def plot_mat(self, col_range = None, rows = range(0, 100),  cells = None, vmax=None, add = False, ax = None):
             
         #color_dict = dict(map(lambda x: (x, ColorHash(x).hex), set(self.df.values.flatten()) ))
         #color_dict[self.non_inf['ex']] = "#000000"
@@ -187,10 +189,17 @@ class matlin():
         if cells is not None:
             #cells =  [i for i in mat.index if i in cells]
             cells = self.__intersect_cells(cells, mat.index)
-            cells = [cells[i] for i in np.arange(len(cells)-1, 0, -1)]
-            im = mat.loc[cells].iloc[:,r]
+            cells = [cells[i] for i in np.arange(len(cells)-1, -1, -1)]
+            #return(cells)
+            if col_range is not None:
+                im = mat.loc[cells].iloc[:,col_range]
+            else:
+                im = mat.loc[cells]#.iloc[:,0:r]
         else:    
-            im = mat.iloc[rows, r]
+            if col_range is not None:
+                im = mat.iloc[rows, col_range]
+            else:
+                im = mat.iloc[rows, :]
 
         if not add:
             plt.close()
