@@ -207,40 +207,44 @@ def sfind(path, pattern, options = "-iname"):
     ls_call = [i for i in sys_call.stdout.split()] 
     return(ls_call)
 
-def tabulate_10x_fastqs(indir, r1, cbc_len =16 , umi_len = 10, end = None):
-    ''' merge 10x fastqs into a single one tab file with fields:
-    readid cellbc umi seq qual
+def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False):
+    ''' merge umified paired fastqs (e.g. 10x fastqs) into a single one tab file with fields:
+        |readid | start | end  | cbc | umi | seq | qual|
+
     5ʼkit cbc_len = 16 ; umi_len = 10
     3ʼkit cbc_len = 16 ; umi_len = 12
-    TODO: add sorting step and bgzip
+
+    if single_molecule = cbc and umi are the same
+    previous name: tabulate_10x_fastqs
+    TODO: implent full python interface otherwise bgzip might not be available in the system
     '''
     import gzip
     import bgzip
     r2 = r1.replace("R1", "R2")
 
-    unsorted_tab = indir+r1.split('_R1_')[0]+'.unsorted.txt'
+    unsorted_tab = r1.split('_R1_')[0]+'.unsorted.txt'
     sorted_tab = unsorted_tab.replace('unsorted.txt', 'sorted.txt.gz')
 
-    ptime = subprocess.run('date')
+    print(subprocess.getoutput('date'))
 
     with open(unsorted_tab, 'wt') as R3:
-        with gzip.open(indir + r1, 'rt') as R1, gzip.open(indir+ r2, 'rt') as R2:#, bgzip.BGZipWriter(R3) as zR3:
+        with gzip.open(r1, 'rt') as R1, gzip.open(r2, 'rt') as R2:#, bgzip.BGZipWriter(R3) as zR3:
             i1 = itertools.islice(grouper(R1, 4), 0, end)
             i2 = itertools.islice(grouper(R2, 4), 0, end)
             for read1,read2 in zip(i1, i2):
                 #read2 = list(read2)
                 read_id = read1[0].split(' ')[0]
-                cbc_str = read1[1][0:cbc_len]
-                umi_str = read1[1][cbc_len:cbc_len+umi_len]
+                cbc_str = read1[1][0:cbc_len] if not single_molecule else read1[1][0:cbc_len+umi_len] 
+                umi_str = read1[1][cbc_len:cbc_len+umi_len] if not single_molecule else read1[1][0:cbc_len+umi_len] 
                 seq = read2[1].strip() 
                 qual =  read2[3].strip()
-                out_str = '\t'.join([read_id, cbc_str, umi_str, seq, qual])+'\n'
+                out_str = '\t'.join([read_id, '0', '1', cbc_str, umi_str, seq, qual])+'\n'
                 R3.write(out_str)
-    cmd_sort = f'sort -k1 {unsorted_tab}'
+    cmd_sort = f'sort -k4,4 -k5,5 {unsorted_tab}'
     cmd_bgzip = 'bgzip'
     
     c1 = subprocess.Popen(cmd_sort.split(), stdout = subprocess.PIPE)
-    c2 = subprocess.Popen(cmd_bgzip.split(), stdin=c1.stdout, stdout=open(sorted_tab, 'w'))
+    c2 = subprocess.Popen(cmd_bgzip.split(), stdin = c1.stdout, stdout = open(sorted_tab, 'w'))
     c1.stdout.close()
     c2.communicate()
 
@@ -252,8 +256,64 @@ def tabulate_10x_fastqs(indir, r1, cbc_len =16 , umi_len = 10, end = None):
  
     print(f"tabbed fastq {sorted_tab}")
 
-    ptime = subprocess.run('date')
+    cmd_tabix = f"tabix -f -b 2 -e 3 -s 4 {sorted_tab}"
+    c3 = subprocess.run(cmd_tabix.split())
+    del_unsorted = subprocess.run(f'rm {unsorted_tab}'.split())
+    print(subprocess.getoutput('date'))
     return(sorted_tab)
+
+def tabulate_umified_fastqs(r1, cbc_len =16, umi_len = 10, end = None, single_molecule = False, force = False):
+    '''
+    Generate tabix file from a single fastq. Use `tabulate_paired_umified_fastqs` instead for a paired-end mode
+    if single_molecule: the usual 10x division of R1 into cbc and umi is ignored and a full-length umi is used insted
+    '''
+    import gzip
+    import bgzip
+    import os
+    unsorted_tab = r1.split('_R1_')[0]+'.unsorted.txt'
+    sorted_tab = unsorted_tab.replace('unsorted.txt', 'sorted.txt.gz')
+
+    if os.path.exists(sorted_tab) and not force:
+        print(f'using pre-computed {sorted_tab}')
+        return(sorted_tab)
+
+    print(subprocess.getoutput('date'))
+
+    with open(unsorted_tab, 'wt') as R3:
+        with gzip.open(r1, 'rt') as R1:#, bgzip.BGZipWriter(R3) as zR3:
+            i1 = itertools.islice(grouper(R1, 4), 0, end)
+            for read1 in i1:
+                #read2 = list(read2)
+                read_id = read1[0].split(' ')[0]
+                cbc_str = read1[1][0:cbc_len] if not single_molecule else read1[1][0:cbc_len+umi_len] 
+                umi_str = read1[1][cbc_len:cbc_len+umi_len] if not single_molecule else read1[1][0:cbc_len+umi_len] 
+                seq = read1[1][cbc_len+umi_len:].strip() 
+                qual = read1[3][cbc_len+umi_len:].strip() 
+                out_str = '\t'.join([read_id, '0', '1', cbc_str, umi_str, seq, qual])+'\n'
+                R3.write(out_str)
+    cmd_sort = f'sort -k4,4 -k5,5 {unsorted_tab}'
+    cmd_bgzip = 'bgzip'
+    
+    c1 = subprocess.Popen(cmd_sort.split(), stdout = subprocess.PIPE)
+    c2 = subprocess.Popen(cmd_bgzip.split(), stdin = c1.stdout, stdout = open(sorted_tab, 'w'))
+    c1.stdout.close()
+    c2.communicate()
+
+    pool = [c1 ,c2]
+    while any(map(lambda x: x.poll() == None, pool)):
+        time.sleep(5)
+
+    map(lambda x: x.terminate(), pool)
+ 
+    print(f"tabbed fastq {sorted_tab}")
+
+    cmd_tabix = f"tabix -f -b 2 -e 3 -s 4 {sorted_tab}"
+    c3 = subprocess.run(cmd_tabix.split())
+    del_unsorted = subprocess.run(f'rm {unsorted_tab}'.split())
+
+    print(subprocess.getoutput('date'))
+    return(sorted_tab)
+
 
 
 def merge_10x_fastqs(indir, r1, end = None):
@@ -379,6 +439,8 @@ def generate_correction_dictionaries(pickle_ofn, path_to_bam, force = False, ver
 
 
 def fill_sge_template(job_name, cmd, wd, pe = 'smp', ram = '7G', run_time = "00:10:00", job_reservation = False):
+    ''' Main utility to generated a sge job script
+    '''
     job_out = f'{wd}/{job_name}.stdout'
     job_err = f'{wd}/{job_name}.stderr'
     args = locals()
@@ -396,7 +458,7 @@ def fill_sge_template(job_name, cmd, wd, pe = 'smp', ram = '7G', run_time = "00:
 
 def return_sge_template(**kargs):
 
-    '''Returns an empty job template
+    ''' Helper function, returns an empty job template
     options = ['interconnects']
     '''
 
@@ -449,7 +511,8 @@ def split_bam_by_tag(bam_ifn, tab, prefix, tag = 'CB', header = None):
     import pysam
     import pandas as pd 
     import subprocess
-    ptime = subprocess.run('date')
+    print(subprocess.getoutput('date'))
+
     df = pd.read_csv(tab, sep='\t', header=header)
     df.columns = [tag, 'ann']
     bam = pysam.AlignmentFile(bam_ifn, 'rb')
@@ -476,4 +539,4 @@ def split_bam_by_tag(bam_ifn, tab, prefix, tag = 'CB', header = None):
     for ann in outs.keys():
         outs[ann].close()
 
-    ptime = subprocess.run('date')
+    print(subprocess.getoutput('date'))
