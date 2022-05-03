@@ -19,7 +19,13 @@ setuptools.setup(
         "Operating System :: OS Independent",
     ],
     install_requires = ['fastcluster',
-                        'colorhash'],
+                        'colorhash',
+                        'pysam', 
+                        'pyfaidx', 
+                        'regex', 
+                        'pyfasta', 
+                        'fasta', 
+                        'pyaml'],
     python_requires='>=3.6',
 )
 # python3 setup.py sdist bdist_wheel
