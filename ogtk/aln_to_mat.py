@@ -1,4 +1,4 @@
-from pyfasta import Fasta
+from pyfaidx import Fasta
 import pdb
 import numpy as np
 import sys, argparse
