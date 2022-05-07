@@ -256,7 +256,7 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
  
     print(f"tabbed fastq {sorted_tab}")
 
-    cmd_tabix = f"tabix -f -b 2 -e 3 -s 4 {sorted_tab}"
+    cmd_tabix = f"tabix -f -b 2 -e 3 -s 4 --zero-based {sorted_tab}"
     c3 = subprocess.run(cmd_tabix.split())
     del_unsorted = subprocess.run(f'rm {unsorted_tab}'.split())
     print(subprocess.getoutput('date'))
@@ -307,7 +307,7 @@ def tabulate_umified_fastqs(r1, cbc_len =16, umi_len = 10, end = None, single_mo
  
     print(f"tabbed fastq {sorted_tab}")
 
-    cmd_tabix = f"tabix -f -b 2 -e 3 -s 4 {sorted_tab}"
+    cmd_tabix = f"tabix -f -b 2 -e 3 -s 4 --zero-based {sorted_tab}"
     c3 = subprocess.run(cmd_tabix.split())
     del_unsorted = subprocess.run(f'rm {unsorted_tab}'.split())
 
