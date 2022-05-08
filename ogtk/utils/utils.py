@@ -1,4 +1,5 @@
 import shutil
+import numpy as np
 import time
 import os
 import subprocess
@@ -207,7 +208,8 @@ def sfind(path, pattern, options = "-iname"):
     ls_call = [i for i in sys_call.stdout.split()] 
     return(ls_call)
 
-def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False):
+# TODO write a generalized version for tabulate_*fastqs
+def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False):
     ''' merge umified paired fastqs (e.g. 10x fastqs) into a single one tab file with fields:
         |readid | start | end  | cbc | umi | seq | qual|
 
@@ -215,6 +217,7 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     3ʼkit cbc_len = 16 ; umi_len = 12
 
     if single_molecule = cbc and umi are the same
+    if comparable it creates a tabix file for comparison purposes at a specified depth 1e5 by default
     previous name: tabulate_10x_fastqs
     TODO: implent full python interface otherwise bgzip might not be available in the system
     '''
@@ -224,6 +227,19 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
 
     unsorted_tab = r1.split('_R1_')[0]+'.unsorted.txt'
     sorted_tab = unsorted_tab.replace('unsorted.txt', 'sorted.txt.gz')
+
+    # round end to closest order of magnitude in powers of ten
+    if end is not None:
+        end = int(10**int(np.log10(end)))
+
+    if comparable and end is not None:
+        f_end = f'{end:0.0e}'.replace('+','')
+        unsorted_tab = unsorted_tab.replace('.txt', f'.{f_end}.comparable.txt')
+        sorted_tab = sorted_tab.replace('.txt', f'.{f_end}.comparable.txt')
+
+    if os.path.exists(sorted_tab) and not force:
+        print(f'using pre-computed {sorted_tab}')
+        return(sorted_tab)
 
     print(subprocess.getoutput('date'))
 
@@ -262,16 +278,27 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     print(subprocess.getoutput('date'))
     return(sorted_tab)
 
-def tabulate_umified_fastqs(r1, cbc_len =16, umi_len = 10, end = None, single_molecule = False, force = False):
+def tabulate_umified_fastqs(r1, cbc_len =16, umi_len = 10, end = None, single_molecule = False, force = False, comparable = False):
     '''
     Generate tabix file from a single fastq. Use `tabulate_paired_umified_fastqs` instead for a paired-end mode
     if single_molecule: the usual 10x division of R1 into cbc and umi is ignored and a full-length umi is used insted
+
+    if comparable it creates a tabix file for comparison purposes at a specified depth 1e5 by default
     '''
     import gzip
     import bgzip
     import os
     unsorted_tab = r1.split('_R1_')[0]+'.unsorted.txt'
     sorted_tab = unsorted_tab.replace('unsorted.txt', 'sorted.txt.gz')
+
+    # round end to closest order of magnitude in powers of ten
+    if end is not None:
+        end = int(10**int(np.log10(end)))
+
+    if comparable and end is not None:
+        f_end = f'{end:0.0e}'.replace('+','')
+        unsorted_tab = unsorted_tab.replace('.txt', f'.{f_end}.comparable.txt')
+        sorted_tab = sorted_tab.replace('.txt', f'.{f_end}.comparable.txt')
 
     if os.path.exists(sorted_tab) and not force:
         print(f'using pre-computed {sorted_tab}')
