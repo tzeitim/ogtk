@@ -1,3 +1,4 @@
+# Rename to : single-cell multi-channel (scmch)
 import ogtk
 import pickle
 import subprocess
