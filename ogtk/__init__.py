@@ -6,3 +6,4 @@ from .aln_to_mat import Alg as Alg
 from . import gegen as gegen
 from . import fbli as fbli
 from . import ltr as ltr
+from ltr import shltr as shltr 

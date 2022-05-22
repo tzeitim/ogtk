@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from . import plot
 
 def es(string, errors=0):
     ''' error string '''
@@ -103,7 +104,7 @@ def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn,  cell_bcs, ibar
 
     returns a dictionary that keeps track of molecules with an ibar and orphanes ones.
 
-        return({'df':df_out, 'orphans':orphans, 'dfo':dfo_out, 'read_missed':read_missed})
+        return({'expected':exp_out, 'orphans':orphans, 'unexpected':unex_out, 'read_missed':read_missed})
     '''
     import pysam
     import rich
@@ -119,8 +120,8 @@ def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn,  cell_bcs, ibar
 
     #(umi_str, umi_seq, umi_dom_reads, umi_reads)
     header  = [ 'cell', 'ibar', 'umi', 'seq', 'umi_dom_reads', 'umi_reads']
-    df = []
-    dfo = []
+    expected = []
+    unexpected = []
     imissed = [] # no ibar could be fetched
     read_missed = []# no TSO was found -> considered bad read
     tmissed = []  # rare cases where tabix misses an entry 
@@ -148,8 +149,8 @@ def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn,  cell_bcs, ibar
             if richf:
                 progress.update(task_cells, 
                     advance = 1, 
-                    wlisted=len(df), 
-                    orphans=len(dfo), 
+                    wlisted=len(expected), 
+                    orphans=len(unexpected), 
                     imissed=f'{len(imissed)} {len(read_missed)} {len(imissed)/(1e-10+len(read_missed)):0.2f}' 
                 )
             
@@ -193,7 +194,7 @@ def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn,  cell_bcs, ibar
                 # recover dominant sequence for each ibar
                 # store as a df for both ibar groups
                 igroups = [irsets, orphans]
-                dfms = [df, dfo]
+                dfms = [expected, unexpected]
 
                 for rsetg, dfoc in zip(igroups, dfms):
                     for ibar in rsetg.keys():
@@ -209,14 +210,21 @@ def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn,  cell_bcs, ibar
                 # some times the tabix file is missing an entry specified in the cbcs
                 tmissed.append(cell)
 
-        df_out = pd.DataFrame(df, columns = header)
-        dfo_out = pd.DataFrame(dfo, columns = header)
+        exp_out = pd.DataFrame(expected, columns = header)
+        unexp_out = pd.DataFrame(unexpected, columns = header)
 
-        found = ibar_wl.intersection(set(df_out['ibar']))
+        exp_out['sample_id'] = sample_id
+        unexp_out['sample_id'] = sample_id
+        exp_out['expected'] = True
+        unexp_out['expected'] = False
+
+
+        found = ibar_wl.intersection(set(exp_out['ibar']))
         print(f'{len(ibar_wl)} expected ; found {len(found)}/{len(ibar_wl)} = {100*len(found)/len(ibar_wl):0.2f}%')
         if richf:
             rich.print(f'[red] ibars missed {len(imissed)}+ reads missed {len(read_missed)}/nreads {nreads}  = {(len(imissed)+len(read_missed))/nreads*100:0.2f}%')
-        return({'df':df_out, 'dfo':dfo_out})
+        #return({'expected':exp_out, 'unexpected':unexp_out})
+        return(pd.concat([exp_out, unexp_out]))
 
 def genotype_ibar_clone(
     sample_id, 
@@ -224,7 +232,7 @@ def genotype_ibar_clone(
     r1, 
     single_molecule,
     single_end,
-    q=0.85, 
+    quantile=0.85, 
     nmols=None, 
     min_cov=None,
     end=int(1e5), 
@@ -252,45 +260,40 @@ def genotype_ibar_clone(
 
     print(f'[red] indexing\n{r1}')
     print(f'single mol {single_molecule}')
-    ## index original reads
+
+    ## index a small sample of original reads
     if single_end:
         print(f'single_end {single_end}')
-        tabix_fn = ogtk.utils.tabulate_umified_fastqs(r1 = r1, cbc_len=0, umi_len=25, single_molecule=single_molecule, end = end, force = force)
+        tabix_fn = ogtk.utils.tabulate_umified_fastqs(r1 = r1, cbc_len=0, umi_len=25, single_molecule=single_molecule, end=end, force=force, comparable=True)
     else:
         print(f'single_end {single_end}')
-        tabix_fn = ogtk.utils.tabulate_paired_umified_fastqs(r1 = r1, cbc_len=16, umi_len=10, single_molecule=single_molecule, end = end, force = force)
-
-    ## extract all reads and, on the fly, and count reads per umis or cells
-    ## depends on what is on field 3
-
-    #    |readid | start | end  | cbc | umi | seq | qual|
-    umi_counts = pd.read_csv(tabix_fn, compression='gzip', sep = '\t', header = None)[3].value_counts(normalize= False)
-    if min_cov is None:
-        min_cov = np.quantile(umi_counts, q)
- 
-    #cell_bcs = umi_counts[umi_counts>=min_cov].index.to_list()
-    if True:
-        if not single_molecule:
-            # import cell barcodes from cleaned andata's index
-            # TODO change thi to something less embarrassing
-            import anndata as ad
-            import gc
-            adata = ad.read_h5ad(h5ad_path)
-            cell_bcs=[i.split('-')[0] for i in adata[adata.obs.batch == sample_id].obs.index.to_list()]
-            del(adata)
-            gc.collect()
-        else:
-            cell_bcs = umi_counts[umi_counts>=min_cov].index.to_list()
-
-    print(f'quantile {q} represents a min of {min_cov} reads')
-    print(f'[red]{unit}s[/red] screened {len(cell_bcs)}')
-
+        tabix_fn = ogtk.utils.tabulate_paired_umified_fastqs(r1 = r1, cbc_len=16, umi_len=10, single_molecule=single_molecule, end=end, force=force, comparable=True)
     
+    if not single_molecule:
+        # import cell barcodes from cleaned andata's index
+        # TODO change thi to something less embarrassing
+        import anndata as ad
+        import gc
+        adata = ad.read_h5ad(h5ad_path)
+        cell_bcs=[i.split('-')[0] for i in adata[adata.obs.batch == sample_id].obs.index.to_list()]
+        del(adata)
+        gc.collect()
+    else:
+        # TODO add support for plotting what it means a given cutoff in the 
+        # read count per umi distribution
+        # e.g by calling plot.reads_per_unit()
+        if min_cov is None:
+            cell_bcs, min_cov = filter_umis_quantile_tabix(tabix_fn=tabix_fn, quantile=quantile)
+            print(f'quantile {quantile} represents a min of {min_cov} reads')
+            print(f'[red]{unit}s[/red] screened {len(cell_bcs)}')
+        else:
+            cell_bcs = filter_umis_cov_tabix(tabix_fn=tabix_fn, min_cov=min_cov)
+   
     if clone is not None and genotyping_db is not None:
         gen = pd.read_csv(genotyping_db, sep= '\t')
         gen_mask =gen.clone == clone.upper() 
         print(f'looking for clone {clone.upper()} in {sum(gen_mask)} rows')
-        if sum(gen_mask) ==0:
+        if sum(gen_mask)==0:
             #TODO add warning
             print(f'[bold red] Warning: clone {clone.upper()} is not present in genotyping db')
             ibar_wl=['NULL']
@@ -300,7 +303,7 @@ def genotype_ibar_clone(
         ibar_wl = ['NULL']
         
     rc = not single_end # False if single_end
-    ibars_dict = extract_ibars_alleles_from_tabixed_fastq(
+    ibars_df = extract_ibars_alleles_from_tabixed_fastq(
         sample_id, 
         tabix_fn,
         cell_bcs,
@@ -308,269 +311,147 @@ def genotype_ibar_clone(
         richf = richf,
         rc = rc)
     
+    return(ibars_df)
 
-    if len(ibars_dict['df']) ==0:
-        print(f'no ibar found for clone {clone} using only orphaned ibars')
-        ibars_dict['df'] = ibars_dict['dfo']
-        
-    if not do_plots:
-            return(ibars_dict)
-    fig_title = f'Reads per single {unit}'
-    fig, ax = plt.subplots(1,1)
-    sns.ecdfplot(umi_counts.to_list(), ax = ax)
-    ax.set_xlim(-30,500)
-    ax.set_ylim(0,1.15)
-    ax.set_title(fig_title)
-    ax.grid()
-
-    if png_prefix is not None:
-        fig.savefig(f'{png_prefix}/{sample_id}_{fig_title.lower().replace(" ", "_")}', bbox_inches = "tight")
-        plt.close()
-
-
-    return(repe(ibars_dict, unit = unit, clone = clone, min_cov = min_cov, sample_id=sample_id, png_prefix=png_prefix))
-
-    return(ibars_dict) 
-
-def repe(ibars_dict, unit, clone, min_cov, sample_id, png_prefix=None):
+def generate_qc_plots(ibars_df, unit,  min_cov, sample_id, png_prefix=None):
     import colorhash   
     from colorhash import ColorHash
+
+    #df = pd.DataFrame({'wl':True, 'mols':mol_ibar})
+    #df = pd.concat([df, pd.DataFrame({'wl':False, 'mols':omol_ibar})])
+    #df = df.reset_index()
+    ####
 
 
     ### plotting ###
     sns.set_context("talk")
     plt.rc('axes', axisbelow=True)
 
-    plt.rcParams['figure.dpi'] = 200
+    plt.rcParams['figure.dpi'] = 150
     if png_prefix is not None:
         import os
         if not os.path.exists(png_prefix):
             os.makedirs(png_prefix)
 
-    ### ### ### ###
-    fig_title = 'ibar Reads per UMI'
-    fig, ax = plt.subplots(1,1)
-    ax.grid()
-    ### ### ### ###
-    sns.ecdfplot(ibars_dict['df']['umi_reads'], ax=ax)
-    ax.set_ylim(0,1.15)
+    ###
+    ###
 
-    if len(ibars_dict['dfo']) >0 and clone is not None:
-        sns.ecdfplot(ibars_dict['dfo']['umi_reads'], ax=ax)
-    ax.set_title(f'{sample_id}\n{fig_title}')
-    ax.axvline(min_cov, color='r')
+    ###
+    plot.reads_per_umi_ecdf(ibars_df, sample_id=sample_id, min_cov = min_cov, png_prefix=png_prefix)
 
-    if png_prefix is not None:
-        fig.savefig(f'{png_prefix}/{sample_id}_ecdf_{fig_title.lower().replace(" ", "_")}', bbox_inches = "tight")
-        plt.close()
+    ###
+    plot.boxen_reads_per_ibar(ibars_df, sample_id=sample_id, png_prefix=png_prefix)
  
-    ### ### ### ###
-    if len(ibars_dict['dfo']) >0:
-        fig_title = 'Dominant reads per UMI\n(wl vs orphan)'
-        fig, ax = plt.subplots(1,1)
-        ax.grid()
-        ax.set_axisbelow(True)
-
-        sns.boxenplot( data = [
-                    ibars_dict['df'].groupby(['ibar']).apply(lambda x: sum(x['umi_dom_reads'])), 
-                    ibars_dict['dfo'].groupby(['ibar']).apply(lambda x: sum(x['umi_dom_reads']))], ax=ax)
-        ax.set_title(f'{sample_id}\n{fig_title}')
-
-        fig_title = fig_title.split('\n')[0]
-        if png_prefix is not None:
-            fig.savefig(f'{png_prefix}/{sample_id}_boxen_{fig_title.lower().replace(" ", "_")}', bbox_inches = "tight")
-            plt.close()
-
-    reads_ibar = ibars_dict['df'].groupby(['ibar']).apply(lambda x: sum(x.umi_dom_reads))
-    mol_ibar = ibars_dict['df'].groupby(['ibar']).size().sort_values(ascending=False) 
-    
-    oreads_ibar = ibars_dict['dfo'].groupby(['ibar']).apply(lambda x: sum(x.umi_dom_reads))
-    omol_ibar = ibars_dict['dfo'].groupby(['ibar']).size().sort_values(ascending=False) 
-    omol_ibar = omol_ibar.head(len(mol_ibar))
-    
     ###
-    with plt.rc_context({'figure.figsize':(5,5)}):
-        fig_title = 'mols per ibar\n(wl vs orphans)'
-        fig, ax = plt.subplots(1,1)
-        ax.grid()
-        sns.boxenplot(data=[mol_ibar, omol_ibar], ax=ax)
-    
-        ax.set_title(f'{sample_id}\n{fig_title}')
-        fig_title = fig_title.split('\n')[0]
-        if png_prefix is not None:
-            fig.savefig(f'{png_prefix}/{sample_id}_boxen_{fig_title.lower().replace(" ", "_")}', bbox_inches = "tight")
-            plt.close()
-    
-        fig_title = 'mols per ibar\n(wl vs orphans)'
-    
+    plot.boxen_mols_per_ibar(ibars_df, sample_id=sample_id, png_prefix=png_prefix)
             
-    df = pd.DataFrame({'wl':True, 'mols':mol_ibar})
-    df = pd.concat([df, pd.DataFrame({'wl':False, 'mols':omol_ibar})])
-    df = df.reset_index()
     ###
-
-    fig, ax = plt.subplots(1,1)
-
-    fig_title = 'wl mols per ibar\n(wl vs orphans)'
-    ax.set_xlim((-10,80))
-    ax.grid()
-    df.groupby('wl').apply(lambda x: \
-        ax.plot(x.sort_values(['mols'], ascending = False)['mols'].to_list())
-        )
-
-
-    ax.set_title(f'{sample_id}\n{fig_title}')
-    fig_title = fig_title.split('\n')[0]
-    if png_prefix is not None:
-        fig.savefig(f'{png_prefix}/{sample_id}_decay_{fig_title.lower().replace(" ", "_")}', bbox_inches = "tight")
-        plt.close()
+    plot.expression_levels_curve(ibars_df, sample_id=sample_id, png_prefix=png_prefix)
     ###
-
+    plot.macro_expression_levels_bar(ibars_df, sample_id=sample_id, png_prefix=png_prefix)
+    #plot.expression_levels_bar(ibars_df, sample_id=sample_id, expected=None, png_prefix=png_prefix)
+    #plot.expression_levels_bar(ibars_df, sample_id=sample_id, expected=True, png_prefix=png_prefix)
+    #plot.expression_levels_bar(ibars_df, sample_id=sample_id, expected=False, png_prefix=png_prefix)
     ###
-   
-    def bar_lambda(df, wlisted = None):
-        fig, ax = plt.subplots(1,1)
-
-        if wlisted is None:
-            wlisted = '' if df.wl.iloc[0] else 'not'
-
-        fig_title = f'{wlisted} wl mols per ibar'
-        ax.set_xlim((-10,80))
-        ax.grid()
-    
-        x=df.sort_values('mols', ascending = False)
-        color=[ColorHash(colorhash.colorhash.color_hash(i)).hex for i in x.ibar] 
-        x=x.set_index('ibar')
-        ax.bar(range(len(x)), x['mols'], color=color)
-
-        ax.set_title(f'{sample_id}\n{fig_title}')
-        fig_title = fig_title.split('\n')[0]
-        if png_prefix is not None:
-            fig.savefig(f'{png_prefix}/{sample_id}_decay_bar_{fig_title.lower().replace(" ", "_")}', bbox_inches = "tight")
-            plt.close()
-
-    bar_lambda(df, wlisted ='agnostic')
-    df.groupby('wl').apply(bar_lambda)
 
 
     ###
 
+    plot.kde_mols_per_unit(ibars_df, unit=unit, sample_id=sample_id, png_prefix=png_prefix)
+    plot.ibar_confidence(ibars_df, correction = True, sample_id=sample_id, png_prefix=png_prefix)
+    plot.ibar_confidence(ibars_df, correction = False, sample_id=sample_id, png_prefix=png_prefix)
+#    with plt.rc_context({'figure.figsize':(15.5, 8.5)}):
+#        
+#        fig, ax = plt.subplots(1,3)
+#
+#        vmin = 0
+#        vmax = 6
+#
+#
+#        wl_mat = ogtk.UM.hdist_all(df[df.wl].ibar)
+#        nwl_mat = ogtk.UM.hdist_all(df[~df.wl].ibar)
+#        all_mat = ogtk.UM.hdist_all(df.ibar)
+#
+#        from scipy.cluster.hierarchy import dendrogram, linkage, leaves_list
+#        Z = linkage(wl_mat, 'ward')
+#        zl = leaves_list(Z)
+#        
+#        ax[0].matshow(wl_mat[zl,:][:,zl], vmin=vmin, vmax=vmax)
+#        ax[0].set_title(f'{sample_id} wl')
+#
+#        ax[1].matshow(nwl_mat, vmin=vmin, vmax=vmax)
+#        ax[1].set_title('~wl')
+#
+#        ax[2].matshow(all_mat, vmin=vmin, vmax=vmax)
+#        ax[2].set_title('all')
+#
+#        if png_prefix is not None:
+#            fig.savefig(f'{png_prefix}/{sample_id}_ibar_hamm_{fig_title.lower().replace(" ", "_")}', bbox_inches = "tight")
+#            plt.close()
+#
 
-    with plt.rc_context({'figure.figsize':(15.5, 15.5)}):
-        fig = sns.displot(data=np.log10(df.mols), kind='kde')
-        fig_title = f'molecules per {unit}'
-        fig.fig.subplots_adjust(top=0.9) # adjust the Figure in rp
-        fig.fig.suptitle(f'{sample_id}\n{fig_title}')
-        fig.ax.grid()
-
-        ax.set_title(f'{sample_id}\n{fig_title}')
-        if png_prefix is not None:
-            fig.savefig(f'{png_prefix}/{sample_id}_mol_kde_{fig_title.lower().replace(" ", "_")}', bbox_inches = "tight")
-            plt.close()
-        
-    with plt.rc_context({'figure.figsize':(15.5, 8.5)}):
-        
-        fig, ax = plt.subplots(1,3)
-
-        vmin = 0
-        vmax = 6
-
-
-        wl_mat = ogtk.UM.hdist_all(df[df.wl].ibar)
-        nwl_mat = ogtk.UM.hdist_all(df[~df.wl].ibar)
-        all_mat = ogtk.UM.hdist_all(df.ibar)
-
-        from scipy.cluster.hierarchy import dendrogram, linkage, leaves_list
-        Z = linkage(wl_mat, 'ward')
-        zl = leaves_list(Z)
-        
-        ax[0].matshow(wl_mat[zl,:][:,zl], vmin=vmin, vmax=vmax)
-        ax[0].set_title(f'{sample_id} wl')
-        ax[1].matshow(nwl_mat, vmin=vmin, vmax=vmax)
-        ax[1].set_title('~wl')
-        ax[2].matshow(all_mat, vmin=vmin, vmax=vmax)
-        ax[2].set_title('all')
-
-        if png_prefix is not None:
-            fig.savefig(f'{png_prefix}/{sample_id}_ibar_hamm_{fig_title.lower().replace(" ", "_")}', bbox_inches = "tight")
-            plt.close()
-
-    with plt.rc_context({'figure.figsize':(15.5, 8.5)}):
-        
-        fig, ax = plt.subplots(1,3)
-        vmin = 0
-        vmax = 6
-       
-        cwl_ibar = df[df.wl].ibar.value_counts()
-
-        cwl_ibar = cwl_ibar.index
-        cbl_ibar = df[~df.wl].ibar.value_counts().index
-        call_ibar = df.ibar.value_counts().index
+##    sns.boxenplot(data = [np.mean(all_mat[df.wl,:][], axis=0), 
+##            np.mean(ogtk.UM.hdist_all(bulk_b3.ibar)[~bulk_b3.wl], axis=0)])            
 
 
-        cwl_ibar =  ogtk.UM.merge_all(cwl_ibar,  jobs=1, errors =2, mode='dist')
-        cbl_ibar =  ogtk.UM.merge_all(cbl_ibar,  jobs=1, errors =1, mode='dist')
-        call_ibar = ogtk.UM.merge_all(call_ibar, jobs=1, errors =2, mode='dist')
-
-        cwl_ibar = pd.Series(list([i[1] for i in cwl_ibar])).sort_values()
-
-        ubl_ibar = pd.Series([i[0] for i in cbl_ibar])
-        cbl_ibar = pd.Series([i[1] for i in cbl_ibar])
-
-        call_ibar = pd.Series(list([i[1] for i in call_ibar])) 
-
-        wl_mat = ogtk.UM.hdist_all(cwl_ibar)
-
-        nwl_mat = ogtk.UM.hdist_all(cbl_ibar)
-        all_mat = ogtk.UM.hdist_all(ubl_ibar)
-
-        #print(f'{png_prefix}/{name}_dist.csv') 
-        #pd.DataFrame(all_mat).to_csv(f'{png_prefix}/{name}_dist.csv', sep='\t')
-
-
-        from scipy.cluster.hierarchy import dendrogram, linkage, leaves_list
-        Z = linkage(nwl_mat, 'ward', optimal_ordering=True)
-        zl = leaves_list(Z)
-
-        ax[0].matshow(nwl_mat, vmin=vmin, vmax=vmax)
-        #dendrogram(Z, ax=ax[0])
-        ax[0].set_title(f'{sample_id} wl')
-        ax[1].matshow(nwl_mat[zl,:][:,zl], vmin=vmin, vmax=vmax)
-        ax[1].set_title('~wl')
-        ax[2].matshow(all_mat[zl,:][:,zl], vmin=vmin, vmax=vmax)
-        ax[2].set_title('all')
-
-        if png_prefix is not None:
-            fig.savefig(f'{png_prefix}/{sample_id}_ibar_chamm_{fig_title.lower().replace(" ", "_")}', bbox_inches = "tight")
-            plt.close()
-
-#    sns.boxenplot(data = [np.mean(all_mat[df.wl,:][], axis=0), 
-#            np.mean(ogtk.UM.hdist_all(bulk_b3.ibar)[~bulk_b3.wl], axis=0)])            
-    return(ibars_dict)
-
-
-def df_genotype_ibar_clone(x, rootdir, quantile = 0.75, end = int(1e6), do_plots= True, png_prefix='/local/users/polivar/src/artnilet/figures/', h5ad_path = None, force = True, genotyping_db=None):
+def df_genotype_ibar_clone(x, outdir, rootdir, quantile = 0.75, end = int(1e6), do_plots= True, png_prefix='/local/users/polivar/src/artnilet/figures/', h5ad_path = None, force = True, force_df = True,  genotyping_db=None):
     '''Wrapper function can be mapped to a data frame  in order to automate parameter definition. 
     Ther are several expected fields in data frame: sample_id, clone, lin_bin, stage
     The stereotypical data frame would be artnilet/conf/xpdb_datain.txt
 
+    force = force the generation of a tabix file for the reads
     #TODO improve logics, for example cc is now a handle for bulk when in reality it means cell culture 
     '''
+    import os
     print(x)
     r1 = f'{rootdir}/datain/{x.lin_lib}'
-    print(r1)
-    ibars_dict = genotype_ibar_clone(
-                sample_id = f'{x.sample_id}', 
-                clone = x.clone,
-                end=end,
-                r1=r1,
-                q=quantile, 
-                do_plots=do_plots,
-                force=force,
-                single_molecule= False, # cc = cell culture
-                single_end=False,
-                genotyping_db=genotyping_db,
-                h5ad_path = h5ad_path,
-                png_prefix=png_prefix)
+    out_tab = f'{outdir}/{x.sample_id}_sc_ibars.txt'
 
-    return(ibars_dict)
+    if os.path.exists(out_tab) and not force_df:
+        print(f'loading pre-computed\n{out_tab}')
+        ibars_df = pd.read_csv(out_tab, sep='\t')
+    else:
+        print(r1)
+        ibars_df = genotype_ibar_clone(
+                    sample_id = f'{x.sample_id}', 
+                    clone = x.clone,
+                    end=end,
+                    r1=r1,
+                    quantile=quantile, 
+                    do_plots=do_plots,
+                    force=force,
+                    single_molecule=False,
+                    single_end=False,
+                    genotyping_db=genotyping_db,
+                    h5ad_path = h5ad_path,
+                    png_prefix=png_prefix)
+        ibars_df.to_csv(out_tab, sep='\t')
+
+    if not do_plots:
+            return(ibars_df)
+    generate_qc_plots(ibars_df, unit = 'cell', min_cov = 1, sample_id=x.sample_id, png_prefix=png_prefix)
+
+    return(ibars_df)
+
+def filter_umis_quantile_tabix(tabix_fn, quantile):
+    ## extract all reads and, on the fly, and count reads per umis or cells
+    ## depends on what is on field 3
+
+    #    |readid | start | end  | cbc | umi | seq | qual|
+    import pandas as pd
+    umi_counts = pd.read_csv(tabix_fn, compression='gzip', sep = '\t', header = None)[3].value_counts(normalize= False)
+    min_cov = np.quantile(umi_counts, quantile)
+    filtered_umis = umi_counts[umi_counts>=min_cov].index.to_list()
+    
+    # plot filtering QCs
+    plot.reads_per_unit(unit, umi_counts, sample_id, png_prefix)
+ 
+    return((min_cov, filtered_umis))
+
+def filter_umis_cov_tabix(tabix_fn, min_cov):
+    #    |readid | start | end  | cbc | umi | seq | qual|
+    import pandas as pd
+    umi_counts = pd.read_csv(tabix_fn, compression='gzip', sep = '\t', header = None)[3].value_counts(normalize= False)
+    filtered_umis = umi_counts[umi_counts>=min_cov].index.to_list()
+    return((min_cov, filtered_umis))
+

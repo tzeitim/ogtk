@@ -25,7 +25,7 @@ setuptools.setup(
                         'regex', 
                         'pyfasta', 
                         'fasta', 
-                        'pyaml'],
+                        'pyaml', 'bgzip'],
     python_requires='>=3.6',
 )
 # python3 setup.py sdist bdist_wheel

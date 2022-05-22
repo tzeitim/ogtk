@@ -1,3 +1,4 @@
+# Rename to : bulk multi-channel (bmch_binalleles)
 import ogtk
 import pickle
 import subprocess

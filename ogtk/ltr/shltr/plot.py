@@ -3,6 +3,11 @@ import colorhash
 from colorhash import ColorHash
 import seaborn as sns
 
+### plotting ###
+sns.set_context("talk")
+plt.rc('axes', axisbelow=True)
+
+plt.rcParams['figure.dpi'] = 150
 
 def reads_per_unit(unit, umi_counts, sample_id, png_prefix=None):
 

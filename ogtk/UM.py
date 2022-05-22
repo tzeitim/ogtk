@@ -1,5 +1,4 @@
 import os
-import pdb
 import pysam
 from pyfaidx import Fasta
 import yaml
@@ -125,6 +124,19 @@ class Read_Set:
                 umi_seq = umi.consensus['dominant_seq']
                 outf.write(">{}\n{}\n".format(umi_str, umi_seq))
 
+    def return_consensuses_tuple(self):
+        ''' returns tuples for each umi and its dominant sequence
+            (umi_str, umi_seq, umi_dom_reads, umi_reads)
+        '''
+        # TODO add assertion of correction
+        umi_tuple = []
+        for umi_str in self.umis.keys():
+            umi = self.umis[umi_str]
+            umi_seq = umi.consensus['dominant_seq']
+            umi_dom_reads = umi.consensus['dominant_reads']
+            umi_reads = umi.consensus['reads_per_umi']
+            umi_tuple.append((umi_str, umi_seq, umi_dom_reads, umi_reads))
+        return(umi_tuple)
 
     def add_umi(self, umi, seq, alignment = None, qual = None):
         if self.umis.get(umi, 0) == 0:
@@ -624,8 +636,8 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_read
     # TODO improve this routine, now it is hard coded for single patterns
     if trimming_pattern is not None:
         if not isinstance(trimming_pattern, dict):
-            raise TypeError('Trimming patterns must be entered as a dict for each pattern to match (value) and group name to keep (key), for example `{"read":"ANCHOR1{e<=3}(<?read>.+)ANCHOR2{e<=3}"}`\ntrimming_pattern = {"read":"(ANCHOR1){e<=3}(?P<read>.+)(ANCHOR2){e<=3}"}')
-        keep_group = list(trimming_pattern.keys())[0]
+            raise TypeError('Trimming patterns must be entered as a dict for each pattern to match (value) and group name to keep (key), for example `{"read":"ANCHOR1{e<=3}(?P<read>.+)ANCHOR2{e<=3}"}`\ntrimming_pattern = {"read":"(ANCHOR1){e<=3}(?P<read>.+)(ANCHOR2){e<=3}"}')
+        keep_group = list(trimming_pattern.keys())[0] # e.g keeps the 'read' group from the match object
         trim_re = regex.compile(list(trimming_pattern.values())[0])
         trim_matches = []
 
@@ -939,6 +951,7 @@ def mafft_consensus(args):
              
     return(consensus) 
 
+# TODO: rename this function to something like return_consensuses
 def do_fastq_pileup(readset, min_cov = 2, threads =  100, threads_alg = 1, trim_by = None, by_alignment = False):
     ''' Generate consensus sequences of sets of reads, grouped by UMI \n\n\n
     By aligment:\n\n
@@ -1180,10 +1193,10 @@ def compare_umi_to_pool(args):
     return(dists)
 
 def merge_all(seqs, jobs = 10, errors = 1, mode = "regex"):
-    jobs = int(jobs)
     ''' 
     Parallel wrapper for merge_umi_to_pool - expects seqs sorted by ocurrence 
     '''
+    jobs = int(jobs)
     pool = multiprocessing.Pool(jobs)
     it = itertools.zip_longest(seqs, [[i, seqs, errors, mode] for i,v in enumerate(seqs)], fillvalue=seqs)
     ret = pool.map(merge_umi_to_pool, it)
@@ -1205,7 +1218,6 @@ def hdist_all(seqs, jobs = 10):
     hdist_mat = np.array([i for i in chunks_iterator])
     #TODO understand why is hdist_mat has an additional layer
     #TODO should a flag for as_matrix be added?
-    print(hdist_mat.shape)
     return(hdist_mat[0])
 
 def plot_hdist(readset = None, outpng = None, seqs = None):

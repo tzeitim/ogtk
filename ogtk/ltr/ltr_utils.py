@@ -1094,6 +1094,8 @@ def conf_dict_write(conf, level = None, **kargs):
         for k,v in kargs.items():
             conf[k] = v
         return(conf)
+def conf_dict_write_iter(conf, iterable):
+    print('memelo')
 
 def store_molecule_saturation_stats(conf, rs):
     '''
@@ -1109,3 +1111,13 @@ def store_molecule_saturation_stats(conf, rs):
             )
     return(conf)
 
+def create_workdir(outdir, config_card_dir):
+    import os
+    if not os.path.isdir(outdir):
+        os.makedirs(outdir, exist_ok=True)
+        print("Created {}".format(outdir))
+
+    if not os.path.isdir(config_card_dir):
+        os.makedirs(config_card_dir, exist_ok=True)
+        print("Created {}".format(config_card_dir))
+ 

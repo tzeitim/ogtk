@@ -264,9 +264,9 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     c1.stdout.close()
     c2.communicate()
 
-    pool = [c1 ,c2]
+    pool = [c1, c2]
     while any(map(lambda x: x.poll() == None, pool)):
-        time.sleep(5)
+        time.sleep(1)
 
     map(lambda x: x.terminate(), pool)
  
@@ -326,9 +326,9 @@ def tabulate_umified_fastqs(r1, cbc_len =16, umi_len = 10, end = None, single_mo
     c1.stdout.close()
     c2.communicate()
 
-    pool = [c1 ,c2]
+    pool = [c1, c2]
     while any(map(lambda x: x.poll() == None, pool)):
-        time.sleep(5)
+        time.sleep(1)
 
     map(lambda x: x.terminate(), pool)
  
