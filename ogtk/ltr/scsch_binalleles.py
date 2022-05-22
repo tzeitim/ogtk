@@ -1,30 +1,30 @@
-# single-cell single channel bin alleles 
-import ogtk
-import pickle
-import subprocess
-import pyaml
-import itertools
-import pyfaidx
-import os
-import multiprocessing
-import itertools
-import regex
-import numpy as np
-import pandas as pd
-import pdb
-import os
-import glob
-import pandas as pd
-import numpy as np
-import regex
-import itertools
-import pdb
-import time, random
-import multiprocessing
-import gzip 
-import anndata as an
-import ltr.ltr_utils as utils
-#import .ibars
+## single-cell single channel bin alleles 
+#import ogtk
+#import pickle
+#import subprocess
+#import pyaml
+#import itertools
+#import pyfaidx
+#import os
+#import multiprocessing
+#import itertools
+#import regex
+#import numpy as np
+#import pandas as pd
+#import pdb
+#import os
+#import glob
+#import pandas as pd
+#import numpy as np
+#import regex
+#import itertools
+#import pdb
+#import time, random
+#import multiprocessing
+#import gzip 
+#import anndata as an
+#import ltr.ltr_utils as utils
+##import .ibars
 
 
 def scsch_bin_alleles(name, intid, 
