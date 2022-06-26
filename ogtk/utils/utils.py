@@ -342,6 +342,10 @@ def tabulate_umified_fastqs(r1, cbc_len =16, umi_len = 10, end = None, single_mo
     return(sorted_tab)
 
 
+def df_to_tabix():
+    '''Use system calls to tabindex a dataframe
+    '''
+
 
 def merge_10x_fastqs(indir, r1, end = None):
     ''' merge 10x fastqs into a single one (AKA R3). Uses ":umi:" as separator 

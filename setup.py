@@ -1,8 +1,11 @@
 import setuptools
+from setuptools_rust import Binding, RustExtension
 
 with open("README.md", "r") as fh:
     long_description = fh.read()
 
+packages = setuptools.find_packages()
+packages.append('rogtk')
 setuptools.setup(
     name="ogtk",
     version="0.0.1",
@@ -12,7 +15,11 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/tzeitim/ogtk",
-    packages=setuptools.find_packages(),
+    #packages=setuptools.find_packages(),
+    packages=packages,
+    #rust_extensions=[RustExtension("rogtk.rogtk", binding=Binding.PyO3)],
+    # rust extensions are not zip safe, just like C-extensions.
+    #zip_safe=False,
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
@@ -24,8 +31,11 @@ setuptools.setup(
                         'pyfaidx', 
                         'regex', 
                         'pyfasta', 
-                        'fasta', 
-                        'pyaml', 'bgzip'],
+                        #'fasta',
+                        'tables', 
+                        'pyaml', 
+                        'bgzip',
+                        'setuptools_rust'],
     python_requires='>=3.6',
 )
 # python3 setup.py sdist bdist_wheel

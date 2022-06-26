@@ -9,7 +9,7 @@ def print_stats(adata, rs):
     iset = len_intersect(adata, rs)
     print(f"A total of {iset[0]} cbs were found on both sets {iset[1]:0.2f} {iset[2]:0.2f} ")
 
-def metacellize (set_name, adata, adata_workdir, excluded_gene_patterns = [], excluded_gene_names=None , suspect_gene_names=['shRNA', 'rtTA', 'Fun','Cas9', 'hist1h2ap', "Hist1h2ap"], forbidden_mods = [18, 26, 27, 34], return_adatas=True, log_debug=False, explore=True):
+def metacellize (set_name, adata, adata_workdir, excluded_gene_patterns = [], excluded_gene_names=None , suspect_gene_names=['shRNA', 'rtTA', 'Fun','Cas9', 'hist1h2ap', "Hist1h2ap"], forbidden_mods = [18, 26, 27, 34], return_adatas=True, log_debug=False, explore=True, full_cpus=56, moderate_cpus=8):
     import anndata as ad
     import matplotlib.pyplot as plt
     import metacells as mc
@@ -39,8 +39,8 @@ def metacellize (set_name, adata, adata_workdir, excluded_gene_patterns = [], ex
 
     mc.ut.set_name(adata, set_name)
 
-    full_cpus = 56
-    moderate_cpus = 8
+    #full_cpus = 24 #56
+    #moderate_cpus = 8
 
 
     print(f'Original {mc.utilities.parallel.get_processors_count()} CPUs')
@@ -153,9 +153,10 @@ def metacellize (set_name, adata, adata_workdir, excluded_gene_patterns = [], ex
     suspect_gene_modules = suspect_gene_modules[suspect_gene_modules >= 0]
 
     print("suspect_gene_modules")
-    print(suspect_gene_modules)
-    print(module_of_genes[suspect_genes_mask])
-    
+    for i in sorted(suspect_gene_modules):
+        soc = module_of_genes[module_of_genes == i]
+        print(f'm{i}::{len(soc)}::\t{"  ".join(sorted(soc.index.to_list()))}') 
+
     all_modules = [i for i in np.unique(module_of_genes) if int(i) >0]
     sns.set(font_scale=0.65)
 
@@ -173,7 +174,8 @@ def metacellize (set_name, adata, adata_workdir, excluded_gene_patterns = [], ex
             ]
             #similarity_of_module.columns = lll
             sns.heatmap(similarity_of_module, xticklabels=1, vmin=0, vmax=1, ax=ax, cmap="YlGnBu", linewidths=0.25)
-            ax.set_title(f'{set_name} Gene Module {gene_module}')
+            forbidden_txt ="(ignored)" if (gene_module in forbidden_mods and not explore)  else " " 
+            ax.set_title(f'{set_name} Gene Module {gene_module} {forbidden_txt}')
             fig.savefig(f'{adata_workdir}/{set_name}_module_{gene_module}.png')
             plt.show()
     sns.set(font_scale=1)
@@ -247,19 +249,20 @@ def metacellize (set_name, adata, adata_workdir, excluded_gene_patterns = [], ex
     metacells.write_h5ad(ofn_meta_cells)
     outliers.write_h5ad(ofn_outliers)
 
-    print('storing metadata')
+    metadata_df=None
+    if 'batch' in clean.obs.columns:
+        print('storing metadata')
 
-    batch_counts = clean.obs.groupby('metacell').apply(lambda x: x.batch.value_counts(normalize=False)).unstack()
+        batch_counts = clean.obs.groupby('metacell').apply(lambda x: x.batch.value_counts(normalize=False)).unstack()
 
-    batch_frac = batch_counts.apply(lambda x: x/sum(x), axis=1)
-    batch_frac.columns = [ f'{i}_frac' for i in batch_frac.columns]
+        batch_frac = batch_counts.apply(lambda x: x/sum(x), axis=1)
+        batch_frac.columns = [ f'{i}_frac' for i in batch_frac.columns]
 
-    batch_ln = batch_counts.apply(lambda x: np.log10(1+x), axis=1)
-    batch_ln.columns = [ f'{i}_ln' for i in batch_ln.columns]
+        batch_ln = batch_counts.apply(lambda x: np.log10(1+x), axis=1)
+        batch_ln.columns = [ f'{i}_ln' for i in batch_ln.columns]
 
-    metadata_df=pd.concat([batch_ln, batch_frac], axis=1, )
-    metadata_df.iloc[2:,:].to_csv(ofn_metadata)
-
+        metadata_df=pd.concat([batch_ln, batch_frac], axis=1, )
+        metadata_df.iloc[2:,:].to_csv(ofn_metadata)
     print('DONE') 
 
     if return_adatas:

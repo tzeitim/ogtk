@@ -14,6 +14,10 @@ def es(string, errors=0):
 
 def ibar_regex(errors, rc = False):
     '''Returns a regex object capable of capturing ibars
+        anchor_pam = "GGGTTAGAGCTAGA"
+        anchor_u6  = "AGGACGAAACACC"
+        anchor_pad = "AATAGCAAGTTAA"
+        anatomy = "(?P<spacer>.+)"+es(anchor_pam, errors)+"(?P<ibar>.{6})"+es(anchor_pad, errors)+"(.+)"
     '''
     anchor_pam = "GGGTTAGAGCTAGA"
     anchor_u6  = "AGGACGAAACACC"
@@ -21,6 +25,7 @@ def ibar_regex(errors, rc = False):
 
     if not rc:
         anatomy = "(?P<spacer>.+)"+es(anchor_pam, errors)+"(?P<ibar>.{6})"+es(anchor_pad, errors)+"(.+)"
+        print(anatomy)
         reanatomy = regex.compile(anatomy)
         return(reanatomy)
     else:
@@ -28,7 +33,9 @@ def ibar_regex(errors, rc = False):
         anchor_u6 =  ogtk.UM.rev_comp(anchor_u6)
         anchor_pad = ogtk.UM.rev_comp(anchor_pad)
         print(anchor_pam, anchor_u6, anchor_pad)
-        anatomy = "(?P<spacer>.+)"+es(anchor_pam, errors)+"(?P<ibar>.{6})"+es(anchor_pad, errors)+"(.+)"
+        #anatomy = "(?P<spacer>.+)"+es(anchor_pam, errors)+"(?P<ibar>.{6})"+es(anchor_pad, errors)+"(.+)" <- this might be wrong 25.06.22
+        anatomy = "(?P<spacer>.+)"+es(anchor_pad, errors)+"(?P<ibar>.{6})"+es(anchor_pam, errors)+"(.+)"
+        print(anatomy)
         reanatomy = regex.compile(anatomy)
         return(reanatomy)
 
@@ -248,7 +255,7 @@ def genotype_ibar_clone(
     
     '''
     if h5ad_path is None and not single_molecule:
-        raise  ValueError('if not single-molecule (thus single cell) a h5d adata paht must be provided')
+        raise  ValueError('if not single-molecule (and thus, single cell) a h5d adata path must be provided')
  
     if do_plots and png_prefix is None:
         richf = False
@@ -405,11 +412,12 @@ def df_genotype_ibar_clone(x, outdir, rootdir, quantile = 0.75, end = int(1e6), 
     import os
     print(x)
     r1 = f'{rootdir}/datain/{x.lin_lib}'
-    out_tab = f'{outdir}/{x.sample_id}_sc_ibars.txt'
+    out_tab = f'{outdir}/{x.sample_id}_sc_ibars.hdf'
 
     if os.path.exists(out_tab) and not force_df:
         print(f'loading pre-computed\n{out_tab}')
-        ibars_df = pd.read_csv(out_tab, sep='\t')
+        #ibars_df = pd.read_csv(out_tab, sep='\t')
+        ibars_df = pd.read_hdf(out_tab, key='df')
     else:
         print(r1)
         ibars_df = genotype_ibar_clone(
@@ -425,7 +433,8 @@ def df_genotype_ibar_clone(x, outdir, rootdir, quantile = 0.75, end = int(1e6), 
                     genotyping_db=genotyping_db,
                     h5ad_path = h5ad_path,
                     png_prefix=png_prefix)
-        ibars_df.to_csv(out_tab, sep='\t')
+        #ibars_df.to_csv(out_tab, sep='\t', index=False )
+        ibars_df.to_hdf(out_tab, key='df', mode='w')
 
     if not do_plots:
             return(ibars_df)
@@ -455,3 +464,22 @@ def filter_umis_cov_tabix(tabix_fn, min_cov):
     filtered_umis = umi_counts[umi_counts>=min_cov].index.to_list()
     return((min_cov, filtered_umis))
 
+def return_valid_ibars_from_matrix(mat):
+    ''' Corrects detected ibars using the ranking method
+    '''
+    col_sum = np.sum(mat, axis=0)
+    row_sum = np.sum(mat, axis=1)
+
+    top_cols = np.flip(np.argsort(col_sum))
+    top_rows = np.flip(np.argsort(row_sum))    
+    iraw = col_sum.sort_values(ascending=False).index 
+    
+    #icor_map = ogtk.UM.merge_all(iraw, errors=1, mode='dist')
+    icor_map2 = ogtk.UM.merge_all(iraw, errors=2, mode='dist')
+    icor2 = [i[1] for i in icor_map2]
+    
+    #cind = col_sum[top_cols].index.isin(icor)
+    cind2 = col_sum[top_cols].index.isin(icor2)
+    
+    good= col_sum[top_cols][cind2].index
+    return(good)

@@ -650,7 +650,16 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_read
         wl_skipped=0
         wl = set(wl)
 
+    if 'match_pattern' in kwargs.keys():
+        do_match = True
+        match_pattern = regex.compile(kwargs['match_pattern'])
+    else:
+        do_match = False
+
     for i, (read, rid, qual) in enumerate(reads_rids_it):
+        if do_match:
+            if not match_pattern.search(read):
+                continue
         readset.nreads += 1
         if readset.nreads%readset.scurve_step ==0:
             #readset.scurve.append((readset.nreads, len(readset.umis.keys()) ))

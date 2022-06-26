@@ -318,3 +318,159 @@ def ibar_confidence(df, correction, sample_id, top_n=80, png_prefix=None):
 #            fig.savefig(f'{png_prefix}/{sample_id}_ibar_chamm_{fig_title.lower().replace(" ", "_")}', bbox_inches = "tight")
 #            plt.close()
 #
+def plot_characterization_ibar(df, wl, goods, key = 'a4e5', min_cov= 100):
+    
+    ''' see notebook ibar_sc_characterization.ipynb
+    '''
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import seaborn as sns
+
+    from rich import print as prant
+    import numpy as np
+    sns.set_context("talk")
+    plt.rc('axes', axisbelow=True)
+    plt.rcParams['figure.dpi'] = 90
+
+    mask_sample = df.sample_id == key
+    mask_goods = df.ibar.isin(goods[key])
+    mask_reads = df.umi_reads >1
+    mask  = mask_goods & mask_sample & mask_reads
+    
+    mdf = df[mask].copy()
+    
+    mdf = mdf.assign(wlisted = mdf.cspacer.isin(wl.spacer))
+    prant(f'spacers in wt form {np.mean(mdf.wlisted):0.2f}')
+    
+    out = mdf[~mdf.wlisted].ibar.value_counts()
+    ins = mdf[mdf.wlisted].ibar.value_counts()
+    inters = out.index.intersection(ins.index)
+    
+    #plt.figure(figsize=(6,6))
+    #plt.scatter(y=out[inters], x=ins[inters])
+    #plt.grid()
+    #plt.show()
+    
+    mdf = pd.merge(mdf.groupby(['wlisted', 'cspacer', 'ibar']).size().reset_index(name='mols'),
+             wl,
+             left_on='cspacer',
+             right_on='spacer',
+             how = 'left')
+    
+    mdf = mdf[mdf.wlisted]
+    
+    ##{
+    fig, (ax1, ax2)= plt.subplots(1, 2, figsize=(12.5,5))
+    ii = sns.ecdfplot(
+            data = mdf, 
+            x='mols', 
+            log_scale=10, 
+            ax=ax1)
+
+    mdf = mdf[mdf.mols >min_cov]
+    ax1.axvline(min_cov, color='r')
+
+    ii = sns.ecdfplot(
+        data = mdf, 
+        x='mols', 
+        log_scale=10, 
+        ax=ax2)
+
+    ax1.grid()
+    ax2.grid()
+    ax1.set_title(f'{key} Coverage non-filtered')
+    ax2.set_title(f'Coverage filtered')
+    
+    plt.show()
+    
+    counts_ibars = mdf.ibar.value_counts()
+    repeated_ibars = counts_ibars[counts_ibars>1]
+
+    if len(repeated_ibars)>0:
+        prant(f':thumbs_down: :thumbs_down: :thumbs_down: :thumbs_down:\n {repeated_ibars.head(3)}')
+        rep_mask = mdf.ibar.isin(repeated_ibars.index.to_list())
+
+        fg = sns.catplot(
+                data=mdf[rep_mask], x='kalhor_id', 
+                y='mols', 
+                hue='ibar', 
+                kind='bar')
+        fg.fig.suptitle(f'{key} duplicated ibars ', y=1.05)
+        fg.ax.grid()
+    
+    fg = sns.displot(counts_ibars)
+    fg.fig.suptitle(f'{key} histogram of ibar instances', y=1.05)
+    
+    fg.ax.grid()
+    plt.show()
+    
+    #mdf.groupby('kalhor_id').size().reset_index(name='count')
+    fg = sns.catplot(
+            data=mdf.groupby('kalhor_id').size().reset_index(name='count'), 
+            x='kalhor_id', 
+            y='count',
+            kind="bar", 
+            height=5, 
+            aspect = 2)
+    
+    fg.fig.suptitle(f'{key} ', y=1.05)
+    fg.ax.grid()
+    plt.show()
+    
+    
+    fg = sns.catplot(
+            data=mdf.groupby('speed').size().reset_index(name='count'), 
+            x='speed', 
+            y='count',
+            kind="bar", 
+            height=5, 
+            aspect = 1)
+
+    fg.fig.suptitle(f'{key} ', y=1.05)
+    fg.ax.grid()
+    plt.show()
+    
+    
+    fg = sns.catplot(
+            data=mdf.groupby('diversity').size().reset_index(name='count'), 
+            x='diversity', 
+            y='count',
+            kind="bar", 
+            height=5, 
+            aspect = 1)
+
+    fg.fig.suptitle(f'{key} ', y=1.05)
+    fg.ax.grid()
+    plt.show()
+    
+    
+    with plt.rc_context({'figure.figsize':(5,5), 'figure.dpi':90}):
+        ax = sns.heatmap(
+            mdf.groupby(['diversity', 'speed']).size().unstack().transpose(), 
+            cmap=sns.color_palette("coolwarm", as_cmap=True), 
+            annot=True, 
+            linewidths=0.015)
+
+        ax.set_title(f'{key}')
+        plt.show()
+    
+    
+    with plt.rc_context({'figure.figsize':(25,5), 'figure.dpi':200}):
+        ax = sns.heatmap(
+            mdf.groupby(['ibar', 'speed']).size().unstack().transpose(),
+            cmap=sns.color_palette("YlOrBr_r", as_cmap=True), 
+            annot=False, 
+            linewidths=0.015)
+        ax.set_title(f'{key}')
+        plt.show()
+
+        ax = sns.heatmap(
+            mdf.groupby(['ibar', 'diversity']).size().unstack().transpose(), 
+            cmap=sns.color_palette("rocket", as_cmap=True, ), 
+            annot=False, 
+            linewidths=0.015)
+        ax.set_title(f'{key}')
+        plt.show()
+
+    return(mdf)
+    ##}
