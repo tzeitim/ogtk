@@ -14,10 +14,11 @@ def grouper(iterable, n, fillvalue=None):
     return itertools.zip_longest(*args, fillvalue=fillvalue)
 
 
-def bulk_merge_dir(raw_path, out_path, clean = True, force = False, errors =0, verbose = False, file_pattern = "fastq.gz"):
+def bulk_merge_dir(raw_path, out_path, clean = True, force = True, verbose = False, file_pattern = "fastq.gz"):
     ''' 
         This wrapper makes use of bbmerge to merge fastqs locate in a given directory. 
         file_pattern can be 'fastq' or 'fastq.gz'
+        clean: removes any previous instance of `out_path`
     '''
     #TODO implement arguments options
 
@@ -34,8 +35,10 @@ def bulk_merge_dir(raw_path, out_path, clean = True, force = False, errors =0, v
     returns = []
     for i in glob.glob(raw_path+"/*R1*"+file_pattern):
         f1 = i
-        f2 = i.replace('R1', 'R2')
         basename = f1.split('/')[-1]
+        basepath = f1.split('/')[0:-1]
+
+        f2 = "/".join(basepath)+"/"+basename.replace('_R1_', '_R2_') 
         basename = basename.split('_R1')[0]
 
         out_merged = "{}/{}_merged.fastq.gz".format(out_path, basename)
@@ -43,8 +46,9 @@ def bulk_merge_dir(raw_path, out_path, clean = True, force = False, errors =0, v
         out_unmerged2 = "{}/umerged/{}_unmerged_R2.fastq.gz".format(out_path, basename)
         unmerged_samples = []
         
+        ret = False
         if not os.path.exists(out_merged) or force:
-            ret = bbmerge_fastqs(f1 = f1, f2 = f2, out = out_merged, outu = out_unmerged1 , outu2 = out_unmerged2, verbose = verbose)
+            ret = bbmerge_fastqs(f1=f1, f2=f2, out=out_merged, outu=out_unmerged1, outu2=out_unmerged2, verbose=verbose)
             returns.append(ret)
         if ret:
             unmerged_samples.append(basename)
@@ -57,6 +61,10 @@ def bbmerge_fastqs(f1, f2, out, outu, outu2, verbose = False, bbmerge_bin = 'bbm
     If no present, install through conda bbtools
     '''
     cmd = "{} in1={} in2={} out={} outu={} outu2={} pfilter=0 mismatches=5 efilter=-1".format(bbmerge_bin, f1, f2, out, outu, outu2)
+
+    if verbose:
+        print(cmd, end='\n')
+
     pp = subprocess.run(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     if "RuntimeException" in pp.stderr.decode():
