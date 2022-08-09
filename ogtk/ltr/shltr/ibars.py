@@ -665,12 +665,9 @@ def export_sample_to_matlin(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =
             .filter(pl.col('sample_id')==sample_id)
             .filter(pl.col('umi_reads')>=1)
             .filter(pl.col('umi_dom_reads')>=min_dom_cov)
-            #.filter(pl.col('umi_reads') == pl.col('umi_dom_reads'))
-            #.with_column(pl.col('seq').apply(lambda x: ogtk.shltr.return_corrected_spacer(x, corrector, correction_pad='GGT')).alias('cseqp'))
             .with_column(pl.col('seq').str.extract("(G{1,2}T)(.+)(GGGTTAGA.+)", 2).str.replace("^", "GGT").alias('cseq'))
             .with_column(pl.col("cseq").str.replace("GGGTTAGA", "").alias('can_spacer'))
             .with_column(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias("wt"))
-            #.with_column(pl.when(pl.col("wt")).then(spacer_id[pl.col('ibar')]).otherwise(None).alias("ww"))
             .collect()
                 )
 
@@ -695,13 +692,7 @@ def export_sample_to_matlin(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =
             .with_column(pl.col('cseq').str.extract("(G{1,2}T)(.+)", 2).str.replace("^", "GGT")) # correct for TSS
             .with_column(pl.col('cseq').str.extract("(.+)(GAGC.+)", 1).str.replace("GGGTTA", "").alias('can_spacer'))
             .with_column(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias('wt'))
-            #.with_columns([
-            #               pl.col('ale').is_in(wl.spacer.to_list()).alias('wt'), 
-            #               pl.col('ale').apply(lambda x: spacer_id.get(x, None)).alias('kalhor'),
-            #               pl.col('ale').apply(lambda x: spacer_speed.get(x, None)).alias('speed')
-            #])
             .collect()
-            #.join(wl, left_on='ale', right_on='kalhor_id', how='left')
                 )
 
 
@@ -717,7 +708,6 @@ def export_sample_to_matlin(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =
         .agg(
             [
                 pl.col('cseq').n_unique().alias('n_calleles'),
-                #pl.col('seq').n_unique().alias('n_alleles'), 
             ])
         )
 
@@ -732,11 +722,9 @@ def export_sample_to_matlin(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =
         .with_column(pl.when(~pl.col('wt'))
                     .then(pl.col('cseq'))
                     .otherwise("..").alias('cseq'))
-        #.sample(int(1e5))
         .sort(['nspeed','kalhor_id'])
         .pivot(columns='ibar', index='cell', values="cseq")
         
-        .rename({'cell':'cbc'})#.to_pandas().set_index('cbc')
-        #.write_csv('/local/users/polivar/src/artnilet/workdir/scv2/gordo.molina', has_header=True)
+        .rename({'cell':'cbc'})
         )
     tt.write_csv(f'/local/users/polivar/src/artnilet/workdir/scv2/rgordo.{sample_id}', has_header=True)
