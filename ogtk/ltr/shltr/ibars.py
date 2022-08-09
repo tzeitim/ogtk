@@ -5,27 +5,46 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import polars as pl
 from . import plot
 
-def es(string, errors=0):
-    ''' error string '''
-    gen = "(XXX){e<=YYY}".replace("XXX", string).replace("YYY", str(errors))
+def error_string(string, errors=0, error_type='e'):
+    ''' es = error string 
+
+        error_type is a string that determined whether general errors (`e`), deletions (`d`) or substitutions
+        returns a string of the form(PATTERN){e<=ERRORS}
+    ''' 
+    if error_type not in ['e', 'd', 's']:
+        raise  ValueError('errors_type must be either of: "e", "s", "d"')
+    gen = "(PATTERN){ERROR_TYPE<=ERRORS}".replace("PATTERN", string).replace("ERRORS", str(errors)).replace("ERROR_TYPE", error_type)
     return(gen)
 
-def ibar_regex(errors, rc = False):
+def ibar_regex(errors, rc = False, zombie=False):
     '''Returns a regex object capable of capturing ibars
         anchor_pam = "GGGTTAGAGCTAGA"
         anchor_u6  = "AGGACGAAACACC"
+        anchor_u6_1  = "GGCTTTATATATC"
         anchor_pad = "AATAGCAAGTTAA"
-        anatomy = "(?P<spacer>.+)"+es(anchor_pam, errors)+"(?P<ibar>.{6})"+es(anchor_pad, errors)+"(.+)"
+        anatomy = "(?P<spacer>.+)"+error_string(anchor_pam, errors)+"(?P<ibar>.{6})"+error_string(anchor_pad, errors)+"(.+)"
     '''
     anchor_pam = "GGGTTAGAGCTAGA"
+    anchor_u6_1  = "GGCTTTATATATC"
     anchor_u6  = "AGGACGAAACACC"
     anchor_pad = "AATAGCAAGTTAA"
 
+    if zombie:
+        # here we should find the u6 so the anatomy would look like
+        anchor_pam_short = "GAGCTAGA"
+        anatomy = (
+                "(?P<upstream>.+)"+error_string(anchor_u6_1, errors)+
+                "(?P<spacer>.+)"+error_string(anchor_pam_short, errors)+
+                "(?P<ibar>.{6})"+error_string(anchor_pad, errors)+"(.+)"
+        )
+        #print(anatomy)
     if not rc:
-        anatomy = "(?P<spacer>.+)"+es(anchor_pam, errors)+"(?P<ibar>.{6})"+es(anchor_pad, errors)+"(.+)"
-        print(anatomy)
+        #anatomy = "(?P<spacer>.+)"+error_string(anchor_pam, errors)+"(?P<ibar>.{6})"+error_string(anchor_pad, errors)+"(.+)"
+        anatomy = "(?P<spacer>.+)"+error_string(anchor_pam, errors)+"(?P<ibar>.{6})"+error_string(anchor_pad, errors)+"(.+)"
+        #print(anatomy)
         reanatomy = regex.compile(anatomy)
         return(reanatomy)
     else:
@@ -33,16 +52,18 @@ def ibar_regex(errors, rc = False):
         anchor_u6 =  ogtk.UM.rev_comp(anchor_u6)
         anchor_pad = ogtk.UM.rev_comp(anchor_pad)
         print(anchor_pam, anchor_u6, anchor_pad)
-        #anatomy = "(?P<spacer>.+)"+es(anchor_pam, errors)+"(?P<ibar>.{6})"+es(anchor_pad, errors)+"(.+)" <- this might be wrong 25.06.22
-        anatomy = "(?P<spacer>.+)"+es(anchor_pad, errors)+"(?P<ibar>.{6})"+es(anchor_pam, errors)+"(.+)"
-        print(anatomy)
+        #anatomy = "(?P<spacer>.+)"+error_string(anchor_pam, errors)+"(?P<ibar>.{6})"+error_string(anchor_pad, errors)+"(.+)" <- this might be wrong 25.06.22
+        anatomy = "(?P<spacer>.+)"+error_string(anchor_pad, errors)+"(?P<ibar>.{6})"+error_string(anchor_pam, errors)+"(.+)"
+        #print(anatomy)
         reanatomy = regex.compile(anatomy)
         return(reanatomy)
 
 
 
 def return_ibar(seq, rg, rc = True):
-    ''' Helper function that returns ibars given a string and a regex object
+    '''
+        Helper function that returns an ibar string     
+        given a read sequence and a regex object of the type returned by `ibar_regex`
     '''
     seq = ogtk.UM.rev_comp(seq) if rc else seq
     match = rg.match(seq)
@@ -101,7 +122,8 @@ def parse_tabix_fastq(tbx_lst):
     return(fq_str)
 
 
-def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn,  cell_bcs, ibar_wl, rc = True, richf = False):
+def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn, cell_bcs, ibar_wl, anchor_ok, rg = ibar_regex(0), rc = True, richf = False):
+    
     ''' Derive dominant sequence (allele) for each molecule while controlling for ibar.
     Fastq files must be tabixed first. rich formatting is supported but disabled by default.
 
@@ -109,7 +131,7 @@ def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn,  cell_bcs, ibar
     cell/ibar/umi/read 
     rc = do rev comp  -> This should change for zombie mode
 
-    returns a dictionary that keeps track of molecules with an ibar and orphanes ones.
+    returns a data frame
 
         return({'expected':exp_out, 'orphans':orphans, 'unexpected':unex_out, 'read_missed':read_missed})
     '''
@@ -118,37 +140,35 @@ def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn,  cell_bcs, ibar
     from rich.progress import Progress
     from rich.console import Console
 
-
     ibar_wl = set(ibar_wl)
-    rg = ibar_regex(0)
     tbx = pysam.TabixFile(tbx_ifn)
-    TSO_SEQ = 'TTTCTTATATGGG'
-    anatomy = f'.+({TSO_SEQ}) '
 
     #(umi_str, umi_seq, umi_dom_reads, umi_reads)
     header  = [ 'cell', 'ibar', 'umi', 'seq', 'umi_dom_reads', 'umi_reads']
     expected = []
     unexpected = []
-    imissed = [] # no ibar could be fetched
+    no_ibars = []
+    ibar_missed = [] # no ibar could be fetched
     read_missed = []# no TSO was found -> considered bad read
     tmissed = []  # rare cases where tabix misses an entry 
     seq_field = 5
     nreads = 0
 
+    debug_messages =0
     console = Console(record=False, force_interactive= False)
     _context = open('rm_me', 'wt') if not richf else Progress(
-        f"[yellow]{sample_id}[/]",
+                f"[yellow]{sample_id}[/]",
                 rich.progress.TimeRemainingColumn(),
                 rich.progress.BarColumn(),
                 "wlisted\t{task.fields[wlisted]}|",
                 "orphans\t{task.fields[orphans]}|",
-                "[red]missed ibar\t{task.fields[imissed]}|[/]",
+                "[red]missed ibar\t{task.fields[ibar_missed]}|[/]",
                 transient=True,
                 refresh_per_second=1,
                 console = console)
     with _context as progress:
         if richf:
-            task_cells = progress.add_task('cell', total=len(cell_bcs), wlisted="", orphans = "", imissed = "")
+            task_cells = progress.add_task('cell', total=len(cell_bcs), wlisted="", orphans = "", ibar_missed = "")
 
         cellsp = 0
         for cell in cell_bcs:
@@ -158,28 +178,35 @@ def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn,  cell_bcs, ibar
                     advance = 1, 
                     wlisted=len(expected), 
                     orphans=len(unexpected), 
-                    imissed=f'{len(imissed)} {len(read_missed)} {len(imissed)/(1e-10+len(read_missed)):0.2f}' 
+                    ibar_missed=f'{len(ibar_missed)} {len(read_missed)} {len(ibar_missed)/(1e-10+len(read_missed)):0.2f}' 
                 )
             
             # define the readsets per valid ibar into a dictionary
             irsets = {}
             orphans = {}
+            no_ibars_rsets={}
+            no_ibars_rsets['no_ibar'] = ogtk.UM.Read_Set(name = 'no_ibar')
 
             try:
                 query = [i for i in tbx.fetch(cell.replace("-1", ""), parser = pysam.asTuple())]
-                for i in query:
+                # traverse all reads for a given cell
+                for tabix_line in query:
                     nreads +=1 
-                    umi = i[4] 
-
-                    seq = ogtk.UM.rev_comp(i[seq_field]) if rc else i[seq_field]
-                    qual = i[6]
-                    ibar = return_ibar(i[seq_field], rg, rc)
+                    umi = tabix_line[4] 
+                    read_str = tabix_line[seq_field]
+                    seq = ogtk.UM.rev_comp(read_str) if rc else read_str
+                    qual = tabix_line[6]
+                    ibar = return_ibar(read_str, rg, rc)
                     #TODO what happens to reads with no detectable ibar
                     if ibar is None:
-                        imissed.append(umi)
+                        ibar_missed.append(umi)
+                        no_ibars_rsets['no_ibar'].add_umi(umi, seq, qual = qual)
                         continue
 
-                    anatomy = f'.+({TSO_SEQ})(?P<read>.+){ibar}.+'
+                    anatomy = f'.+({anchor_ok})(?P<read>.+)'+error_string(f'?P<ibar>{ibar}', 1, 'd')+'.+'
+                    if debug_messages<10:
+                        print(anatomy)
+                        debug_messages+=1
                     match = regex.search(anatomy, seq)
 
                     if match:
@@ -197,18 +224,24 @@ def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn,  cell_bcs, ibar
                         if ibar not in orphans.keys():
                             orphans[ibar] = ogtk.UM.Read_Set(name = ibar)
                         orphans[ibar].add_umi(umi, seq, qual = qual)
-
+                # with all reads processed for a given cell
                 # recover dominant sequence for each ibar
                 # store as a df for both ibar groups
-                igroups = [irsets, orphans]
-                dfms = [expected, unexpected]
+
+                # create iterable for the different ibar groups
+                # and their pointers to data frames
+                igroups = [irsets, orphans, no_ibars_rsets]
+                dfms = [expected, unexpected, no_ibars]
 
                 for rsetg, dfoc in zip(igroups, dfms):
                     for ibar in rsetg.keys():
-                        ogtk.UM.do_fastq_pileup(readset = rsetg[ibar])
+                        rset=rsetg[ibar] 
+                        # Generate consensus sequences of sets of reads, grouped by UMI 
+                        # (wrongly named function do_fastq_pileup) 
+                        ogtk.UM.do_fastq_pileup(readset=rset)
                         # extract the dominant sequnce and collate mol stats 
                         # (umi_str, umi_seq, umi_dom_reads, umi_reads)
-                        mol_cons = [[cell, ibar, a,b,c,d] for a,b,c,d in rsetg[ibar].return_consensuses_tuple()]
+                        mol_cons = [[cell, ibar, a,b,c,d] for a,b,c,d in rset.return_consensuses_tuple()]
 
                         for ustat in mol_cons:
                             dfoc.append(ustat)
@@ -217,21 +250,44 @@ def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn,  cell_bcs, ibar
                 # some times the tabix file is missing an entry specified in the cbcs
                 tmissed.append(cell)
 
+        # print final stats
+        # TODO: save them somewhere?
+
+        if richf:
+            progress.update(task_cells, 
+                advance = 1, 
+                wlisted=len(expected), 
+                orphans=len(unexpected), 
+                ibar_missed=f'{len(ibar_missed)} {len(read_missed)} {len(ibar_missed)/(1e-10+len(read_missed)):0.2f}' 
+            )
+        (
+            print(f'{len(expected)=}\n'
+                +f'{len(unexpected)=}\n'
+                +f'{len(ibar_missed)=}\n'
+                +f'{len(read_missed)=}\n'
+                +f'missed ibars {len(ibar_missed)/(1e-10+nreads):0.2f}\n'
+                #+f'reads missed/nreads {len(read_missed)}/{nreads}  = {(len(ibar_missed)+len(read_missed))/nreads*100:0.2f}%'
+            )
+        )
         exp_out = pd.DataFrame(expected, columns = header)
         unexp_out = pd.DataFrame(unexpected, columns = header)
+        no_ibars_out = pd.DataFrame(no_ibars, columns = header)
 
         exp_out['sample_id'] = sample_id
         unexp_out['sample_id'] = sample_id
+        no_ibars_out['sample_id'] = sample_id
+
         exp_out['expected'] = True
         unexp_out['expected'] = False
+        no_ibars_out['expected'] = False
 
 
         found = ibar_wl.intersection(set(exp_out['ibar']))
         print(f'{len(ibar_wl)} expected ; found {len(found)}/{len(ibar_wl)} = {100*len(found)/len(ibar_wl):0.2f}%')
         if richf:
-            rich.print(f'[red] ibars missed {len(imissed)}+ reads missed {len(read_missed)}/nreads {nreads}  = {(len(imissed)+len(read_missed))/nreads*100:0.2f}%')
+            rich.print(f'[red] ibars missed {len(ibar_missed)} + reads missed/nreads {len(read_missed)}/{nreads}  = {(len(ibar_missed)+len(read_missed))/nreads*100:0.2f}%')
         #return({'expected':exp_out, 'unexpected':unexp_out})
-        return(pd.concat([exp_out, unexp_out]))
+        return(pd.concat([exp_out, unexp_out, no_ibars_out]))
 
 def genotype_ibar_clone(
     sample_id, 
@@ -248,8 +304,10 @@ def genotype_ibar_clone(
     genotyping_db=None,
     do_plots=True,
     h5ad_path=None,
-    png_prefix=None):
+    png_prefix=None, **kwargs):
     ''' 
+    Returns a UMI-controlled table for  
+    It is a wrapper function of `extract_ibars_alleles_from_tabixed_fastq`
     genotyping_db = '/local/users/polivar/src/artnilet/resources/results/genotyping.txt'
     samples_tab = pd.read_csv('/local/users/polivar/src/artnilet/conf/bulk_RNA_clones_samples.txt', delimiter='\t')
     
@@ -258,10 +316,10 @@ def genotype_ibar_clone(
         raise  ValueError('if not single-molecule (and thus, single cell) a h5d adata path must be provided')
  
     if do_plots and png_prefix is None:
+        print('automatically disabled rich formatting')
         richf = False
 
     from rich import print
-   
 
     unit ="molecule" if single_molecule else "cell"  
 
@@ -310,12 +368,35 @@ def genotype_ibar_clone(
         ibar_wl = ['NULL']
         
     rc = not single_end # False if single_end
+
+    if 'zombie' in kwargs:
+        zombie = kwargs['zombie']
+    else:
+        zombie = False
+
+    if zombie:
+        rc = False
+        print(":zombie:")
+    else:
+        print(":dna:")
+
+    print(f'{rc=}')
+    rg = ibar_regex(errors = 0, zombie=zombie)
+    # validaton sequences
+    # These are sequences to grant that the origin of the read is bona fide (e.g. real TSO event)
+    # TODO: verify that this still holds true for zombie mode. For guides it makes sense since the TSO
+    # generally covered on the R2
+    TSO_SEQ = 'TTTCTTATATGGG'
+    ZOM_SEQ = 'AACTTGAAAGTAT'
+
     ibars_df = extract_ibars_alleles_from_tabixed_fastq(
-        sample_id, 
-        tabix_fn,
-        cell_bcs,
-        ibar_wl, 
+        sample_id=sample_id, 
+        tbx_ifn=tabix_fn,
+        cell_bcs=cell_bcs,
+        ibar_wl=ibar_wl, 
+        anchor_ok= TSO_SEQ if not zombie else ZOM_SEQ,
         richf = richf,
+        rg = rg,
         rc = rc)
     
     return(ibars_df)
@@ -402,7 +483,7 @@ def generate_qc_plots(ibars_df, unit,  min_cov, sample_id, png_prefix=None):
 
 
 def df_genotype_ibar_clone(x, outdir, rootdir, quantile = 0.75, end = int(1e6), do_plots= True, png_prefix='/local/users/polivar/src/artnilet/figures/', h5ad_path = None, force = True, force_df = True,  genotyping_db=None):
-    '''Wrapper function can be mapped to a data frame  in order to automate parameter definition. 
+    '''Wrapper function can be mapped to a data frame in order to automate parameter definition. 
     Ther are several expected fields in data frame: sample_id, clone, lin_bin, stage
     The stereotypical data frame would be artnilet/conf/xpdb_datain.txt
 
@@ -483,3 +564,179 @@ def return_valid_ibars_from_matrix(mat):
     
     good= col_sum[top_cols][cind2].index
     return(good)
+
+
+def return_compiled_corrector(): 
+    ''' returns a regex object capable of capturing
+        the spacer region of a read while accounting for TSS variability. It assumes an
+        anchor sequence (GGGTTAGA) at the beginning of the scaffold.  
+        '(G{1,2}T)(?P<spacer>.+)(?P<rest>GGGTTAGA)'
+    ''' 
+    import regex
+    spacer_corrector = regex.compile('(G{1,2}T)(?P<spacer>.+)(?P<rest>GGGTTAGA)')
+    return(spacer_corrector)
+
+def return_corrected_spacer(x, spacer_corrector, correction_pad='GGT'):
+    match = spacer_corrector.search(x)
+    return(f"{correction_pad}{match.group('spacer')}{match.group('rest')}"  if match else x)
+
+def load_wl(as_pl=False):
+    ''' load Kalhor table
+    '''
+    wl = pd.read_csv('/local/users/polivar/src/artnilet/conf/protospacers_singlecell.csv')
+    wl.index = wl['kalhor_id']
+    #cat_type = CategoricalDtype(categories=["b", "c", "d"], ordered=True)
+    wl['speed']= wl.speed.astype(pd.CategoricalDtype(categories=["fast", "mid", "slow"], ordered=True))
+    wl['diversity'] = wl['diversity'].astype(pd.CategoricalDtype(ordered=True))
+    if as_pl:
+        return(pl.DataFrame(wl))
+    return(wl)
+
+def load_mol_ibarspl(sample_id, min_reads_umi=2, min_dom_cov=2):
+    wl = load_wl()
+    print(f'loading {sample_id}')
+    corrector = ogtk.shltr.return_compiled_corrector()
+    mol_ibars = (
+            pl.scan_csv('/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv', sep='\t')
+            .filter(pl.col('ibar')!='no_ibar')
+            .filter(pl.col('sample_id')==sample_id)
+            .filter(pl.col('umi_reads')>=min_reads_umi)
+            .filter(pl.col('umi_dom_reads')>=min_dom_cov)
+            .with_column(pl.col('seq').str.extract("(G{1,2}T)(.+)(GGGTTAGA.+)", 2).str.replace("^", "GGT").alias('cseq'))
+            .with_column(pl.col("cseq").str.replace("GGGTTAGA", "").is_in(wl.spacer.to_list()).alias("wt"))
+            .collect()
+            )
+
+    al = (
+        mol_ibars
+        .groupby(['sample_id', 'cell', 'ibar'])
+        .agg(
+            [
+                pl.col('cseq').n_unique().alias('n_calleles'),
+                pl.col('seq').n_unique().alias('n_alleles'), 
+            ])
+        )
+
+    mol_ibars = (
+                mol_ibars.join(al, 
+                            left_on=['sample_id', 'cell', 'ibar'], 
+                            right_on=['sample_id', 'cell', 'ibar'])
+                )
+    return(mol_ibars)
+
+def annotate_ibars(sample_id='h1e1', min_reads_umi=2, min_dom_cov=2):
+    wl = pl.DataFrame(load_wl())
+    spacer_id = dict([(i,ii) for i,ii in zip(wl.spacer, wl.kalhor_id)])
+    spacer_speed = dict([(i,ii) for i,ii in zip(wl.spacer, wl.speed)])
+
+    uncut = load_mol_ibarspl(sample_id, min_reads_umi, min_dom_cov)
+    suncut = uncut.with_columns([
+                       pl.col('cseq').is_in(wl.spacer.to_list()).alias('wt'), 
+                       pl.col('cseq').apply(lambda x: spacer_id.get(x, None)).alias('kalhor'),
+                       pl.col('cseq').apply(lambda x: spacer_speed.get(x, None)).alias('speed')
+        ])
+    uncut = uncut.join(wl, left_on='cseq', right_on='spacer', how='left')
+
+    ss = (
+        uncut
+        .select(['ibar', 'kalhor_id', 'cseq'])
+        .filter(pl.col('kalhor_id').is_not_null())
+        .groupby('ibar')
+        .agg(pl.col('cseq').value_counts(sort=True).head(2))
+        .explode('cseq').unnest('cseq').rename({'':'cseq'})
+        .sort(['ibar','counts'], reverse=True)
+        .join(wl, left_on='cseq', right_on='spacer', how='left')
+    )
+
+    print([format(i, '.2f') for i in np.quantile(ss.counts.to_list(), np.arange(0,1, 0.1,))])
+    break_point = np.quantile(ss.counts.to_list(), 0.55)
+    ss = ss.filter(pl.col('counts')>break_point)
+    return(dict(zip(*ss.select(['ibar', 'kalhor_id']))))
+
+
+def export_sample_to_matlin(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1):
+    tso='TTTCTTATATGGG'
+
+    wl = ogtk.shltr.ibars.load_wl(True)
+
+    mol_ibars = (
+            pl.scan_csv('/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv', sep='\t')
+            .filter(pl.col('ibar')!='no_ibar')
+            .filter(pl.col('sample_id')==sample_id)
+            .filter(pl.col('umi_reads')>=1)
+            .filter(pl.col('umi_dom_reads')>=min_dom_cov)
+            #.filter(pl.col('umi_reads') == pl.col('umi_dom_reads'))
+            #.with_column(pl.col('seq').apply(lambda x: ogtk.shltr.return_corrected_spacer(x, corrector, correction_pad='GGT')).alias('cseqp'))
+            .with_column(pl.col('seq').str.extract("(G{1,2}T)(.+)(GGGTTAGA.+)", 2).str.replace("^", "GGT").alias('cseq'))
+            .with_column(pl.col("cseq").str.replace("GGGTTAGA", "").alias('can_spacer'))
+            .with_column(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias("wt"))
+            #.with_column(pl.when(pl.col("wt")).then(spacer_id[pl.col('ibar')]).otherwise(None).alias("ww"))
+            .collect()
+                )
+
+    ibars_detected = mol_ibars.ibar.unique().to_list()
+    ibars_detected.append('CAGTGC') # <- ibar unique to h1 that has mutation in scaffold
+    ibar_str0 = "|".join([f'{i}' for i in ibars_detected])
+    ibar_str = f"({tso})(.+)("+"|".join([f'A{i}A' for i in ibars_detected])+")"
+
+    mol_noibars = (
+            pl.scan_csv('/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv', sep='\t')
+            .filter((pl.col('ibar')=='no_ibar'))
+            .filter((pl.col("sample_id")==sample_id))
+            .filter(pl.col('umi_reads')>=min_umi_reads)
+            .with_column(pl.col('seq').str.contains(tso).alias('tso'))
+            .filter(pl.col('tso'))
+            .with_columns([
+                    pl.col("seq").str.contains(ibar_str).alias("resc"),
+                    pl.col("seq").str.extract(ibar_str, 2).alias("cseq"),
+                    pl.col("seq").str.extract(ibar_str, 3).str.slice(1,6).alias("ibar")
+                ])
+            .filter(pl.col('resc'))
+            .with_column(pl.col('cseq').str.extract("(G{1,2}T)(.+)", 2).str.replace("^", "GGT")) # correct for TSS
+            .with_column(pl.col('cseq').str.extract("(.+)(GAGC.+)", 1).str.replace("GGGTTA", "").alias('can_spacer'))
+            .with_column(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias('wt'))
+            #.with_columns([
+            #               pl.col('ale').is_in(wl.spacer.to_list()).alias('wt'), 
+            #               pl.col('ale').apply(lambda x: spacer_id.get(x, None)).alias('kalhor'),
+            #               pl.col('ale').apply(lambda x: spacer_speed.get(x, None)).alias('speed')
+            #])
+            .collect()
+            #.join(wl, left_on='ale', right_on='kalhor_id', how='left')
+                )
+
+
+    common_fields = ['sample_id', 'wt', 'can_spacer', 'cseq', 'ibar', 'cell']
+    rin = pl.concat([
+        mol_ibars.select(common_fields),
+        mol_noibars.select(common_fields)]
+    ).join(wl, left_on='can_spacer', right_on='spacer', how='left') # <<< kalhor annotate
+
+    al = (
+        rin
+        .groupby(['sample_id', 'cell', 'ibar'])
+        .agg(
+            [
+                pl.col('cseq').n_unique().alias('n_calleles'),
+                #pl.col('seq').n_unique().alias('n_alleles'), 
+            ])
+        )
+
+    rin = (
+                rin.join(al,                                         # <<<  annotate corrected alleles
+                            left_on=['sample_id', 'cell', 'ibar'], 
+                            right_on=['sample_id', 'cell', 'ibar'])
+                )
+
+    
+    tt = (rin.filter((pl.col("sample_id")==sample_id) & (pl.col('n_calleles')==1))
+        .with_column(pl.when(~pl.col('wt'))
+                    .then(pl.col('cseq'))
+                    .otherwise("..").alias('cseq'))
+        #.sample(int(1e5))
+        .sort(['nspeed','kalhor_id'])
+        .pivot(columns='ibar', index='cell', values="cseq")
+        
+        .rename({'cell':'cbc'})#.to_pandas().set_index('cbc')
+        #.write_csv('/local/users/polivar/src/artnilet/workdir/scv2/gordo.molina', has_header=True)
+        )
+    tt.write_csv(f'/local/users/polivar/src/artnilet/workdir/scv2/rgordo.{sample_id}', has_header=True)
