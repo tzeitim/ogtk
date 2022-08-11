@@ -595,7 +595,6 @@ def load_wl(as_pl=False):
 def load_mol_ibarspl(sample_id, min_reads_umi=2, min_dom_cov=2):
     wl = load_wl()
     print(f'loading {sample_id}')
-    corrector = ogtk.shltr.return_compiled_corrector()
     mol_ibars = (
             pl.scan_csv('/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv', sep='\t')
             .filter(pl.col('ibar')!='no_ibar')
@@ -625,6 +624,8 @@ def load_mol_ibarspl(sample_id, min_reads_umi=2, min_dom_cov=2):
     return(mol_ibars)
 
 def annotate_ibars(sample_id='h1e1', min_reads_umi=2, min_dom_cov=2):
+    ''' returns a dictionary that maps ibars to a kalhor_id
+    '''
     wl = pl.DataFrame(load_wl())
     spacer_id = dict([(i,ii) for i,ii in zip(wl.spacer, wl.kalhor_id)])
     spacer_speed = dict([(i,ii) for i,ii in zip(wl.spacer, wl.speed)])
@@ -654,33 +655,40 @@ def annotate_ibars(sample_id='h1e1', min_reads_umi=2, min_dom_cov=2):
     return(dict(zip(*ss.select(['ibar', 'kalhor_id']))))
 
 
-def export_sample_to_matlin(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1):
+def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1):
     tso='TTTCTTATATGGG'
 
-    wl = ogtk.shltr.ibars.load_wl(True)
+    wl = load_wl(True)
 
+    fuzzy_tso = fuzzy_match_str(tso)
+    fuzzy_tso = f'({fuzzy_tso})(.+)'
     mol_ibars = (
             pl.scan_csv('/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv', sep='\t')
             .filter(pl.col('ibar')!='no_ibar')
             .filter(pl.col('sample_id')==sample_id)
-            .filter(pl.col('umi_reads')>=1)
+            .filter(pl.col('umi_reads')>=min_umi_reads)
             .filter(pl.col('umi_dom_reads')>=min_dom_cov)
             .with_column(pl.col('seq').str.extract("(G{1,2}T)(.+)(GGGTTAGA.+)", 2).str.replace("^", "GGT").alias('cseq'))
             .with_column(pl.col("cseq").str.replace("GGGTTAGA", "").alias('can_spacer'))
             .with_column(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias("wt"))
+            .with_column((pl.col('cell') + pl.col('umi')).alias('cbcumi'))
             .collect()
                 )
-
+    print(f'{mol_ibars.shape[0]=}')
     ibars_detected = mol_ibars.ibar.unique().to_list()
     ibars_detected.append('CAGTGC') # <- ibar unique to h1 that has mutation in scaffold
+    ibars_detected.append('ACAATG') # <- meh?
+    ibars_detected.append('TTTATA') # <- meh
     ibar_str0 = "|".join([f'{i}' for i in ibars_detected])
     ibar_str = f"({tso})(.+)("+"|".join([f'A{i}A' for i in ibars_detected])+")"
 
+    gg=mol_ibars.cbcumi.unique()
     mol_noibars = (
             pl.scan_csv('/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv', sep='\t')
             .filter((pl.col('ibar')=='no_ibar'))
             .filter((pl.col("sample_id")==sample_id))
             .filter(pl.col('umi_reads')>=min_umi_reads)
+            .filter(pl.col('umi_dom_reads')>=min_dom_cov)
             .with_column(pl.col('seq').str.contains(tso).alias('tso'))
             .filter(pl.col('tso'))
             .with_columns([
@@ -688,14 +696,23 @@ def export_sample_to_matlin(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =
                     pl.col("seq").str.extract(ibar_str, 2).alias("cseq"),
                     pl.col("seq").str.extract(ibar_str, 3).str.slice(1,6).alias("ibar")
                 ])
-            .filter(pl.col('resc'))
+            #.filter(pl.col('resc'))
             .with_column(pl.col('cseq').str.extract("(G{1,2}T)(.+)", 2).str.replace("^", "GGT")) # correct for TSS
             .with_column(pl.col('cseq').str.extract("(.+)(GAGC.+)", 1).str.replace("GGGTTA", "").alias('can_spacer'))
             .with_column(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias('wt'))
+            .with_column((pl.col('cell') + pl.col('umi')).alias('cbcumi'))
+            .with_column(pl.col('cbcumi').is_in(gg).alias('seen'))
             .collect()
                 )
+    ggg=mol_noibars.cbcumi.unique().is_in(gg).mean()
 
+    print(f'fraction of ibar+ cbc:umi  in ibar- {ggg}')
 
+    mol_ibars = mol_ibars.with_column(pl.lit(True).alias('clear'))
+    mol_noibars = mol_noibars.with_column(pl.lit(False).alias('clear'))
+    print(f'{mol_noibars.shape[0]=}')
+
+    return((mol_ibars, mol_noibars))#.filter(pl.col('can_spacer').is_null()))
     common_fields = ['sample_id', 'wt', 'can_spacer', 'cseq', 'ibar', 'cell']
     rin = pl.concat([
         mol_ibars.select(common_fields),
@@ -711,14 +728,16 @@ def export_sample_to_matlin(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =
             ])
         )
 
-    rin = (
-                rin.join(al,                                         # <<<  annotate corrected alleles
-                            left_on=['sample_id', 'cell', 'ibar'], 
-                            right_on=['sample_id', 'cell', 'ibar'])
-                )
+    cfs =['sample_id', 'cell', 'ibar'] 
+    rin =  rin.join(al, left_on=cfs, right_on=cfs, how='left')# <<<  annotate corrected alleles 
+    return(rin)
 
+def export_ibar_mols_to_matlin(rin, sample_id ='h1e11'):
+    ''' ``rin`` should the output of a cured ibar table e.g. ``compute_ibar_table()`` 
+    '''
     
-    tt = (rin.filter((pl.col("sample_id")==sample_id) & (pl.col('n_calleles')==1))
+    #tt = (rin.filter((pl.col("sample_id")==sample_id) & (pl.col('n_calleles')==1))
+    tt = (rin.filter((pl.col('n_calleles')==1))
         .with_column(pl.when(~pl.col('wt'))
                     .then(pl.col('cseq'))
                     .otherwise("..").alias('cseq'))
@@ -728,3 +747,20 @@ def export_sample_to_matlin(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =
         .rename({'cell':'cbc'})
         )
     tt.write_csv(f'/local/users/polivar/src/artnilet/workdir/scv2/rgordo.{sample_id}', has_header=True)
+    return(tt)
+
+def fuzzy_match_str(string):
+    ''' returns a pattern string to be used as a fuzzy match for ``string``
+    '''
+    fuzz = []
+    for ii in range(len(string)):
+        s2=''
+        for i,c in enumerate(string):
+            if i==ii:
+                s2 += '.'
+            else:
+                s2 += c
+        fuzz.append(s2)
+
+    fuzz = "|".join(fuzz)
+    return(fuzz)
