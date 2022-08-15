@@ -563,8 +563,20 @@ def return_valid_ibars_from_matrix(mat):
     cind2 = col_sum[top_cols].index.isin(icor2)
     
     good= col_sum[top_cols][cind2].index
+    good = [i for i in good if i!='null']
     return(good)
 
+def return_valid_ibars_from_df(df):
+
+    valid_ibars= return_valid_ibars_from_matrix(
+                df
+                .groupby(['cbc', 'ibar'])
+                .agg(pl.col('umi').n_unique().alias("umis"))
+                .pivot(values='umis', columns='ibar', index='cbc')
+                .drop('cbc')
+                .to_pandas()
+     )
+    return(valid_ibars)
 
 def return_compiled_corrector(): 
     ''' returns a regex object capable of capturing
@@ -605,8 +617,8 @@ def load_mol_ibarspl(sample_id, min_reads_umi=2, min_dom_cov=2):
             .with_column(pl.col("cseq").str.replace("GGGTTAGA", "").is_in(wl.spacer.to_list()).alias("wt"))
             .collect()
             )
-
-    al = (
+    # calleles = corrected alleles
+    alleles = (
         mol_ibars
         .groupby(['sample_id', 'cell', 'ibar'])
         .agg(
@@ -617,7 +629,7 @@ def load_mol_ibarspl(sample_id, min_reads_umi=2, min_dom_cov=2):
         )
 
     mol_ibars = (
-                mol_ibars.join(al, 
+                mol_ibars.join(alleles, 
                             left_on=['sample_id', 'cell', 'ibar'], 
                             right_on=['sample_id', 'cell', 'ibar'])
                 )
@@ -654,16 +666,133 @@ def annotate_ibars(sample_id='h1e1', min_reads_umi=2, min_dom_cov=2):
     ss = ss.filter(pl.col('counts')>break_point)
     return(dict(zip(*ss.select(['ibar', 'kalhor_id']))))
 
+def compute_ibar_table_from_tabix_zombie(tbx_ifn, valid_cells):
+    valid_cells = pl.Series(valid_cells).str.replace("-1.*", "").to_list()
+    u6='AGGACGAAACACC'
+    anch1='GCTAGA'
+    anch2='AATA'
+    can_spacer="GGGTTA"
 
-def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1):
+    wl = ogtk.shltr.ibars.load_wl(True)
+
+    fuzzy_u6 =   ogtk.shltr.ibars.fuzzy_match_str(u6)
+    fuzzy_anch1 = ogtk.shltr.ibars.fuzzy_match_str(anch1)
+    fuzzy_anch2 = ogtk.shltr.ibars.fuzzy_match_str(anch2)
+    fuzzy_canspa= ogtk.shltr.ibars.fuzzy_match_str(can_spacer)
+
+    anchp = f'.+({fuzzy_anch1})(.{"{6}"})({fuzzy_anch2})'
+    u6p = f'.+({fuzzy_u6})(.+)({fuzzy_anch2})'
+
+    df= pl.read_csv(tbx_ifn, sep='\t', has_header=False)
+    df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
+
+    df = df.filter((pl.col('cbc')).is_in(valid_cells))
+
+    dff = (
+            df
+            .with_columns([
+                            pl.col('seq').str.extract(u6p, 2 ).alias('seq'),
+                            pl.col('seq').str.extract(anchp, 2).alias('ibar'),
+                            ])
+            
+            .groupby(['cbc', 'umi', 'ibar'], maintain_order=False)
+                .agg([pl.col('seq').value_counts(sort=True).head(1), pl.col('seq').count().alias('umi_reads')] )
+                .explode('seq').unnest('seq').rename({'':'seq', 'counts':'umi_dom_reads'})
+    )
+
+    valid_ibars = ogtk.shltr.ibars.return_valid_ibars_from_df(dff)
+    data = (
+        dff
+        .with_column(pl.when(pl.col('ibar').is_in(valid_ibars)).then(pl.col('ibar')).otherwise('no_ibar'))
+        .with_column(pl.col('seq').str.extract(f"(G+T)(.+)({fuzzy_canspa})", 2).str.replace('^',"GGT").alias('can_spacer'))
+        .with_column(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias('wt'))
+    )
+
+    al = (
+        data
+        .groupby(['sample_id', 'cell', 'ibar'])
+        .agg(
+            [
+                pl.col('seq').n_unique().alias('n_calleles'),
+            ])
+        )
+
+    cfs =['sample_id', 'cell', 'ibar'] 
+    data =  data.join(al, left_on=cfs, right_on=cfs, how='left')# <<<  annotate corrected alleles 
+    return(data)
+
+def compute_ibar_table_from_tabix(tbx_ifn, valid_cells):
+    '''
+    polars. 
+    Processes read-level tabixed files.
+    - needs valid_cell list (e.g. anndata.obs)
+    - 
+    tbx_ifn='/local/users/polivar/src/artnilet//datain/20211217_scv2/direct_B3_shRNA_S11.sorted.txt.gz'
+    '''
+    # assert no "-1" or else in valid_cells
+    valid_cells = pl.Series(valid_cells).str.replace("-1.*", "").to_list()
+    tso='TTTCTTATATGGG'
+    anch1='GCTAGA'
+    anch2='AATAGCAA'
+    can_spacer="GGGTTA"
+
+    wl = load_wl(True)
+
+    fuzzy_tso =   fuzzy_match_str(tso)
+    fuzzy_anch1 = fuzzy_match_str(anch1)
+    fuzzy_anch2 = fuzzy_match_str(anch2)
+    fuzzy_canspa= fuzzy_match_str(can_spacer)
+
+    anchp = f'.+({fuzzy_anch1})(.{"{6}"})({fuzzy_anch2})'
+    tsop = f'.+({fuzzy_tso})(.+)({fuzzy_anch2})'
+
+    df= pl.read_csv(tbx_ifn, sep='\t', has_header=False)
+    df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
+    df = df.filter((pl.col('cbc')).is_in(valid_cells)).with_column(pl.col('seq').apply(ogtk.UM.rev_comp))
+    dff = (
+            df
+            .with_columns([
+                            pl.col('seq').str.extract(tsop, 2 ).alias('seq'),
+                            pl.col('seq').str.extract(anchp, 2).alias('ibar'),
+                            ])
+            
+            .groupby(['cbc', 'umi', 'ibar'], maintain_order=False)
+                .agg([pl.col('seq').value_counts(sort=True).head(1), pl.col('seq').count().alias('umi_reads')] )
+                .explode('seq').unnest('seq').rename({'':'seq', 'counts':'umi_dom_reads'})
+    )
+
+    valid_ibars = ogtk.shltr.ibars.return_valid_ibars_from_df(dff)
+    data = (
+        dff
+        .with_column(pl.when(pl.col('ibar').is_in(valid_ibars)).then(pl.col('ibar')).otherwise('no_ibar'))
+        .with_column(pl.col('seq').str.extract(f"(G+T)(.+)({fuzzy_canspa})", 2).str.replace('^',"GGT").alias('can_spacer'))
+        .with_column(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias('wt'))
+    )
+    al = (
+        data
+        .groupby(['sample_id', 'cell', 'ibar'])
+        .agg(
+            [
+                pl.col('seq').n_unique().alias('n_calleles'),
+            ])
+        )
+    cfs =['sample_id', 'cell', 'ibar'] 
+    data =  data.join(al, left_on=cfs, right_on=cfs, how='left')# <<<  annotate corrected alleles 
+    return(data)
+
+def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1, ibar_ifn = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv'):
+    ''' Expects filtered ibar tabulated file e.g:\n '/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv'
+    Polars 
+    '''
     tso='TTTCTTATATGGG'
 
     wl = load_wl(True)
 
     fuzzy_tso = fuzzy_match_str(tso)
-    fuzzy_tso = f'({fuzzy_tso})(.+)'
+    #fuzzy_tso = f'({fuzzy_tso})(.+)'
+
     mol_ibars = (
-            pl.scan_csv('/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv', sep='\t')
+            pl.scan_csv(ibar_ifn, sep='\t')
             .filter(pl.col('ibar')!='no_ibar')
             .filter(pl.col('sample_id')==sample_id)
             .filter(pl.col('umi_reads')>=min_umi_reads)
@@ -680,7 +809,7 @@ def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1):
     ibars_detected.append('ACAATG') # <- meh?
     ibars_detected.append('TTTATA') # <- meh
     ibar_str0 = "|".join([f'{i}' for i in ibars_detected])
-    ibar_str = f"({tso})(.+)("+"|".join([f'A{i}A' for i in ibars_detected])+")"
+    ibar_str = f"({fuzzy_tso})(.+)("+"|".join([f'A{i}A' for i in ibars_detected])+")"
 
     gg=mol_ibars.cbcumi.unique()
     mol_noibars = (
@@ -689,7 +818,7 @@ def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1):
             .filter((pl.col("sample_id")==sample_id))
             .filter(pl.col('umi_reads')>=min_umi_reads)
             .filter(pl.col('umi_dom_reads')>=min_dom_cov)
-            .with_column(pl.col('seq').str.contains(tso).alias('tso'))
+            .with_column(pl.col('seq').str.contains(fuzzy_tso).alias('tso'))
             .filter(pl.col('tso'))
             .with_columns([
                     pl.col("seq").str.contains(ibar_str).alias("resc"),
