@@ -1,3 +1,5 @@
+from logging import warning
+from sys import prefix
 import pysam
 import regex
 import ogtk 
@@ -155,7 +157,11 @@ def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn, cell_bcs, ibar_
     nreads = 0
 
     debug_messages =0
-    console = Console(record=False, force_interactive= False)
+    #console = Console(record=False, force_interactive= False)
+    console = Console(record=True, force_interactive= True)
+    print(f'am I {richf=}?')
+    if len(cell_bcs) < 10:
+        print(f'the number of cells provided looks too small {len(cell_bcs)=}')
     _context = open('rm_me', 'wt') if not richf else Progress(
                 f"[yellow]{sample_id}[/]",
                 rich.progress.TimeRemainingColumn(),
@@ -338,11 +344,8 @@ def genotype_ibar_clone(
         # import cell barcodes from cleaned andata's index
         # TODO change thi to something less embarrassing
         import anndata as ad
-        import gc
-        adata = ad.read_h5ad(h5ad_path)
-        cell_bcs=[i.split('-')[0] for i in adata[adata.obs.batch == sample_id].obs.index.to_list()]
-        del(adata)
-        gc.collect()
+        adata_obs = ad.read_h5ad(h5ad_path).obs
+        cell_bcs=[i.split('-')[0] for i in adata_obs[adata_obs['batch'] == sample_id].index.to_list()]
     else:
         # TODO add support for plotting what it means a given cutoff in the 
         # read count per umi distribution
@@ -389,6 +392,10 @@ def genotype_ibar_clone(
     TSO_SEQ = 'TTTCTTATATGGG'
     ZOM_SEQ = 'AACTTGAAAGTAT'
 
+    if len(cell_bcs) <10:
+        import warnings
+        warnings.warning("The number of cells detected is too low for {sample_id}. Returning None", DeprecationWarning)
+        return(pd.DataFrame())
     ibars_df = extract_ibars_alleles_from_tabixed_fastq(
         sample_id=sample_id, 
         tbx_ifn=tabix_fn,
@@ -710,23 +717,34 @@ def compute_ibar_table_from_tabix_zombie(tbx_ifn, valid_cells):
 
     al = (
         data
-        .groupby(['sample_id', 'cell', 'ibar'])
+        .groupby(['cbc', 'ibar'])
         .agg(
             [
                 pl.col('seq').n_unique().alias('n_calleles'),
             ])
         )
 
-    cfs =['sample_id', 'cell', 'ibar'] 
+    cfs =['cbc', 'ibar'] 
     data =  data.join(al, left_on=cfs, right_on=cfs, how='left')# <<<  annotate corrected alleles 
     return(data)
 
-def compute_ibar_table_from_tabix(tbx_ifn, valid_cells):
+
+def get_ibar_table_from_tabix(tbx_ifn, valid_cells, out_fn, name, force=False):
+    import os
+    if not os.path.exists(out_fn) or force:
+        df = compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name)
+        df.write_parquet(out_fn)
+    else:
+        print(f'loading pre-computed {out_fn}')
+        df = pl.read_parquet(out_fn)
+    return(df)
+
+def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name):
     '''
     polars. 
     Processes read-level tabixed files.
     - needs valid_cell list (e.g. anndata.obs)
-    - 
+    - wawaro 
     tbx_ifn='/local/users/polivar/src/artnilet//datain/20211217_scv2/direct_B3_shRNA_S11.sorted.txt.gz'
     '''
     # assert no "-1" or else in valid_cells
@@ -734,7 +752,7 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells):
     tso='TTTCTTATATGGG'
     anch1='GCTAGA'
     anch2='AATAGCAA'
-    can_spacer="GGGTTA"
+    can_spacer="GGGTTAGA"
 
     wl = load_wl(True)
 
@@ -746,7 +764,7 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells):
     anchp = f'.+({fuzzy_anch1})(.{"{6}"})({fuzzy_anch2})'
     tsop = f'.+({fuzzy_tso})(.+)({fuzzy_anch2})'
 
-    df= pl.read_csv(tbx_ifn, sep='\t', has_header=False)
+    df=pl.read_csv(tbx_ifn, sep='\t', has_header=False)
     df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
     df = df.filter((pl.col('cbc')).is_in(valid_cells)).with_column(pl.col('seq').apply(ogtk.UM.rev_comp))
     dff = (
@@ -760,24 +778,35 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells):
                 .agg([pl.col('seq').value_counts(sort=True).head(1), pl.col('seq').count().alias('umi_reads')] )
                 .explode('seq').unnest('seq').rename({'':'seq', 'counts':'umi_dom_reads'})
     )
-
+    print('determining number of valid ibars')
     valid_ibars = ogtk.shltr.ibars.return_valid_ibars_from_df(dff)
+    valid_ibars.append('CAGTGC') # <- ibar unique to h1 that has mutation in scaffold
+    valid_ibars.append('ACAATG') # <- meh?
+    valid_ibars.append('TTTATA') # <- meh
+
+    print(f'{len(valid_ibars)=}')
+    #return((dff, valid_ibars, fuzzy_canspa))
     data = (
         dff
         .with_column(pl.when(pl.col('ibar').is_in(valid_ibars)).then(pl.col('ibar')).otherwise('no_ibar'))
         .with_column(pl.col('seq').str.extract(f"(G+T)(.+)({fuzzy_canspa})", 2).str.replace('^',"GGT").alias('can_spacer'))
-        .with_column(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias('wt'))
+        .with_column(pl.col('can_spacer').is_in(wl['spacer'].to_list()).alias('wt'))
     )
     al = (
         data
-        .groupby(['sample_id', 'cell', 'ibar'])
+        .groupby(['cbc', 'ibar'])
         .agg(
             [
                 pl.col('seq').n_unique().alias('n_calleles'),
             ])
         )
-    cfs =['sample_id', 'cell', 'ibar'] 
-    data =  data.join(al, left_on=cfs, right_on=cfs, how='left')# <<<  annotate corrected alleles 
+    cfs =['cbc', 'ibar'] 
+    data = (
+         data
+        .join(al, left_on=cfs, right_on=cfs, how='left')# <<<  annotate corrected alleles 
+        .join(wl, left_on='can_spacer', right_on='spacer', how='left') # <<< kalhor annotate
+        .with_column(pl.lit(name).alias('batch'))
+    )
     return(data)
 
 def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1, ibar_ifn = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv'):
@@ -864,24 +893,23 @@ def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1, ib
 def export_ibar_mols_to_matlin(rin, sample_id ='h1e11'):
     ''' ``rin`` should the output of a cured ibar table e.g. ``compute_ibar_table()`` 
     '''
-    
+    out_fn = f'/local/users/polivar/src/artnilet/workdir/scv2/imatlin.{sample_id}'
+    print(out_fn) 
     #tt = (rin.filter((pl.col("sample_id")==sample_id) & (pl.col('n_calleles')==1))
-    tt = (rin.filter((pl.col('n_calleles')==1))
+    tt = (rin.filter((pl.col('n_calleles')==1)& (pl.col('batch')==sample_id))
         .with_column(pl.when(~pl.col('wt'))
-                    .then(pl.col('cseq'))
-                    .otherwise("..").alias('cseq'))
+                    .then(pl.col('seq'))
+                    .otherwise("..").alias('seq'))
         .sort(['nspeed','kalhor_id'])
-        .pivot(columns='ibar', index='cell', values="cseq")
-        
-        .rename({'cell':'cbc'})
+        .pivot(columns='ibar', index='cbc', values="seq")
         )
-    tt.write_csv(f'/local/users/polivar/src/artnilet/workdir/scv2/rgordo.{sample_id}', has_header=True)
+    tt.write_csv(out_fn, has_header=True)
     return(tt)
 
 def fuzzy_match_str(string):
     ''' returns a pattern string to be used as a fuzzy match for ``string``
     '''
-    fuzz = []
+    fuzz = [string]
     for ii in range(len(string)):
         s2=''
         for i,c in enumerate(string):
