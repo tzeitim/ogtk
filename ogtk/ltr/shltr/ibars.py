@@ -159,7 +159,6 @@ def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn, cell_bcs, ibar_
     debug_messages =0
     #console = Console(record=False, force_interactive= False)
     console = Console(record=True, force_interactive= True)
-    print(f'am I {richf=}?')
     if len(cell_bcs) < 10:
         print(f'the number of cells provided looks too small {len(cell_bcs)=}')
     _context = open('rm_me', 'wt') if not richf else Progress(
@@ -548,7 +547,10 @@ def filter_umis_quantile_tabix(tabix_fn, quantile):
 def filter_umis_cov_tabix(tabix_fn, min_cov):
     #    |readid | start | end  | cbc | umi | seq | qual|
     import pandas as pd
-    umi_counts = pd.read_csv(tabix_fn, compression='gzip', sep = '\t', header = None)[3].value_counts(normalize= False)
+    umi_counts = (
+        pd.read_csv(tabix_fn, compression='gzip', sep = '\t', header = None)[3]
+        .value_counts(normalize= False)
+    )   
     filtered_umis = umi_counts[umi_counts>=min_cov].index.to_list()
     return((min_cov, filtered_umis))
 
@@ -571,18 +573,26 @@ def return_valid_ibars_from_matrix(mat):
     
     good= col_sum[top_cols][cind2].index
     good = [i for i in good if i!='null']
+    good = [i for i in good if 'N' not in i]
     return(good)
 
 def return_valid_ibars_from_df(df):
+    ''' By grouping a dataframe by cbc and ibar into a matrix of umis, a correction by rank is applied
+    '''
+    mat = (
+        df
+        .groupby(['cbc', 'ibar'])
+        .agg(pl.col('umi').n_unique().alias("umis"))
+        .pivot(values='umis', columns='ibar', index='cbc')
+        .drop('cbc')
+        .to_pandas()
+    )
+    cells_per_ibar = np.nansum((mat.fillna(0)>1).to_numpy(), axis = 0)
+    mask_ibars = cells_per_ibar > 10
+    
+    mat = mat.iloc[:, mask_ibars]
 
-    valid_ibars= return_valid_ibars_from_matrix(
-                df
-                .groupby(['cbc', 'ibar'])
-                .agg(pl.col('umi').n_unique().alias("umis"))
-                .pivot(values='umis', columns='ibar', index='cbc')
-                .drop('cbc')
-                .to_pandas()
-     )
+    valid_ibars= return_valid_ibars_from_matrix(mat)
     return(valid_ibars)
 
 def return_compiled_corrector(): 
@@ -739,7 +749,7 @@ def get_ibar_table_from_tabix(tbx_ifn, valid_cells, out_fn, name, force=False):
         df = pl.read_parquet(out_fn)
     return(df)
 
-def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name):
+def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None):
     '''
     polars. 
     Processes read-level tabixed files.
@@ -750,19 +760,23 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name):
     # assert no "-1" or else in valid_cells
     valid_cells = pl.Series(valid_cells).str.replace("-1.*", "").to_list()
     tso='TTTCTTATATGGG'
-    anch1='GCTAGA'
-    anch2='AATAGCAA'
-    can_spacer="GGGTTAGA"
+    anch_usibar=  'GCTAGA' # upstream ibar
+    anch_dsibar=  'AATAGCAA' # downstream ibar
+    can_spacer= "GGGTTAGAG"
+
+    "GGGTTAGAG"
+    "GGGTTAAGC"
 
     wl = load_wl(True)
 
     fuzzy_tso =   fuzzy_match_str(tso)
-    fuzzy_anch1 = fuzzy_match_str(anch1)
-    fuzzy_anch2 = fuzzy_match_str(anch2)
+    fuzzy_usibar = fuzzy_match_str(anch_usibar)
+    fuzzy_dsibar = fuzzy_match_str(anch_dsibar)
     fuzzy_canspa= fuzzy_match_str(can_spacer)
+    print(fuzzy_canspa)
 
-    anchp = f'.+({fuzzy_anch1})(.{"{6}"})({fuzzy_anch2})'
-    tsop = f'.+({fuzzy_tso})(.+)({fuzzy_anch2})'
+    ibar_pattern = f'.+({fuzzy_usibar})(.{"{6}"})({fuzzy_dsibar})'
+    tsop = f'.+({fuzzy_tso})(.+)({fuzzy_dsibar})'
 
     df=pl.read_csv(tbx_ifn, sep='\t', has_header=False)
     df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
@@ -770,19 +784,28 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name):
     dff = (
             df
             .with_columns([
+                            pl.col('seq').alias('oseq'),
                             pl.col('seq').str.extract(tsop, 2 ).alias('seq'),
-                            pl.col('seq').str.extract(anchp, 2).alias('ibar'),
+                            pl.col('seq').str.extract(ibar_pattern, 2).alias('ibar'),
                             ])
             
             .groupby(['cbc', 'umi', 'ibar'], maintain_order=False)
-                .agg([pl.col('seq').value_counts(sort=True).head(1), pl.col('seq').count().alias('umi_reads')] )
+                .agg([
+                    pl.col('oseq').value_counts(sort=True).head(1), 
+                    pl.col('seq').value_counts(sort=True).head(1), 
+                    pl.col('seq').count().alias('umi_reads')] 
+                    )
                 .explode('seq').unnest('seq').rename({'':'seq', 'counts':'umi_dom_reads'})
+                .explode('oseq').unnest('oseq').rename({'':'oseq'}).drop('counts')
+
     )
-    print('determining number of valid ibars')
-    valid_ibars = ogtk.shltr.ibars.return_valid_ibars_from_df(dff)
-    valid_ibars.append('CAGTGC') # <- ibar unique to h1 that has mutation in scaffold
-    valid_ibars.append('ACAATG') # <- meh?
-    valid_ibars.append('TTTATA') # <- meh
+    if valid_ibars is None:
+        print('determining number of valid ibars')
+        valid_ibars = ogtk.shltr.ibars.return_valid_ibars_from_df(dff)
+        valid_ibars.append('CAGTGC') # <- ibar unique to h1 that has mutation in scaffold
+        valid_ibars.append('ACAATG') # <- meh?
+        valid_ibars.append('TTTATA') # <- meh
+    
 
     print(f'{len(valid_ibars)=}')
     #return((dff, valid_ibars, fuzzy_canspa))
@@ -914,7 +937,10 @@ def fuzzy_match_str(string):
         s2=''
         for i,c in enumerate(string):
             if i==ii:
-                s2 += '.'
+                #s2 += '.{0,1}'
+                #s2 += ''
+                #s2 += '.'
+                s2 += '.*'
             else:
                 s2 += c
         fuzz.append(s2)
