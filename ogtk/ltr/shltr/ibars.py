@@ -557,6 +557,7 @@ def filter_umis_cov_tabix(tabix_fn, min_cov):
 def return_valid_ibars_from_matrix(mat):
     ''' Corrects detected ibars using the ranking method
     '''
+    import pdb
     col_sum = np.sum(mat, axis=0)
     row_sum = np.sum(mat, axis=1)
 
@@ -565,30 +566,39 @@ def return_valid_ibars_from_matrix(mat):
     iraw = col_sum.sort_values(ascending=False).index 
     
     #icor_map = ogtk.UM.merge_all(iraw, errors=1, mode='dist')
-    icor_map2 = ogtk.UM.merge_all(iraw, errors=2, mode='dist')
+    icor_map2 = ogtk.UM.merge_all(iraw, errors=1, mode='dist')
     icor2 = [i[1] for i in icor_map2]
     
     #cind = col_sum[top_cols].index.isin(icor)
-    cind2 = col_sum[top_cols].index.isin(icor2)
+    #cind2 = col_sum[top_cols].index.isin(icor2)
+    cind2 = col_sum.index.isin(icor2)
     
-    good= col_sum[top_cols][cind2].index
+    #good= col_sum[top_cols][cind2].index
+    good= col_sum[cind2].index
     good = [i for i in good if i!='null']
     good = [i for i in good if 'N' not in i]
+
+    #pdb.set_trace()
     return(good)
 
-def return_valid_ibars_from_df(df):
-    ''' By grouping a dataframe by cbc and ibar into a matrix of umis, a correction by rank is applied
-    '''
+def convert_df_to_mat(df, ibar_field='raw_ibar'):
     mat = (
         df
-        .groupby(['cbc', 'ibar'])
+        .groupby(['cbc', ibar_field])
         .agg(pl.col('umi').n_unique().alias("umis"))
-        .pivot(values='umis', columns='ibar', index='cbc')
+        .pivot(values='umis', columns=ibar_field, index='cbc')
         .drop('cbc')
         .to_pandas()
     )
-    cells_per_ibar = np.nansum((mat.fillna(0)>1).to_numpy(), axis = 0)
-    mask_ibars = cells_per_ibar > 10
+    return(mat)
+
+
+def return_valid_ibars_from_df(df, ibar_field='raw_ibar'):
+    ''' By grouping a dataframe by cbc and ibar into a matrix of umis, a correction by rank is applied
+    '''
+    mat = convert_df_to_mat(df, ibar_field)
+    cells_per_ibar = np.nansum((mat.fillna(0)>0).to_numpy(), axis = 0)
+    mask_ibars = cells_per_ibar > 100
     
     mat = mat.iloc[:, mask_ibars]
 
@@ -708,12 +718,12 @@ def compute_ibar_table_from_tabix_zombie(tbx_ifn, valid_cells):
     dff = (
             df
             .with_columns([
-                            pl.col('seq').str.extract(u6p, 2 ).alias('seq'),
+                            pl.col('seq').str.extract(u6p, 2).alias('seq'),
                             pl.col('seq').str.extract(anchp, 2).alias('ibar'),
                             ])
             
             .groupby(['cbc', 'umi', 'ibar'], maintain_order=False)
-                .agg([pl.col('seq').value_counts(sort=True).head(1), pl.col('seq').count().alias('umi_reads')] )
+                .agg([pl.col('seq').value_counts(sort=True).head(1), pl.col('seq').count().alias('umi_reads')])
                 .explode('seq').unnest('seq').rename({'':'seq', 'counts':'umi_dom_reads'})
     )
 
@@ -721,7 +731,7 @@ def compute_ibar_table_from_tabix_zombie(tbx_ifn, valid_cells):
     data = (
         dff
         .with_column(pl.when(pl.col('ibar').is_in(valid_ibars)).then(pl.col('ibar')).otherwise('no_ibar'))
-        .with_column(pl.col('seq').str.extract(f"(G+T)(.+)({fuzzy_canspa})", 2).str.replace('^',"GGT").alias('can_spacer'))
+        .with_column(pl.col('seq').str.extract(f"(G+T)(.+?)({fuzzy_canspa})", 2).str.replace('^',"GGT").alias('can_spacer'))
         .with_column(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias('wt'))
     )
 
@@ -753,10 +763,12 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None):
     '''
     polars. 
     Processes read-level tabixed files.
+    The idea is to go from a read level to a molecule level. At the same time, we capture the different features of the molecules: ibar, indel status, etc.
     - needs valid_cell list (e.g. anndata.obs)
-    - wawaro 
+    - wwwwawaro 
     tbx_ifn='/local/users/polivar/src/artnilet//datain/20211217_scv2/direct_B3_shRNA_S11.sorted.txt.gz'
     '''
+    import pdb
     # assert no "-1" or else in valid_cells
     valid_cells = pl.Series(valid_cells).str.replace("-1.*", "").to_list()
     tso='TTTCTTATATGGG'
@@ -764,20 +776,20 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None):
     anch_dsibar=  'AATAGCAA' # downstream ibar
     can_spacer= "GGGTTAGAG"
 
-    "GGGTTAGAG"
-    "GGGTTAAGC"
-
     wl = load_wl(True)
 
-    fuzzy_tso =   fuzzy_match_str(tso)
-    fuzzy_usibar = fuzzy_match_str(anch_usibar)
-    fuzzy_dsibar = fuzzy_match_str(anch_dsibar)
-    fuzzy_canspa= fuzzy_match_str(can_spacer)
-    print(fuzzy_canspa)
+    # strings
+    fuzzy_tso =    fuzzy_match_str(tso, wildcard=".{0,1}")
+    fuzzy_usibar = fuzzy_match_str(anch_usibar, wildcard=".{0,1}")
+    fuzzy_dsibar = fuzzy_match_str(anch_dsibar, wildcard=".{0,1}")
+    fuzzy_canspa=  fuzzy_match_str(can_spacer, wildcard=".")
 
-    ibar_pattern = f'.+({fuzzy_usibar})(.{"{6}"})({fuzzy_dsibar})'
-    tsop = f'.+({fuzzy_tso})(.+)({fuzzy_dsibar})'
-
+    # patterns
+    ibar_pattern = f'.+?({fuzzy_usibar}?)(.{"{6}"})({fuzzy_dsibar})'
+    tsop = f'.*?({fuzzy_tso})(.+?)({fuzzy_usibar})(.{"{6}"})({fuzzy_dsibar})' # this is weird, maybe no fuzzy? CP
+    canspacerp= f".*?({fuzzy_tso})(.+?)({fuzzy_canspa})" 
+    #f"(G+T)(.+?)({can_spacer})" # used to capture group 2
+    
     df=pl.read_csv(tbx_ifn, sep='\t', has_header=False)
     df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
     df = df.filter((pl.col('cbc')).is_in(valid_cells)).with_column(pl.col('seq').apply(ogtk.UM.rev_comp))
@@ -785,11 +797,11 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None):
             df
             .with_columns([
                             pl.col('seq').alias('oseq'),
-                            pl.col('seq').str.extract(tsop, 2 ).alias('seq'),
-                            pl.col('seq').str.extract(ibar_pattern, 2).alias('ibar'),
+                            pl.col('seq').str.extract(tsop, 2).alias('seq'),
+                            pl.col('seq').str.extract(ibar_pattern, 2).alias('raw_ibar'),
                             ])
             
-            .groupby(['cbc', 'umi', 'ibar'], maintain_order=False)
+            .groupby(['cbc', 'umi', 'raw_ibar'], maintain_order=False)
                 .agg([
                     pl.col('oseq').value_counts(sort=True).head(1), 
                     pl.col('seq').value_counts(sort=True).head(1), 
@@ -799,22 +811,33 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None):
                 .explode('oseq').unnest('oseq').rename({'':'oseq'}).drop('counts')
 
     )
+
+    #pdb.set_trace()
     if valid_ibars is None:
         print('determining number of valid ibars')
         valid_ibars = ogtk.shltr.ibars.return_valid_ibars_from_df(dff)
-        valid_ibars.append('CAGTGC') # <- ibar unique to h1 that has mutation in scaffold
-        valid_ibars.append('ACAATG') # <- meh?
-        valid_ibars.append('TTTATA') # <- meh
-    
+        #valid_ibars.append('CAGTGC') # <- ibar unique to h1 that has mutation in scaffold
+        #valid_ibars.append('ACAATG') # <- meh?
+        #valid_ibars.append('TTTATA') # <- meh
 
     print(f'{len(valid_ibars)=}')
     #return((dff, valid_ibars, fuzzy_canspa))
     data = (
         dff
-        .with_column(pl.when(pl.col('ibar').is_in(valid_ibars)).then(pl.col('ibar')).otherwise('no_ibar'))
-        .with_column(pl.col('seq').str.extract(f"(G+T)(.+)({fuzzy_canspa})", 2).str.replace('^',"GGT").alias('can_spacer'))
+        .with_column(pl.col('raw_ibar').is_in(valid_ibars).alias('cibar'))
+        .with_column((pl.when(pl.col('raw_ibar').is_in(valid_ibars)).then(pl.col('raw_ibar')).otherwise('no_ibar')).alias('ibar'))
+        .with_column(pl.col('oseq').str.extract(canspacerp, 2).alias('can_spacer'))
+        #.with_column(pl.col('seq').str.extract(canspacerp, 2).str.replace('^',"GGT").alias('can_spacer'))
         .with_column(pl.col('can_spacer').is_in(wl['spacer'].to_list()).alias('wt'))
     )
+    print(f'{len(data["ibar"].unique())}')
+    plt.figure()
+    plot_imols_matrix(dff)
+    plt.figure()
+    plot_imols_matrix(data)
+    plt.figure()
+    plot_imols_matrix(data.filter(pl.col('cibar')))
+    
     al = (
         data
         .groupby(['cbc', 'ibar'])
@@ -929,21 +952,62 @@ def export_ibar_mols_to_matlin(rin, sample_id ='h1e11'):
     tt.write_csv(out_fn, has_header=True)
     return(tt)
 
-def fuzzy_match_str(string):
+def fuzzy_match_str(string, wildcard=".{0,1}", include_original = True):
     ''' returns a pattern string to be used as a fuzzy match for ``string``
     '''
-    fuzz = [string]
+    fuzz = []
+    if include_original:
+        fuzz.append(string)
     for ii in range(len(string)):
         s2=''
         for i,c in enumerate(string):
             if i==ii:
-                #s2 += '.{0,1}'
-                #s2 += ''
-                #s2 += '.'
-                s2 += '.*'
+                s2 += wildcard
             else:
                 s2 += c
         fuzz.append(s2)
-
     fuzz = "|".join(fuzz)
     return(fuzz)
+
+def plot_imols_matrix(imols):
+    print('lalalal')
+    import numpy as np
+    import matplotlib.pyplot as plt
+    mat= convert_df_to_mat(imols)
+    cells_per_ibar = np.nansum((mat.fillna(0)>0).to_numpy(), axis = 0)
+    ibars_per_cell = np.nansum((mat.fillna(0)>0).to_numpy(), axis = 1)
+    ibars_per_cell = np.argsort(ibars_per_cell)[::-1]
+    icells_per_ibar = np.argsort(cells_per_ibar, )[::-1]
+    i100 = np.nansum((mat.fillna(0)>0).to_numpy()[:, icells_per_ibar], axis=0)
+    
+    plt.pcolormesh(mat.to_numpy()[:,icells_per_ibar][:, i100>1][ibars_per_cell,:])
+    plt.plot(i100[i100>1])
+
+
+def return_pibar(imols, ext_pattern = '(.{3})(.{4})(.+)', position=2, min_molecules=1e4):
+    ''' a pibar is generated by pre-pending an arbitrary, but reasonably stable, string from the spacer.
+    The idea is to provide additional specificity for filtering purposes.
+    The ext pattern is a regular expression for which the pre-pended string will be generated. Position 2 is the one extracted
+    e.g '(.{3})(.{4})(.+)' will capture the 4nt after the first 3.
+    the final integration barcode would be ibar.ext
+    '''    
+    data = (
+        imols
+        .filter(pl.col('cibar')) # we keep only corrected
+        .filter(pl.col('wt'))    # and uncut
+        .with_column(pl.col('raw_ibar')+ "." + pl.col('can_spacer').str.extract(ext_pattern, position)) # perform the actual encoding of ibar+ext
+        .groupby(['raw_ibar', 'can_spacer'])
+            .agg(pl.col('can_spacer').count().alias('molecules'))
+        .sort('molecules', reverse=True)
+    )
+    valid = data.filter(pl.col('molecules')>min_molecules)['raw_ibar'].to_list()
+    #sns.displot(data['molecules'].to_pandas(), kind='ecdf', aspect=3, log_scale=10)
+    #sns.displot(data['molecules'].to_pandas(), kind='kde', aspect=3, log_scale=10)
+    hvalids = (
+            data.filter(pl.col('molecules')>min_molecules)
+            .with_column(pl.col('raw_ibar')+ "." + pl.col('can_spacer').str.extract(ext_pattern, position))
+            .select('raw_ibar').to_series()
+                .apply(lambda x: ogtk.UM.compare_umi_to_pool((x, (0, valid)))).to_list()
+    )
+    hvalids = np.array(hvalids)
+    #sns.clustermap(hvalids, method='ward', figsize=(10,10), row_cluster=False, col_cluster=False, vmax=3, )
