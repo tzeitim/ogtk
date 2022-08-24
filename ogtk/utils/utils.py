@@ -217,6 +217,73 @@ def sfind(path, pattern, options = "-iname"):
     return(ls_call)
 
 # TODO write a generalized version for tabulate_*fastqs
+
+def tabulate_single_umified_fastq(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False):
+    ''' tabulate fastq into tabix, supports a single long read 
+        |readid | start | end  | cbc | umi | seq | qual|
+
+    5ʼkit cbc_len = 16 ; umi_len = 10
+    3ʼkit cbc_len = 16 ; umi_len = 12
+
+    if single_molecule = cbc and umi are the same
+    if comparable it creates a tabix file for comparison purposes at a specified depth 1e5 by default
+    previous name: tabulate_10x_fastqs
+    TODO: implent full python interface otherwise bgzip might not be available in the system
+    '''
+    import gzip
+    import bgzip
+
+    unsorted_tab = r1.split('_R1_')[0]+'.unsorted.txt'
+    sorted_tab = unsorted_tab.replace('unsorted.txt', 'sorted.txt.gz')
+
+    # round end to closest order of magnitude in powers of ten
+    if end is not None:
+        end = int(10**int(np.log10(end)))
+
+    if comparable and end is not None:
+        f_end = f'{end:0.0e}'.replace('+','')
+        unsorted_tab = unsorted_tab.replace('.txt', f'.{f_end}.comparable.txt')
+        sorted_tab = sorted_tab.replace('.txt', f'.{f_end}.comparable.txt')
+
+    if os.path.exists(sorted_tab) and not force:
+        print(f'using pre-computed {sorted_tab}')
+        return(sorted_tab)
+
+    print(subprocess.getoutput('date'))
+
+    with open(unsorted_tab, 'wt') as R3:
+        with gzip.open(r1, 'rt') as R1:#, bgzip.BGZipWriter(R3) as zR3:
+            i1 = itertools.islice(grouper(R1, 4), 0, end)
+            for read1 in i1:
+                read_id = read1[0].split(' ')[0]
+                cbc_str = read1[1][0:cbc_len] if not single_molecule else read1[1][0:cbc_len+umi_len] 
+                umi_str = read1[1][cbc_len:cbc_len+umi_len] if not single_molecule else read1[1][0:cbc_len+umi_len] 
+                seq = read1[1][cbc_len+umi_len:].strip() 
+                qual =  read1[3][cbc_len+umi_len:].strip()
+                out_str = '\t'.join([read_id, '0', '1', cbc_str, umi_str, seq, qual])+'\n'
+                R3.write(out_str)
+    cmd_sort = f'sort -k4,4 -k5,5 {unsorted_tab}'
+    cmd_bgzip = 'bgzip'
+    
+    c1 = subprocess.Popen(cmd_sort.split(), stdout = subprocess.PIPE)
+    c2 = subprocess.Popen(cmd_bgzip.split(), stdin = c1.stdout, stdout = open(sorted_tab, 'w'))
+    c1.stdout.close()
+    c2.communicate()
+
+    pool = [c1, c2]
+    while any(map(lambda x: x.poll() == None, pool)):
+        time.sleep(1)
+
+    map(lambda x: x.terminate(), pool)
+ 
+    print(f"tabbed fastq {sorted_tab}")
+
+    cmd_tabix = f"tabix -f -b 2 -e 3 -s 4 --zero-based {sorted_tab}"
+    c3 = subprocess.run(cmd_tabix.split())
+    del_unsorted = subprocess.run(f'rm {unsorted_tab}'.split())
+    print(subprocess.getoutput('date'))
+    return(sorted_tab)
+
 def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False):
     ''' merge umified paired fastqs (e.g. 10x fastqs) into a single one tab file with fields:
         |readid | start | end  | cbc | umi | seq | qual|
