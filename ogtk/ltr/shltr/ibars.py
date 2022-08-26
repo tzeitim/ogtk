@@ -598,8 +598,12 @@ def return_valid_ibars_from_df(df, ibar_field='raw_ibar'):
     '''
     mat = convert_df_to_mat(df, ibar_field)
     cells_per_ibar = np.nansum((mat.fillna(0)>0).to_numpy(), axis = 0)
-    mask_ibars = cells_per_ibar > 100
+    cmask_ibars = cells_per_ibar > 100
     
+    mols_per_ibar = np.nansum(mat.to_numpy(), axis = 0)
+    mmask_ibars = mols_per_ibar > 1
+
+    mask_ibars = np.logical_and(mmask_ibars,cmask_ibars)
     mat = mat.iloc[:, mask_ibars]
 
     valid_ibars= return_valid_ibars_from_matrix(mat)
@@ -759,7 +763,7 @@ def get_ibar_table_from_tabix(tbx_ifn, valid_cells, out_fn, name, force=False):
         df = pl.read_parquet(out_fn)
     return(df)
 
-def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None):
+def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, slow_mode=False):
     '''
     polars. 
     Processes read-level tabixed files.
@@ -782,26 +786,33 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None):
     fuzzy_tso =    fuzzy_match_str(tso, wildcard=".{0,1}")
     fuzzy_usibar = fuzzy_match_str(anch_usibar, wildcard=".{0,1}")
     fuzzy_dsibar = fuzzy_match_str(anch_dsibar, wildcard=".{0,1}")
-    fuzzy_canspa=  fuzzy_match_str(can_spacer, wildcard=".")
+    fuzzy_canspa=  fuzzy_match_str(can_spacer, wildcard="") # ??
+    fuzzy_canspa =can_spacer 
 
+    fuzzy_stammering = fuzzy_match_str("GTGGGGTTAGA", ".") # scaffold stutter
     # patterns
     ibar_pattern = f'.+?({fuzzy_usibar}?)(.{"{6}"})({fuzzy_dsibar})'
-    tsop = f'.*?({fuzzy_tso})(.+?)({fuzzy_usibar})(.{"{6}"})({fuzzy_dsibar})' # this is weird, maybe no fuzzy? CP
-    canspacerp= f".*?({fuzzy_tso})(.+?)({fuzzy_canspa})" 
+    tsop = f'.*?({fuzzy_tso}).*?(G+T)(.+?)({fuzzy_usibar})(.{"{6}"})({fuzzy_dsibar})' # this is weird, maybe no fuzzy? CP
+    canspacerp= f".*?({fuzzy_tso}).*?(G+T)(.+?)({fuzzy_canspa})" 
     #f"(G+T)(.+?)({can_spacer})" # used to capture group 2
     
     df=pl.read_csv(tbx_ifn, sep='\t', has_header=False)
     df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
-    df = df.filter((pl.col('cbc')).is_in(valid_cells)).with_column(pl.col('seq').apply(ogtk.UM.rev_comp))
-    dff = (
+            
+    # count reads that are discarded
+    if slow_mode:
+        print(df.select(pl.col('cbc').is_in(valid_cells).sum()/pl.col('cbc').count()))  
+    df = (
             df
+            .filter((pl.col('cbc')).is_in(valid_cells))
+            .with_column(pl.col('seq').apply(ogtk.UM.rev_comp))
             .with_columns([
-                            pl.col('seq').alias('oseq'),
-                            pl.col('seq').str.extract(tsop, 2).alias('seq'),
+                            pl.col('seq').str.extract(tsop, 3).str.replace('^', "GGT").alias('seq'),
                             pl.col('seq').str.extract(ibar_pattern, 2).alias('raw_ibar'),
+                            pl.col('seq').alias('oseq'),
                             ])
             
-            .groupby(['cbc', 'umi', 'raw_ibar'], maintain_order=False)
+            .groupby(['cbc', 'umi', 'raw_ibar'])
                 .agg([
                     pl.col('oseq').value_counts(sort=True).head(1), 
                     pl.col('seq').value_counts(sort=True).head(1), 
@@ -811,35 +822,30 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None):
                 .explode('oseq').unnest('oseq').rename({'':'oseq'}).drop('counts')
 
     )
-
+    # here we have collapsed reads in to umisi, while keeping record of the number of reads per molecule and the dominant seq too
     #pdb.set_trace()
     if valid_ibars is None:
         print('determining number of valid ibars')
-        valid_ibars = ogtk.shltr.ibars.return_valid_ibars_from_df(dff)
+        valid_ibars = ogtk.shltr.ibars.return_valid_ibars_from_df(df)
         #valid_ibars.append('CAGTGC') # <- ibar unique to h1 that has mutation in scaffold
         #valid_ibars.append('ACAATG') # <- meh?
         #valid_ibars.append('TTTATA') # <- meh
 
     print(f'{len(valid_ibars)=}')
     #return((dff, valid_ibars, fuzzy_canspa))
-    data = (
-        dff
+    df = (
+        df
+        .with_column(pl.col('oseq').str.count_match(fuzzy_stammering).alias('stam'))
         .with_column(pl.col('raw_ibar').is_in(valid_ibars).alias('cibar'))
-        .with_column((pl.when(pl.col('raw_ibar').is_in(valid_ibars)).then(pl.col('raw_ibar')).otherwise('no_ibar')).alias('ibar'))
-        .with_column(pl.col('oseq').str.extract(canspacerp, 2).alias('can_spacer'))
+        .with_column((pl.when(pl.col('raw_ibar').is_in(valid_ibars)).then(pl.col('raw_ibar')).otherwise('no_ibar')).alias('ibar')) # change to 'invalid'
+        .with_column(pl.col('oseq').str.extract(canspacerp, 3).str.replace('^', "GGT").alias('can_spacer'))
         #.with_column(pl.col('seq').str.extract(canspacerp, 2).str.replace('^',"GGT").alias('can_spacer'))
         .with_column(pl.col('can_spacer').is_in(wl['spacer'].to_list()).alias('wt'))
     )
-    print(f'{len(data["ibar"].unique())}')
-    plt.figure()
-    plot_imols_matrix(dff)
-    plt.figure()
-    plot_imols_matrix(data)
-    plt.figure()
-    plot_imols_matrix(data.filter(pl.col('cibar')))
+    print(f'{df["ibar"].n_unique()}')
     
     al = (
-        data
+        df
         .groupby(['cbc', 'ibar'])
         .agg(
             [
@@ -847,18 +853,21 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None):
             ])
         )
     cfs =['cbc', 'ibar'] 
-    data = (
-         data
+    df = (
+         df
         .join(al, left_on=cfs, right_on=cfs, how='left')# <<<  annotate corrected alleles 
         .join(wl, left_on='can_spacer', right_on='spacer', how='left') # <<< kalhor annotate
         .with_column(pl.lit(name).alias('batch'))
     )
-    return(data)
+    return(df)
 
-def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1, ibar_ifn = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv'):
-    ''' Expects filtered ibar tabulated file e.g:\n '/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv'
+def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1, ibar_ifn = None):
+    ''' Expects filtered ibar tabulated file
+        e.g:\n '/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv'
     Polars 
     '''
+    if ibar_ifn is None:
+        ibar_ifn = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv'
     tso='TTTCTTATATGGG'
 
     wl = load_wl(True)
@@ -970,7 +979,6 @@ def fuzzy_match_str(string, wildcard=".{0,1}", include_original = True):
     return(fuzz)
 
 def plot_imols_matrix(imols):
-    print('lalalal')
     import numpy as np
     import matplotlib.pyplot as plt
     mat= convert_df_to_mat(imols)
@@ -1011,3 +1019,14 @@ def return_pibar(imols, ext_pattern = '(.{3})(.{4})(.+)', position=2, min_molecu
     )
     hvalids = np.array(hvalids)
     #sns.clustermap(hvalids, method='ward', figsize=(10,10), row_cluster=False, col_cluster=False, vmax=3, )
+
+def stutter():
+    x = fuzzy_match_str("GTGGGGTTAGA", ".") # scaffold stutter
+    x = fuzzy_match_str("CACCTTCA", ".{0,1}")#36
+    x = fuzzy_match_str("TTGGGTAC", ".{0,1}") # no 33 -> there is a homologous stretch  
+    x = fuzzy_match_str("GCGAGACGTG", ".{0,1}") # 39 -> similar to the scaffold mm=1
+    x = fuzzy_match_str("TAAATTGC", ".{0,1}") # 55 also hits in the scaffold mm=1; twice since it's on the hairpin
+    x = fuzzy_match_str("CTTAACACT", ".{0,1}") # #kalhor 6 
+    x = fuzzy_match_str("AAGCTGCG", ".{0,1}") # #kalhor#22 
+    x = fuzzy_match_str("GTGGGGTTAGA", ".")
+    px = f'.*?({x}).*?({x})'
