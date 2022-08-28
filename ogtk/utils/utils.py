@@ -301,7 +301,8 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     import bgzip
     r2 = r1.replace("R1", "R2")
 
-    unsorted_tab = r1.split('_R1_')[0]+'.unsorted.txt'
+    rc = 'rc_' if rev_compr2 else ''
+    unsorted_tab = r1.split('_R1_')[0]+f'.{rc}unsorted.txt'
     sorted_tab = unsorted_tab.replace('unsorted.txt', 'sorted.txt.gz')
 
     # round end to closest order of magnitude in powers of ten
