@@ -284,7 +284,7 @@ def tabulate_single_umified_fastq(r1, cbc_len =16 , umi_len = 10, end = None, si
     print(subprocess.getoutput('date'))
     return(sorted_tab)
 
-def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False):
+def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False, rev_compr2=False):
     ''' merge umified paired fastqs (e.g. 10x fastqs) into a single one tab file with fields:
         |readid | start | end  | cbc | umi | seq | qual|
 
@@ -293,6 +293,7 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
 
     if single_molecule = cbc and umi are the same
     if comparable it creates a tabix file for comparison purposes at a specified depth 1e5 by default
+    ``rev_compr2`` reverse-complements R2
     previous name: tabulate_10x_fastqs
     TODO: implent full python interface otherwise bgzip might not be available in the system
     '''
@@ -329,6 +330,9 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
                 umi_str = read1[1][cbc_len:cbc_len+umi_len] if not single_molecule else read1[1][0:cbc_len+umi_len] 
                 seq = read2[1].strip() 
                 qual =  read2[3].strip()
+                if rev_compr2:
+                    seq = rev_comp(seq)
+                    qual = qual[::-1]
                 out_str = '\t'.join([read_id, '0', '1', cbc_str, umi_str, seq, qual])+'\n'
                 R3.write(out_str)
     cmd_sort = f'sort -k4,4 -k5,5 {unsorted_tab}'
@@ -646,3 +650,28 @@ def split_bam_by_tag(bam_ifn, tab, prefix, tag = 'CB', header = None):
         outs[ann].close()
 
     print(subprocess.getoutput('date'))
+
+
+def list_to_fasta(fasta_ofn, seqs, names=None):
+    '''saves a list into a fasta file format, naming the sequence according to their index if names are not provided
+    '''
+    if names is None:
+        names = range(len(seqs))
+    with open(fasta_ofn, 'w') as fa:
+        for name, seq in zip(names, seqs):
+            fa.write(seq_to_fasta(seq, name)) 
+
+
+def seq_to_fasta(seq, name=None):
+    return(">%s\n%s\n"%(name,seq))
+
+def rev_comp(seq):
+    " rev-comp a dna sequence with UIPAC characters ; courtesy of Max's crispor"
+    revTbl = {'A' : 'T', 'C' : 'G', 'G' : 'C', 'T' : 'A', 'N' : 'N' , 'M' : 'K', 'K' : 'M',
+    "R" : "Y" , "Y":"R" , "g":"c", "a":"t", "c":"g","t":"a", "n":"n", "V" : "B", "v":"b", 
+    "B" : "V", "b": "v", "W" : "W", "w" : "w", "-":"-"}
+
+    newSeq = []
+    for c in reversed(seq):
+        newSeq.append(revTbl[c])
+    return "".join(newSeq)
