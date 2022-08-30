@@ -261,7 +261,8 @@ def tabulate_single_umified_fastq(r1, cbc_len =16 , umi_len = 10, end = None, si
                 seq = read1[1][cbc_len+umi_len:].strip() 
                 qual =  read1[3][cbc_len+umi_len:].strip()
                 out_str = '\t'.join([read_id, '0', '1', cbc_str, umi_str, seq, qual])+'\n'
-                R3.write(out_str)
+                if len(seq)>cbc_len+umi_len: 
+                    R3.write(out_str)
     cmd_sort = f'sort -k4,4 -k5,5 {unsorted_tab}'
     cmd_bgzip = 'bgzip'
     
@@ -335,7 +336,8 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
                     seq = rev_comp(seq)
                     qual = qual[::-1]
                 out_str = '\t'.join([read_id, '0', '1', cbc_str, umi_str, seq, qual])+'\n'
-                R3.write(out_str)
+                if len(seq)>cbc_len+umi_len: 
+                    R3.write(out_str)
     cmd_sort = f'sort -k4,4 -k5,5 {unsorted_tab}'
     cmd_bgzip = 'bgzip'
     
@@ -397,7 +399,8 @@ def tabulate_umified_fastqs(r1, cbc_len =16, umi_len = 10, end = None, single_mo
                 seq = read1[1][cbc_len+umi_len:].strip() 
                 qual = read1[3][cbc_len+umi_len:].strip() 
                 out_str = '\t'.join([read_id, '0', '1', cbc_str, umi_str, seq, qual])+'\n'
-                R3.write(out_str)
+                if len(seq)>cbc_len+umi_len: 
+                    R3.write(out_str)
     cmd_sort = f'sort -k4,4 -k5,5 {unsorted_tab}'
     cmd_bgzip = 'bgzip'
     
