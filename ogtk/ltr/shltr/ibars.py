@@ -269,7 +269,7 @@ def extract_ibars_alleles_from_tabixed_fastq(sample_id, tbx_ifn, cell_bcs, ibar_
             print(f'{len(expected)=}\n'
                 +f'{len(unexpected)=}\n'
                 +f'{len(ibar_missed)=}\n'
-                +f'{len(read_missed)=}\n'
+                +f'{len(read_missed)=}\n'ibars
                 +f'missed ibars {len(ibar_missed)/(1e-10+nreads):0.2f}\n'
                 #+f'reads missed/nreads {len(read_missed)}/{nreads}  = {(len(ibar_missed)+len(read_missed))/nreads*100:0.2f}%'
             )
@@ -753,17 +753,17 @@ def compute_ibar_table_from_tabix_zombie(tbx_ifn, valid_cells):
     return(data)
 
 
-def get_ibar_table_from_tabix(tbx_ifn, valid_cells, out_fn, name, force=False):
+def get_ibar_table_from_tabix(tbx_ifn, valid_cells, out_fn, name, force=False, slow=False):
     import os
     if not os.path.exists(out_fn) or force:
-        df = compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name)
+        df = compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, slow=slow)
         df.write_parquet(out_fn)
     else:
         print(f'loading pre-computed {out_fn}')
         df = pl.read_parquet(out_fn)
     return(df)
 
-def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, slow_mode=False):
+def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, slow=False):
     '''
     polars. 
     Processes read-level tabixed files.
@@ -775,6 +775,7 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, 
     import pdb
     # assert no "-1" or else in valid_cells
     valid_cells = pl.Series(valid_cells).str.replace("-1.*", "").to_list()
+    u6mx = 'GACGAAACACCG'
     tso='TTTCTTATATGGG'
     anch_usibar=  'GCTAGA' # upstream ibar
     anch_dsibar=  'AATAGCAA' # downstream ibar
@@ -783,6 +784,7 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, 
     wl = load_wl(True)
 
     # strings
+    fuzzy_u6 =     fuzzy_match_str(u6mx, '.{0,1}')
     fuzzy_tso =    fuzzy_match_str(tso, wildcard=".{0,1}")
     fuzzy_usibar = fuzzy_match_str(anch_usibar, wildcard=".{0,1}")
     fuzzy_dsibar = fuzzy_match_str(anch_dsibar, wildcard=".{0,1}")
@@ -791,23 +793,46 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, 
 
     fuzzy_stammering = fuzzy_match_str("GTGGGGTTAGA", ".") # scaffold stutter
     # patterns
+    u6p = f'.+({fuzzy_tso}){"{0,}"}.*{fuzzy_u6}'
     ibar_pattern = f'.+?({fuzzy_usibar}?)(.{"{6}"})({fuzzy_dsibar})'
-    tsop = f'.*?({fuzzy_tso}).*?(G+T)(.+?)({fuzzy_usibar})(.{"{6}"})({fuzzy_dsibar})' # this is weird, maybe no fuzzy? CP
+    tsop = f'.*?({fuzzy_tso})(.+?)({fuzzy_usibar})(.{"{6}"})({fuzzy_dsibar})' # this is weird, maybe no fuzzy? CP
     canspacerp= f".*?({fuzzy_tso}).*?(G+T)(.+?)({fuzzy_canspa})" 
     #f"(G+T)(.+?)({can_spacer})" # used to capture group 2
     
+
+
     df=pl.read_csv(tbx_ifn, sep='\t', has_header=False)
     df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
             
     # count reads that are discarded
-    if slow_mode:
+
+    #########
+    #df = df.with_column(pl.col('seq').apply(ogtk.UM.rev_comp))
+    if slow:
+        extract_read_grammar(df=df, batch=name)
+        print('reads in valid cbcs')
         print(df.select(pl.col('cbc').is_in(valid_cells).sum()/pl.col('cbc').count()))  
+    print(df.shape)
+    df = (
+        df.with_columns([
+            pl.col('seq').str.count_match(fuzzy_tso).alias('tsos'),
+            pl.col('seq').str.count_match(fuzzy_dsibar).alias('dss'),
+            pl.col('seq').str.count_match(fuzzy_stammering).alias('sts'),
+            pl.col('seq').str.count_match(fuzzy_u6).alias('u6s'),
+            
+        ])
+        # eliminate off-targets
+        .filter((pl.col('dss')!=0) | (pl.col('u6s')!=0) | (pl.col('sts')!=0) | (pl.col('tsos')!=0))
+     )
+    print(df.shape)
+    extract_read_grammar(df=df, batch=name)
     df = (
             df
             .filter((pl.col('cbc')).is_in(valid_cells))
-            .with_column(pl.col('seq').apply(ogtk.UM.rev_comp))
+            #.with_column(pl.col('seq').apply(ogtk.UM.rev_comp))
+            .with_column(pl.col('seq').str.replace(u6p, tso)) #control alternative TSS
             .with_columns([
-                            pl.col('seq').str.extract(tsop, 3).str.replace('^', "GGT").alias('seq'),
+                            pl.col('seq').str.extract(tsop, 2).str.replace('^G+T', "GGT").alias('seq'),
                             pl.col('seq').str.extract(ibar_pattern, 2).alias('raw_ibar'),
                             pl.col('seq').alias('oseq'),
                             ])
@@ -961,7 +986,7 @@ def export_ibar_mols_to_matlin(rin, sample_id ='h1e11'):
     tt.write_csv(out_fn, has_header=True)
     return(tt)
 
-def fuzzy_match_str(string, wildcard=".{0,1}", include_original = True):
+def fuzzy_match_str(string, wildcard=".{0,1}", include_original = True, sep='|'):
     ''' returns a pattern string to be used as a fuzzy match for ``string``
     '''
     fuzz = []
@@ -975,7 +1000,7 @@ def fuzzy_match_str(string, wildcard=".{0,1}", include_original = True):
             else:
                 s2 += c
         fuzz.append(s2)
-    fuzz = "|".join(fuzz)
+    fuzz = sep.join(fuzz)
     return(fuzz)
 
 def plot_imols_matrix(imols):
@@ -1030,3 +1055,350 @@ def stutter():
     x = fuzzy_match_str("AAGCTGCG", ".{0,1}") # #kalhor#22 
     x = fuzzy_match_str("GTGGGGTTAGA", ".")
     px = f'.*?({x}).*?({x})'
+
+
+
+def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot=False, encode = False):
+    ''' input is pl fastq
+        this function doesn't encode, it just counts occurences of patterns
+        df= pl.read_parquet('/local/users/polivar/src/artnilet//datain/20211217_scv2/direct_B3_shRNA_S11.sorted.top.parquet')
+    '''
+    if all(i is None for i in [df, parquet_ifn]):
+        raise ValueError("you need to provice parquet_ifn or a pl")
+    if df is None:
+        df = pl.read_parquet(parquet_ifn).drop(['readid', 'qual' , 'start', 'end'])
+
+    wl = load_wl()
+    wts = "|".join(wl['spacer'])
+    
+    u6mx = 'GACGAAACACC' # 'GACGAAACACC'
+    tso = 'TTTCTTATATGGG'
+    u6bk = "GGAAAGAAACACCG" # broken u6
+    usibar=  'GCTAGA' # upstream ibar
+    dsibar=  'AATAGCAA' # downstream ibar
+    can_spacer='GGGTTAGAG'
+    primer = 'GGCTAGTCCGTTATCAACTTG'
+    scaf2 = 'GTTAACCTAA'
+
+    fuzzy_bu6 =     fuzzy_match_str(u6bk, '.{0,1}')
+    fuzzy_u6 =     fuzzy_match_str(u6mx, '.{0,1}')
+    fuzzy_usibar = fuzzy_match_str(usibar, wildcard=".{0,1}")
+    fuzzy_dsibar = fuzzy_match_str(dsibar, wildcard=".{0,1}")
+    fuzzy_tso =    fuzzy_match_str(tso, wildcard=".{0,1}")
+    fuzzy_scaff2 = fuzzy_match_str(scaf2, wildcard=".{0,1}")
+    fuzzy_stammering = fuzzy_match_str("GTGGGGTTA", ".") # scaffold stutter
+    fuzzy_primer=  fuzzy_match_str(primer, wildcard=".{0,1}?") # ??
+
+    if not zombie:
+        fuzzy_canspa=  fuzzy_match_str(can_spacer, wildcard="") # ??
+    else:
+        fuzzy_canspa=  fuzzy_match_str(can_spacer, wildcard="") # ?? used to be a wildcard='.'
+
+    print(df.shape[0])
+    # It is faster to use fuzzy matching once so we encode first and then count
+    df = (
+        df
+
+        .with_column(pl.col('seq').alias('oseq'))
+        .with_column(pl.col('seq').str.replace_all(f'.*?({fuzzy_tso})', '[···TSO···]'))
+        .with_column(pl.col('seq').str.replace_all(f'.*({fuzzy_u6})', '[···U6···]'))
+        .with_column(pl.col('seq').str.replace_all(f'.*({fuzzy_bu6})', '[···bU6···]'))
+        .with_column(pl.col('seq').str.replace_all(f'({fuzzy_dsibar})', '[···SCF1···]'))
+        .with_column(pl.col('seq').str.replace_all(f'({fuzzy_scaff2})', '[···SCF2···]'))
+        .with_column(pl.col('seq').str.replace_all(f'({can_spacer})', f'[···CNSCFL···]'))
+        .with_column(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
+        .with_column(pl.col('seq').str.replace_all(f'({fuzzy_primer})', f'[···LIB···]'))
+        .with_column(pl.col('seq').str.replace_all(f'\[···SCF2···\].+\[···LIB···\]', f'[···SCF2···][···LIB···]'))
+        .with_column(pl.col('seq').str.extract(f'(.{"{6}"})\[···SCF1···\]',1).alias('ibar'))
+        .with_column(pl.col('seq').str.replace_all(f'(\]{"CTAGA"})', '][···SCF0···]'))
+        .with_column(pl.col('seq').str.replace_all(f'\[···SCF2···\]\[···LIB···\].+', '[END]'))
+        .with_column(pl.col('seq').str.replace_all(f'{fuzzy_stammering}', '[XXX]'))
+        .with_column(pl.col('seq').str.replace_all(f'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
+        .drop([i for i in ['qual',  'readid', 'start', 'end'] if i in df.columns])
+  #      .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
+
+    )
+
+    # count matches for a series of patterns
+    df = (
+        df.with_columns([
+            pl.col('seq').str.count_match('TSO').alias('tsos'),
+            pl.col('seq').str.count_match('SCF1').alias('dss'),
+            pl.col('seq').str.count_match('XXX').alias('sts'),
+            pl.col('seq').str.count_match('·U6·').alias('u6s'),
+            pl.col('seq').str.count_match('bU6').alias('bu6s'),
+            pl.col('seq').str.count_match('CNSCFL').alias('can'),
+            pl.col('seq').str.count_match('WT').alias('wts'),
+        ])
+     )
+    
+    # compute look-ahead stats 
+    df = (
+        df.with_columns([
+            pl.col('umi').n_unique().over(['cbc', 'ibar']).alias('mls'), 
+            pl.col('seq').n_unique().over(['cbc', 'ibar']).alias('n_alleles'),
+            pl.col('seq').count().over(['cbc', 'ibar']).alias('reads'),
+            pl.col('ibar').is_null().alias('offt'),
+            pl.lit(batch).alias('sample_id'),
+            ])
+    )
+
+    # flag ibars 
+    if valid_ibars is not None:
+        if valid_ibars == 'compute':
+            # determine valid ibars automatically
+        else:
+            # they are provided:
+            print('hola')
+
+    index =['u6s', 'sts', 'dss', 'can'] 
+    index =['u6s', 'can', 'dss'] 
+    columns = 'wts'
+    xxx = df.pivot(index=index, columns=columns, values='umi', aggregate_fn='count', sort_columns=True).sort(index)
+    rename_d =dict([(str(i), f'{columns}_{i}') for i in range(xxx.shape[1]-len(index))]) 
+
+    xxxp = (
+        xxx.rename(rename_d)
+        .to_pandas()
+        .set_index(index)
+        .apply(lambda x: 100*x/(df.shape[0]/1.0))
+        .fillna(0)
+          )
+    print(xxxp.apply(sum))
+    xxx = (
+        xxx.rename(rename_d)
+        .to_pandas()
+        .set_index(index)
+        .apply(lambda x: np.log10(x))
+        .fillna(0)
+    )    
+    if not do_plot:
+        return(df)
+    fig, axes = plt.subplots(1,2, dpi=60, figsize=(10, 12))
+    sns.heatmap(xxxp, annot=True, fmt='.1f', ax=axes[0], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
+    axes[0].set_title(batch)
+    sns.heatmap(xxx, annot=True, fmt='.1f', ax=axes[1], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
+    axes[1].set_title(batch)
+    plt.tight_layout()
+    return(df)
+    
+    #print(xx.filter((pl.col('dss')==0) & (pl.col('u6s')==0) & (pl.col('tsos')==0)))
+    
+
+def zombie_fastq_df(tabix_ifn, sample_id, reads = int(5e5), return_encoded=False):
+        '''
+        tabix_ifn = '/local/users/polivar/src/artnilet/datain/20220615_dox_induction_cc/zombie_dox_invitro/merged/bi_h1_ivt_4h_dox_1ugml_20min_48h_S2_merged_001.fastq.gz.sorted.txt.gz'
+        '''
+        xx = pl.read_csv(tabix_ifn, has_header=False,  sep='\t').sample(reads)
+        xx.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
+        
+        wl = load_wl()
+        wts = "|".join(wl['spacer'])
+        u6mx =  'GACGAAACACC' # 'GACGAAACACC'
+        u6bk ="GGAAAGAAACACCG" # broken u6
+        tso='TTTCTTATATGGG'
+        anch_usibar=  'GCTAGA' # upstream ibar
+        anch_dsibar=  'AATAGCAA' # downstream ibar
+        scaf2 = 'GTTAACCTAA'
+        can_spacer= "GGGTTAGAG"
+        primer = "GGCTAGTCCGTTATCAACTTG"
+        fuzzy_u6 =     fuzzy_match_str(u6mx, '.{0,1}')
+        fuzzy_bu6 =     fuzzy_match_str(u6bk, '.{0,1}')
+        fuzzy_tso =    fuzzy_match_str(tso, wildcard=".{0,1}")
+        fuzzy_usibar = fuzzy_match_str(anch_usibar, wildcard=".{0,1}")
+        fuzzy_dsibar = fuzzy_match_str(anch_dsibar, wildcard=".{0,1}")
+        fuzzy_scaff2 = fuzzy_match_str(scaf2, wildcard=".{0,1}")
+        fuzzy_canspa=  fuzzy_match_str(can_spacer, wildcard=".") # ??
+        fuzzy_primer=  fuzzy_match_str(primer, wildcard=".{0,1}?") # ??
+        fuzzy_stammering = fuzzy_match_str("GTGGGGTTA", ".") # scaffold stutter
+        
+        kk=(
+            xx
+            
+            .with_column(pl.col('seq').alias('oseq'))
+            .with_column(pl.col('seq').str.replace_all(f'.*?({fuzzy_tso})', '[···TSO···]'))
+            .with_column(pl.col('seq').str.replace_all(f'.*({fuzzy_u6})', '[···U6···]'))
+            .with_column(pl.col('seq').str.replace_all(f'.*({fuzzy_bu6})', '[···bU6···]'))
+            .with_column(pl.col('seq').str.replace_all(f'({fuzzy_dsibar})', '[···SCF1···]'))
+            .with_column(pl.col('seq').str.replace_all(f'({fuzzy_scaff2})', '[···SCF2···]'))
+            .with_column(pl.col('seq').str.replace_all(f'({can_spacer})', f'[···CNSCFL···]'))
+            .with_column(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
+            .with_column(pl.col('seq').str.replace_all(f'({fuzzy_primer})', f'[···LIB···]'))
+            .with_column(pl.col('seq').str.replace_all(f'\[···SCF2···\].+\[···LIB···\]', f'[···SCF2···][···LIB···]'))
+
+            .with_column(pl.col('seq').str.extract(f'(.{"{6}"})\[···SCF1···\]',1).alias('ibar'))
+            .with_column(pl.col('seq').str.replace_all(f'(\]{"CTAGA"})', '][···SCF0···]'))
+            .with_column(pl.col('seq').str.replace_all(f'\[···SCF2···\]\[···LIB···\].+', '[END]'))
+            .with_column(pl.col('seq').str.replace_all(f'{fuzzy_stammering}', '[XXX]'))
+            .with_column(pl.col('seq').str.replace_all(f'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
+            .drop(['qual', 'cbc', 'readid', 'start', 'end', 'umi'])
+            .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
+            #.filter(pl.col('ibar')!='GGTGGA') # useless u6
+            #.filter(pl.col('ibar')!='AAAGTA') # to do
+            #.filter(pl.col('ibar')!='GGTCGT') # to do
+            
+        )
+        if return_encoded:
+            return(kk)
+        
+        data = (
+                kk
+                    
+                    .groupby('ibar')
+                        .agg([pl.col('seq').str.count_match('WT').value_counts(), pl.col('seq').count().alias('reads')])
+                                .explode('seq').unnest('seq').rename({'':'wt'})
+                        .filter(pl.col('ibar').str.contains('N').is_not())
+                    .filter(pl.col('wt')<2)
+                )
+        data = (
+                data
+                .filter(pl.col('reads')>100).groupby(['ibar', 'wt'])
+                .agg((pl.col('counts')/pl.col('reads')).prefix('pc_')).explode('pc_counts')
+                )
+        data = data.with_column(pl.lit(sample_id).alias('sample_id'))
+        return(data)
+        return(data.join(xp, left_on='sample_id', right_on='sample_id'))
+
+def pl_tabix_to_df(tbx_ifn, sample = False):
+    ''' load tabix fastq as polars df
+    '''
+    df=pl.read_csv(tbx_ifn, sep='\t', has_header=False)
+    df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
+    return(df)
+
+def pl_fastq_to_df(fastq_ifn):
+    ''' unfinished since the real need is about paired fastqs
+    '''
+    step = 4
+    df = pl.read_csv(fastq_ifn)
+
+    df = (df.with_column(
+        (pl.arange(0, pl.count()) // step).alias("step")
+    ).groupby("step", maintain_order=True)
+    .agg([
+        pl.col("a").take(i).alias(name) for i, name in enumerate(["first", "second", "third"])
+    ]))
+
+def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, slow=False):
+    '''
+    polars. 
+    Processes read-level tabixed files.
+    The idea is to go from a read level to a molecule level. At the same time, we capture the different features of the molecules: ibar, indel status, etc.
+    - needs valid_cell list (e.g. anndata.obs)
+    - qqqqwaro 
+    tbx_ifn='/local/users/polivar/src/artnilet//datain/20211217_scv2/direct_B3_shRNA_S11.sorted.txt.gz'
+    '''
+    import pdb
+    # assert no "-1" or else in valid_cells
+    valid_cells = pl.Series(valid_cells).str.replace("-1.*", "").to_list()
+    u6mx = 'GACGAAACACCG'
+    tso='TTTCTTATATGGG'
+    anch_usibar=  'GCTAGA' # upstream ibar
+    anch_dsibar=  'AATAGCAA' # downstream ibar
+    can_spacer= "GGGTTAGAG"
+
+    wl = load_wl(True)
+
+    # strings
+    fuzzy_u6 =     fuzzy_match_str(u6mx, '.{0,1}')
+    fuzzy_tso =    fuzzy_match_str(tso, wildcard=".{0,1}")
+    fuzzy_usibar = fuzzy_match_str(anch_usibar, wildcard=".{0,1}")
+    fuzzy_dsibar = fuzzy_match_str(anch_dsibar, wildcard=".{0,1}")
+    fuzzy_canspa=  fuzzy_match_str(can_spacer, wildcard="") # ??
+    fuzzy_canspa =can_spacer 
+
+    fuzzy_stammering = fuzzy_match_str("GTGGGGTTAGA", ".") # scaffold stutter
+    # patterns
+    u6p = f'.+({fuzzy_tso}){"{0,}"}.*{fuzzy_u6}'
+    ibar_pattern = f'.+?({fuzzy_usibar}?)(.{"{6}"})({fuzzy_dsibar})'
+    tsop = f'.*?({fuzzy_tso})(.+?)({fuzzy_usibar})(.{"{6}"})({fuzzy_dsibar})' # this is weird, maybe no fuzzy? CP
+    canspacerp= f".*?({fuzzy_tso}).*?(G+T)(.+?)({fuzzy_canspa})" 
+    #f"(G+T)(.+?)({can_spacer})" # used to capture group 2
+    
+
+
+    df=pl.read_csv(tbx_ifn, sep='\t', has_header=False)
+    df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
+            
+    # count reads that are discarded
+
+    #########
+    #df = df.with_column(pl.col('seq').apply(ogtk.UM.rev_comp))
+    if slow:
+        extract_read_grammar(df=df, batch=name)
+        print('reads in valid cbcs')
+        print(df.select(pl.col('cbc').is_in(valid_cells).sum()/pl.col('cbc').count()))  
+    print(df.shape)
+    df = (
+        df.with_columns([
+            pl.col('seq').str.count_match(fuzzy_tso).alias('tsos'),
+            pl.col('seq').str.count_match(fuzzy_dsibar).alias('dss'),
+            pl.col('seq').str.count_match(fuzzy_stammering).alias('sts'),
+            pl.col('seq').str.count_match(fuzzy_u6).alias('u6s'),
+            
+        ])
+        # eliminate off-targets
+        .filter((pl.col('dss')!=0) | (pl.col('u6s')!=0) | (pl.col('sts')!=0) | (pl.col('tsos')!=0))
+     )
+    print(df.shape)
+    extract_read_grammar(df=df, batch=name)
+    df = (
+            df
+            .filter((pl.col('cbc')).is_in(valid_cells))
+            #.with_column(pl.col('seq').apply(ogtk.UM.rev_comp))
+            .with_column(pl.col('seq').str.replace(u6p, tso)) #control alternative TSS
+            .with_columns([
+                            pl.col('seq').str.extract(tsop, 2).str.replace('^G+T', "GGT").alias('seq'),
+                            pl.col('seq').str.extract(ibar_pattern, 2).alias('raw_ibar'),
+                            pl.col('seq').alias('oseq'),
+                            ])
+            
+            .groupby(['cbc', 'umi', 'raw_ibar'])
+                .agg([
+                    pl.col('oseq').value_counts(sort=True).head(1), 
+                    pl.col('seq').value_counts(sort=True).head(1), 
+                    pl.col('seq').count().alias('umi_reads')] 
+                    )
+                .explode('seq').unnest('seq').rename({'':'seq', 'counts':'umi_dom_reads'})
+                .explode('oseq').unnest('oseq').rename({'':'oseq'}).drop('counts')
+
+    )
+    # here we have collapsed reads in to umisi, while keeping record of the number of reads per molecule and the dominant seq too
+    #pdb.set_trace()
+    if valid_ibars is None:
+        print('determining number of valid ibars')
+        valid_ibars = ogtk.shltr.ibars.return_valid_ibars_from_df(df)
+        #valid_ibars.append('CAGTGC') # <- ibar unique to h1 that has mutation in scaffold
+        #valid_ibars.append('ACAATG') # <- meh?
+        #valid_ibars.append('TTTATA') # <- meh
+
+    print(f'{len(valid_ibars)=}')
+    #return((dff, valid_ibars, fuzzy_canspa))
+    df = (
+        df
+        .with_column(pl.col('oseq').str.count_match(fuzzy_stammering).alias('stam'))
+        .with_column(pl.col('raw_ibar').is_in(valid_ibars).alias('cibar'))
+        .with_column((pl.when(pl.col('raw_ibar').is_in(valid_ibars)).then(pl.col('raw_ibar')).otherwise('no_ibar')).alias('ibar')) # change to 'invalid'
+        .with_column(pl.col('oseq').str.extract(canspacerp, 3).str.replace('^', "GGT").alias('can_spacer'))
+        #.with_column(pl.col('seq').str.extract(canspacerp, 2).str.replace('^',"GGT").alias('can_spacer'))
+        .with_column(pl.col('can_spacer').is_in(wl['spacer'].to_list()).alias('wt'))
+    )
+    print(f'{df["ibar"].n_unique()}')
+    
+    al = (
+        df
+        .groupby(['cbc', 'ibar'])
+        .agg(
+            [
+                pl.col('seq').n_unique().alias('n_calleles'),
+            ])
+        )
+    cfs =['cbc', 'ibar'] 
+    df = (
+         df
+        .join(al, left_on=cfs, right_on=cfs, how='left')# <<<  annotate corrected alleles 
+        .join(wl, left_on='can_spacer', right_on='spacer', how='left') # <<< kalhor annotate
+        .with_column(pl.lit(name).alias('batch'))
+    )
+    return(df)
+
