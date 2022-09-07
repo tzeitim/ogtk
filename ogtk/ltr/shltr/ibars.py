@@ -1277,7 +1277,7 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, 
     )
     return(df)
 
-def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot=False, encode = False, valid_ibars = None):
+def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot=False, encode = False, valid_ibars = None, min_cov=2):
     ''' input is pl fastq
         this function doesn't encode, it just counts occurences of patterns
         df= pl.read_parquet('/local/users/polivar/src/artnilet//datain/20211217_scv2/direct_B3_shRNA_S11.sorted.top.parquet')
@@ -1295,7 +1295,7 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
     u6bk = "GGAAAGAAACACCG" # broken u6
     usibar=  'GCTAGA' # upstream ibar
     dsibar=  'AATAGCAA' # downstream ibar
-    can_spacer='GGGTTAGAG'
+    canscaf ='GGGTTAGAG'
     primer = 'GGCTAGTCCGTTATCAACTTG'
     scaf2 = 'GTTAACCTAA'
 
@@ -1309,11 +1309,13 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
     fuzzy_primer=  fuzzy_match_str(primer, wildcard=".{0,1}?") # ??
 
     if not zombie:
-        fuzzy_canspa=  fuzzy_match_str(can_spacer, wildcard="") # ??
+        fuzzy_canspa=  fuzzy_match_str(canscaf, wildcard="") # ??
     else:
-        fuzzy_canspa=  fuzzy_match_str(can_spacer, wildcard="") # ?? used to be a wildcard='.'
+        fuzzy_canspa=  fuzzy_match_str(canscaf, wildcard="") # ?? used to be a wildcard='.'
 
-    print(df.shape[0])
+    print(f'total_reads={df.shape[0]}')
+    total_cells =df["cbc"].n_unique() 
+    print(f'{total_cells=}')
     # It is faster to use fuzzy matching once so we encode first and then count
     df = (
         df
@@ -1324,12 +1326,12 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         .with_column(pl.col('seq').str.replace_all(f'.*({fuzzy_bu6})', '[···bU6···]'))
         .with_column(pl.col('seq').str.replace_all(f'({fuzzy_dsibar})', '[···SCF1···]'))
         .with_column(pl.col('seq').str.replace_all(f'({fuzzy_scaff2})', '[···SCF2···]'))
-        .with_column(pl.col('seq').str.replace_all(f'({can_spacer})', f'[···CNSCFL···]'))
+        .with_column(pl.col('seq').str.replace_all(f'({canscaf})', f'[···CNSCFL···]'))
         .with_column(pl.col('seq').str.extract(f'({wts})', 1).alias('spacer'))
         .with_column(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
         .with_column(pl.col('seq').str.replace_all(f'({fuzzy_primer})', f'[···LIB···]'))
         .with_column(pl.col('seq').str.replace_all(f'\[···SCF2···\].+\[···LIB···\]', f'[···SCF2···][···LIB···]'))
-        .with_column(pl.col('seq').str.extract(f'(.{"{6}"})\[···SCF1···\]',1).alias('raw_ibar'))
+        .with_column(pl.col('seq').str.extract(f'([A-Z]{"{6}"})\[···SCF1···\]',1).alias('raw_ibar'))
         .with_column(pl.col('seq').str.replace_all(f'(\]{"CTAGA"})', '][···SCF0···]'))
         .with_column(pl.col('seq').str.replace_all(f'\[···SCF2···\]\[···LIB···\].+', '[END]'))
         .with_column(pl.col('seq').str.replace_all(f'{fuzzy_stammering}', '[XXX]'))
@@ -1338,23 +1340,63 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
   #      .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
     ).collect()
 
-    ###
-    # collapse into mol level
-    df =( df 
+    ### read level QC of patterns
+    ####### TODO verify its functionality
+    read_qc = False
+    if read_qc:
+        index =['u6s', 'sts', 'dss', 'can'] 
+        index =['u6s', 'can', 'dss'] 
+        columns = 'wts'
+        xxx = df.pivot(index=index, columns=columns, values='umi', aggregate_fn='count', sort_columns=True).sort(index)
+        rename_d =dict([(str(i), f'{columns}_{i}') for i in range(xxx.shape[1]-len(index))]) 
 
+        xxxp = (
+            xxx.rename(rename_d)
+            .to_pandas()
+            .set_index(index)
+            .apply(lambda x: 100*x/(df.shape[0]/1.0))
+            .fillna(0)
+            )
+        print(xxxp.apply(sum))
+        xxx = (
+            xxx.rename(rename_d)
+            .to_pandas()
+            .set_index(index)
+            .apply(lambda x: np.log10(x))
+            .fillna(0)
+        )    
+        fig, axes = plt.subplots(1,2, dpi=60, figsize=(10, 12))
+        sns.heatmap(xxxp, annot=True, fmt='.1f', ax=axes[0], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
+        axes[0].set_title(batch)
+        sns.heatmap(xxx, annot=True, fmt='.1f', ax=axes[1], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
+        axes[1].set_title(batch)
+        plt.tight_layout()
+    #######
+
+    print('collapse into molecules')
+    df =( df 
+            .lazy()
             .groupby(['cbc', 'umi', 'raw_ibar', 'spacer'])
                 .agg([
                     pl.col('oseq').value_counts(sort=True).head(1), 
                     pl.col('seq').value_counts(sort=True).head(1), 
                     pl.col('seq').count().alias('umi_reads') 
                     ])
+            .collect()
                 .explode('seq').unnest('seq').rename({'':'seq', 'counts':'umi_dom_reads'})
                 .explode('oseq').unnest('oseq').rename({'':'oseq'}).drop('counts')
     )
 
+    
+    print(f'umis with less than {min_cov} reads were discarded {(df["umi_reads"]<min_cov).sum()}')
+    df = df.filter(pl.col('umi_reads')>min_cov)
+    print('count matches for patterns')
     # count matches for a series of patterns
     df = (
-        df.with_columns([
+        
+        df
+        .lazy()
+        .with_columns([
             pl.col('seq').str.count_match('TSO').alias('tsos'),
             pl.col('seq').str.count_match('SCF1').alias('dss'),
             pl.col('seq').str.count_match('XXX').alias('sts'),
@@ -1363,61 +1405,144 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
             pl.col('seq').str.count_match('CNSCFL').alias('can'),
             pl.col('seq').str.count_match('WT').alias('wts'),
         ])
+        .collect()
      )
-    
+    print('compute look-ahead stats') 
     # compute look-ahead stats 
     df = (
-        df.with_columns([
+        df
+        .lazy()
+        .with_columns([
             pl.col('umi').n_unique().over(['cbc', 'raw_ibar']).alias('mols'), 
             pl.col('seq').n_unique().over(['cbc', 'raw_ibar']).alias('n_alleles'),
             #pl.col('seq').count().over(['cbc', 'raw_ibar']).alias('reads'),
             pl.col('raw_ibar').is_null().alias('offt'),
             pl.lit(batch).alias('sample_id'),
             ])
+            .collect()
     )
 
+    print('flag ibars') 
     # flag ibars 
     if valid_ibars is None:
         # determine valid ibars automatically
         print('determining number of valid ibars')
-        valid_ibars = return_valid_ibars_from_df(df, min_cells_per_ibar = 10, min_mols_per_ibar=1)
+
+        min_mols_per_ibar = 100
+        min_cells_per_ibar = int(total_cells*0.2)
+        print(f'{min_cells_per_ibar=} (20%)')
+        valid_ibars = return_valid_ibars_from_df(df, min_cells_per_ibar = min_cells_per_ibar, min_mols_per_ibar=min_mols_per_ibar)
     else:
         # they are provided:
         print('using provided intid wl')
 
+    print(f'{len(valid_ibars)=}')
+    
     df = df.with_column(pl.col('raw_ibar').is_in(valid_ibars).alias('valid_ibar'))
     #df = df.join(pl.DataFrame(wl), left_on='spacer', right_on='spacer', how='left') # <<< kalhor annotate
-
-    index =['u6s', 'sts', 'dss', 'can'] 
-    index =['u6s', 'can', 'dss'] 
-    columns = 'wts'
-    xxx = df.pivot(index=index, columns=columns, values='umi', aggregate_fn='count', sort_columns=True).sort(index)
-    rename_d =dict([(str(i), f'{columns}_{i}') for i in range(xxx.shape[1]-len(index))]) 
-
-    xxxp = (
-        xxx.rename(rename_d)
-        .to_pandas()
-        .set_index(index)
-        .apply(lambda x: 100*x/(df.shape[0]/1.0))
-        .fillna(0)
-          )
-    print(xxxp.apply(sum))
-    xxx = (
-        xxx.rename(rename_d)
-        .to_pandas()
-        .set_index(index)
-        .apply(lambda x: np.log10(x))
-        .fillna(0)
-    )    
-    if not do_plot:
-        return(df)
-    fig, axes = plt.subplots(1,2, dpi=60, figsize=(10, 12))
-    sns.heatmap(xxxp, annot=True, fmt='.1f', ax=axes[0], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
-    axes[0].set_title(batch)
-    sns.heatmap(xxx, annot=True, fmt='.1f', ax=axes[1], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
-    axes[1].set_title(batch)
-    plt.tight_layout()
-    return(df)
-    
     #print(xx.filter((pl.col('dss')==0) & (pl.col('u6s')==0) & (pl.col('tsos')==0)))
+
+    # get rid of off targets 
+    df = df.filter(~pl.col('offt'))
+    
+    # aggregate singe cell data at the allele level (dirty)
+    # - how many umis support a given allele (seq)
+    # - how many siblings are there? (alleles per integration in the same cell)
+    xx = ( 
+        df
+        .filter(pl.col('valid_ibar'))
+        .groupby(['cbc', 'raw_ibar', 'seq'])
+            .agg([
+                pl.col('umi').n_unique().alias('umis_seq') # <- this feels too high for my taste
+            ])
+            .with_columns(pl.col('seq').n_unique().over(['cbc', 'raw_ibar']).alias('n_sib'))
+        )
+
+    data = (
+        xx
+            .with_column(
+                    (
+                        (pl.col('seq').str.count_match('WT')==1)
+                        & 
+                        (pl.col('seq').str.contains('\[···WT···\]\[···CNSCFL···\]'))
+                    ).alias('wt')
+            )
+        )
+
+    fg = sns.catplot(data = data.to_pandas(), kind='boxen',
+        x='n_sib', y='umis_seq',  aspect=2,  row='wt')
+
+    for ax in fg.axes_dict.values():
+        ax.grid()
+    plt.figure()
+    
+    fg = sns.displot(data=data.to_pandas(), x='n_sib', y='umis_seq', binwidth=[1,10],aspect=1, col='wt', )
+
+    for ax in fg.axes_dict.values():
+        ax.set_xlim(0, 20)
+        ax.grid()
+
+    plt.figure()
+    #data = data.join(ib.load_wl(True), left_on='spacer', right_on='spacer', how='left')
+    with plt.rc_context({'figure.figsize':(10,10)}):
+        ax = sns.scatterplot(data=data.to_pandas(), x='n_sib', y='umis_seq', hue='wt', s=10)
+        ax.set_xlim(0, 20)
+        ax.grid()
+        ax.set_title(batch)
+
+    plt.figure()
+    fg = sns.catplot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas(), x='wt', y='umis_seq', kind='box')
+    fg.ax.set_title(batch)
+    fg.ax.grid()
+    #sns.displot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas()['wt'])
+    plt.yscale('log')
+
+    inspect = False
+    if inspect:
+        os.environ['POLARS_FMT_STR_LEN']='70'
+        print(data.filter(pl.col('n_sib')==6).sort(['cbc', 'raw_ibar']))
+
+    #####  ##### #####
+    # major filtering step where we keep the top ranking sequence as the final allele
+    data =  (
+        data
+        .sort('umis_seq', True)
+        .groupby(['cbc', 'raw_ibar'], maintain_order=True)
+        .head(1)
+    )
+    print("% wt")
+    print(data['wt'].mean())
+    print("F % wt")
+    print(data.filter(pl.col('umis_seq')>1)['wt'].mean())
+
+    plt.figure()
+    fg = sns.displot(data=data.to_pandas(), x='umis_seq', aspect=2, log_scale=10)
+    fg.ax.axvline(1.5, c='r')
+    fg.ax.set_title(batch)
+    fg.ax.grid()
+
+    # actually filter umis seen once
+    data = data.filter(pl.col('umis_seq')>1)
+    plt.figure()
+    fg = sns.displot(
+        data=data.groupby('raw_ibar').agg(pl.col('cbc').n_unique()).to_pandas(),
+        x = 'cbc', 
+        aspect = 1.5,
+        kind='kde', 
+        log_scale=10,
+        )
+    fg.ax.set_title(batch)
+    fg.ax.grid()
+    # open questions
+    # are we accounting for the G+?
+    # - no: [···TSO···]G[···WT···]
+    # - no: [···TSO···]GTGTAACTTAACACTGAGTG[···CNSCFL···] is non WT when it should
+    # why are umis per allele so high? are they really so high?
+    # analysis at the integration level (lineage tracing)
+    # cbc and umi corrections
+    # figure titles
+    # 
+    import rich 
+    rich.print(':vampire:')
+    return(data)
  
