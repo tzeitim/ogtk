@@ -1476,7 +1476,7 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         ax.grid()
     plt.figure()
     
-    fg = sns.displot(data=data.to_pandas(), x='n_sib', y='umis_seq', binwidth=[1,10],aspect=1, col='wt', )
+    fg = sns.displot(data=data.to_pandas(), x='n_sib', y='umis_seq', binwidth=[1,5],aspect=1, col='wt', )
 
     for ax in fg.axes_dict.values():
         ax.set_xlim(0, 20)
@@ -1537,10 +1537,11 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
     # are we accounting for the G+?
     # - no: [···TSO···]G[···WT···]
     # - no: [···TSO···]GTGTAACTTAACACTGAGTG[···CNSCFL···] is non WT when it should
-    # why are umis per allele so high? are they really so high?
+    # - probably this doesn't matter since we are going for the top seq
     # analysis at the integration level (lineage tracing)
+    # plot the fraction of the pool that a to top allele shows, instead of the raw umis_seq
+    # annotate with wl
     # cbc and umi corrections
-    # figure titles
     # 
     import rich 
     rich.print(':vampire:')
