@@ -1476,26 +1476,36 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         ax.grid()
     plt.figure()
     
-    fg = sns.displot(data=data.to_pandas(), x='n_sib', y='umis_seq', binwidth=[1,5],aspect=1, col='wt', )
+    fg = sns.displot(data=data.to_pandas(), 
+                x='n_sib', 
+                y='umis_seq', 
+                binwidth=[1,5],
+                cbar=True,
+                aspect=1, col='wt', hue='wt')
 
     for ax in fg.axes_dict.values():
-        ax.set_xlim(0, 20)
+        ax.set_xlim(0, 10)
         ax.grid()
 
     plt.figure()
     #data = data.join(ib.load_wl(True), left_on='spacer', right_on='spacer', how='left')
     with plt.rc_context({'figure.figsize':(10,10)}):
         ax = sns.scatterplot(data=data.to_pandas(), x='n_sib', y='umis_seq', hue='wt', s=10)
-        ax.set_xlim(0, 20)
+        #ax.set_xlim(0, 20)
         ax.grid()
         ax.set_title(batch)
+
+    plt.figure()
+    fg = sns.catplot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas(), x='wt', y='umis_seq', kind='boxen')
+    fg.ax.set_title(batch)
+    fg.ax.grid()
 
     plt.figure()
     fg = sns.catplot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas(), x='wt', y='umis_seq', kind='box')
     fg.ax.set_title(batch)
     fg.ax.grid()
-    #sns.displot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas()['wt'])
     plt.yscale('log')
+    #sns.displot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas()['wt'])
 
     inspect = False
     if inspect:
@@ -1519,6 +1529,13 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
     fg = sns.displot(data=data.to_pandas(), x='umis_seq', aspect=2, log_scale=10)
     fg.ax.axvline(1.5, c='r')
     fg.ax.set_title(batch)
+    fg.ax.set_yscale('log')
+    fg.ax.grid()
+
+    plt.figure()
+    fg = sns.displot(data=data.to_pandas(), x='umis_seq', aspect=2, log_scale=10)
+    fg.ax.axvline(1.5, c='r')
+    fg.ax.set_title(batch)
     fg.ax.grid()
 
     # actually filter umis seen once
@@ -1537,7 +1554,7 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
     # are we accounting for the G+?
     # - no: [···TSO···]G[···WT···]
     # - no: [···TSO···]GTGTAACTTAACACTGAGTG[···CNSCFL···] is non WT when it should
-    # - probably this doesn't matter since we are going for the top seq
+    # - probably this doesn't matter since we are going for the top seq, unless these cases are the dominant allele
     # analysis at the integration level (lineage tracing)
     # plot the fraction of the pool that a to top allele shows, instead of the raw umis_seq
     # annotate with wl
