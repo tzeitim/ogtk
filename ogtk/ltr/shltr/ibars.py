@@ -1069,6 +1069,7 @@ def zombie_fastq_df(tabix_ifn, sample_id, reads = int(5e5), return_encoded=False
         
         wl = load_wl()
         wts = "|".join(wl['spacer'])
+
         u6mx =  'GACGAAACACC' # 'GACGAAACACC'
         u6bk ="GGAAAGAAACACCG" # broken u6
         tso='TTTCTTATATGGG'
@@ -1077,6 +1078,7 @@ def zombie_fastq_df(tabix_ifn, sample_id, reads = int(5e5), return_encoded=False
         anch_scaf2 = 'GTTAACCTAA'
         can_spacer= "GGGTTAGAG"
         primer = "GGCTAGTCCGTTATCAACTTG"
+
         fuzzy_u6 =     fuzzy_match_str(u6mx, '.{0,1}')
         fuzzy_bu6 =     fuzzy_match_str(u6bk, '.{0,1}')
         fuzzy_tso =    fuzzy_match_str(tso, wildcard=".{0,1}")
@@ -1094,20 +1096,22 @@ def zombie_fastq_df(tabix_ifn, sample_id, reads = int(5e5), return_encoded=False
             .with_column(pl.col('seq').str.replace_all(f'.*?({fuzzy_tso})', '[···TSO···]'))
             .with_column(pl.col('seq').str.replace_all(f'.*({fuzzy_u6})', '[···U6···]'))
             .with_column(pl.col('seq').str.replace_all(f'.*({fuzzy_bu6})', '[···bU6···]'))
+            .with_column(pl.col('seq').str.extract(f'CTAGA(.{"{6}"})({fuzzy_dsibar})', 1).alias('ibar'))
             .with_column(pl.col('seq').str.replace_all(f'({anch_dsibar})', '[···SCF1···]'))
             .with_column(pl.col('seq').str.replace_all(f'({anch_scaf2})', '[···SCF2···]'))
             .with_column(pl.col('seq').str.replace_all(f'({can_spacer})', f'[···CNSCFL···]'))
+        .with_column(pl.col('seq').str.extract(f'({wts})', 1).alias('spacer'))
             .with_column(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
             .with_column(pl.col('seq').str.replace_all(f'({fuzzy_primer})', f'[···LIB···]'))
             .with_column(pl.col('seq').str.replace_all(f'\[···SCF2···\].+\[···LIB···\]', f'[···SCF2···][···LIB···]'))
 
-            .with_column(pl.col('seq').str.extract(f'(.{"{6}"})\[···SCF1···\]',1).alias('ibar'))
-            .with_column(pl.col('seq').str.replace_all(f'(\]{"CTAGA"})', '][···SCF0···]'))
+            #####.with_column(pl.col('seq').str.extract(f'(.{"{6}"})\[···SCF1···\]',1).alias('ibar'))
+            #####.with_column(pl.col('seq').str.replace_all(f'(\]{"CTAGA"})', '][···SCF0···]'))
             .with_column(pl.col('seq').str.replace_all(f'\[···SCF2···\]\[···LIB···\].+', '[END]'))
             .with_column(pl.col('seq').str.replace_all(f'{fuzzy_stammering}', '[XXX]'))
             .with_column(pl.col('seq').str.replace_all(f'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
             .drop(['qual', 'cbc', 'readid', 'start', 'end', 'umi'])
-            .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
+            #####.filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
             #.filter(pl.col('ibar')!='GGTGGA') # useless u6
             #.filter(pl.col('ibar')!='AAAGTA') # to do
             #.filter(pl.col('ibar')!='GGTCGT') # to do
@@ -1118,17 +1122,20 @@ def zombie_fastq_df(tabix_ifn, sample_id, reads = int(5e5), return_encoded=False
         
         data = (
                 kk
-                    
-                    .groupby('ibar')
-                        .agg([pl.col('seq').str.count_match('WT').value_counts(), pl.col('seq').count().alias('reads')])
-                                .explode('seq').unnest('seq').rename({'':'wt'})
-                        .filter(pl.col('ibar').str.contains('N').is_not())
-                    .filter(pl.col('wt')<2)
+                .groupby('ibar')
+                    .agg([pl.col('seq').str.count_match('WT').value_counts(), pl.col('seq').count().alias('reads')])
+                            .explode('seq').unnest('seq').rename({'':'wt'})
+                    .filter(pl.col('ibar').str.contains('N').is_not())
+                .filter(pl.col('wt')<2)
                 )
         data = (
                 data
                 .filter(pl.col('reads')>100).groupby(['ibar', 'wt'])
-                .agg((pl.col('counts')/pl.col('reads')).prefix('pc_')).explode('pc_counts')
+                .agg(
+                    [(pl.col('counts')/pl.col('reads')).alias('fraction'),
+                    pl.col('reads').sum()
+                    ])
+                    .explode('fraction')
                 )
         data = data.with_column(pl.lit(sample_id).alias('sample_id'))
         return(data)
@@ -1141,18 +1148,77 @@ def pl_tabix_to_df(tbx_ifn, sample = False):
     df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
     return(df)
 
-def pl_fastq_to_df(fastq_ifn):
+def pl_fastq_to_df(fastq_ifn, rc=False, end = None, export = False):
     ''' unfinished since the real need is about paired fastqs
     '''
     step = 4
-    df = pl.read_csv(fastq_ifn)
+    if end is not None:
+        end = int(end*4)
+    df = pl.read_csv(fastq_ifn, has_header=False, n_rows = end, sep='\n')
+    fastq_fields = ['rid', 'seq', 'plus', 'qual']
+    df = (
+            df.with_column(
+            (pl.arange(0, pl.count()) // step).alias("step")
+            ).groupby("step", maintain_order=True)
+        .agg([
+        pl.col("column_1").take(i).alias(name) for i, name in enumerate(fastq_fields)
+        ])
+        .drop(['step', 'plus'])
+        )
+    df = df.lazy().with_column(pl.col('rid').str.replace("^@", "")).collect()
+    if rc:
+        df = (df
+                .lazy()
+                .with_columns([
+                    pl.col('seq')
+                        .str.split('')
+                        .arr.reverse()
+                        .arr.join('')
+                        .str.replace_all('A', 't')
+                        .str.replace_all('C', 'g')
+                        .str.replace_all('G', 'c')
+                        .str.replace_all('T', 'a')
+                        .str.to_uppercase(),
+                    pl.col('qual')
+                        .str.split('')
+                        .arr.reverse()
+                        .arr.join('')
+                    ])
+                .collect()
+            )
+    if export:
+        parquet_fn = fastq_ifn+'.parquet'
+        print(parquet_fn)
+        df.write_parquet(parquet_ifn)
+    else:
+        return(df)
 
-    df = (df.with_column(
-        (pl.arange(0, pl.count()) // step).alias("step")
-    ).groupby("step", maintain_order=True)
-    .agg([
-        pl.col("a").take(i).alias(name) for i, name in enumerate(["first", "second", "third"])
-    ]))
+def pl_10xfastq_to_df(fastq_ifn, end = None, sample=None, export = False):
+    ''' Converts a pair of 10x-derived fastq files into a polars data frame
+    unfinished since the real need is about paired fastqs
+    
+    This version keeps read1 as is while reverse complementing read2
+    
+    --
+    Performance notes:
+    The difference in performance among concat vs join is negligible at 1e6 reads
+     28.7 s for 'concat'
+     28.6? s for 'join'
+     since join guarantees that the reads are in the right order it is preferable
+    --
+    '''
+    read1 = pl_fastq_to_df(fastq_ifn, end=end, export = False)
+    read2 = pl_fastq_to_df(fastq_ifn.replace('_R1_', '_R2_'), rc=True, end=end, export = False)
+
+    read1 = read1.join(read2.with_column(pl.col('rid').str.replace(" 2:N:", " 1:N:")), left_on='rid', right_on='rid')
+    read1 = read1.rename({'seq':'r1_seq', "qual":"r1_qual", "seq_right":"r2_seq", "qual_right":"r2_qual"})
+
+    if export:
+        parquet_fn = fastq_ifn+'.parquet'
+        print(parquet_fn)
+        read1.write_parquet(parquet_ifn)
+    else:
+        return(read1)
 
 def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, slow=False):
     '''
@@ -1277,17 +1343,14 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, 
     )
     return(df)
 
-def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot=False, encode = False, valid_ibars = None, min_cov=2):
-    ''' input is pl fastq
-        this function doesn't encode, it just counts occurences of patterns
+def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot=False, encode = False, valid_ibars = None, min_cov=2, sample=None, plot=False, return_encoded_reads=False):
+    ''' input is pl-fastq
         df= pl.read_parquet('/local/users/polivar/src/artnilet//datain/20211217_scv2/direct_B3_shRNA_S11.sorted.top.parquet')
     '''
-    if all(i is None for i in [df, parquet_ifn]):
-        raise ValueError("you need to provice parquet_ifn or a pl")
-    if df is None:
-        df = pl.read_parquet(parquet_ifn).drop(['readid', 'qual' , 'start', 'end'])
 
-    wl = load_wl()
+    import rich 
+    rich.print(f'[red]{batch}')
+    wl = load_wl(True)
     wts = "|".join(wl['spacer'])
     
     u6mx = 'GACGAAACACC' # 'GACGAAACACC'
@@ -1313,9 +1376,23 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
     else:
         fuzzy_canspa=  fuzzy_match_str(canscaf, wildcard="") # ?? used to be a wildcard='.'
 
+
+    ####
+    if all(i is None for i in [df, parquet_ifn]):
+        raise ValueError("you need to provide parquet_ifn or a pl")
+
+
+    if df is None:
+        if sample is not None:
+            df =pl.read_parquet(parquet_ifn).sample(sample).drop(['readid', 'qual' , 'start', 'end'])
+        else:
+            df = pl.read_parquet(parquet_ifn).drop(['readid', 'qual' , 'start', 'end'])
+
     print(f'total_reads={df.shape[0]}')
     total_cells =df["cbc"].n_unique() 
     print(f'{total_cells=}')
+
+
     # It is faster to use fuzzy matching once so we encode first and then count
     df = (
         df
@@ -1324,6 +1401,7 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         .with_column(pl.col('seq').str.replace_all(f'.*?({fuzzy_tso})', '[···TSO···]'))
         .with_column(pl.col('seq').str.replace_all(f'.*({fuzzy_u6})', '[···U6···]'))
         .with_column(pl.col('seq').str.replace_all(f'.*({fuzzy_bu6})', '[···bU6···]'))
+        .with_column(pl.col('seq').str.extract(f'CTAGA(.{"{6}"})({fuzzy_dsibar})', 1).alias('raw_ibar'))
         .with_column(pl.col('seq').str.replace_all(f'({fuzzy_dsibar})', '[···SCF1···]'))
         .with_column(pl.col('seq').str.replace_all(f'({fuzzy_scaff2})', '[···SCF2···]'))
         .with_column(pl.col('seq').str.replace_all(f'({canscaf})', f'[···CNSCFL···]'))
@@ -1331,8 +1409,8 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         .with_column(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
         .with_column(pl.col('seq').str.replace_all(f'({fuzzy_primer})', f'[···LIB···]'))
         .with_column(pl.col('seq').str.replace_all(f'\[···SCF2···\].+\[···LIB···\]', f'[···SCF2···][···LIB···]'))
-        .with_column(pl.col('seq').str.extract(f'([A-Z]{"{6}"})\[···SCF1···\]',1).alias('raw_ibar'))
-        .with_column(pl.col('seq').str.replace_all(f'(\]{"CTAGA"})', '][···SCF0···]'))
+        #.with_column(pl.col('seq').str.extract(f'([A-Z]{"{6}"})\[···SCF1···\]',1).alias('raw_ibar'))
+        #i######.with_column(pl.col('seq').str.replace_all(f'(\]{"CTAGA"})', '][···SCF0···]'))
         .with_column(pl.col('seq').str.replace_all(f'\[···SCF2···\]\[···LIB···\].+', '[END]'))
         .with_column(pl.col('seq').str.replace_all(f'{fuzzy_stammering}', '[XXX]'))
         .with_column(pl.col('seq').str.replace_all(f'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
@@ -1340,6 +1418,8 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
   #      .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
     ).collect()
 
+    if return_encoded_reads:
+        return(df)
     ### read level QC of patterns
     ####### TODO verify its functionality
     read_qc = False
@@ -1389,7 +1469,7 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
 
     
     print(f'umis with less than {min_cov} reads were discarded {(df["umi_reads"]<min_cov).sum()}')
-    df = df.filter(pl.col('umi_reads')>min_cov)
+    df = df.filter(pl.col('umi_reads')>=min_cov)
     print('count matches for patterns')
     # count matches for a series of patterns
     df = (
@@ -1404,6 +1484,7 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
             pl.col('seq').str.count_match('bU6').alias('bu6s'),
             pl.col('seq').str.count_match('CNSCFL').alias('can'),
             pl.col('seq').str.count_match('WT').alias('wts'),
+            pl.col('spacer'),
         ])
         .collect()
      )
@@ -1417,7 +1498,6 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
             pl.col('seq').n_unique().over(['cbc', 'raw_ibar']).alias('n_alleles'),
             #pl.col('seq').count().over(['cbc', 'raw_ibar']).alias('reads'),
             pl.col('raw_ibar').is_null().alias('offt'),
-            pl.lit(batch).alias('sample_id'),
             ])
             .collect()
     )
@@ -1439,7 +1519,6 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
     print(f'{len(valid_ibars)=}')
     
     df = df.with_column(pl.col('raw_ibar').is_in(valid_ibars).alias('valid_ibar'))
-    #df = df.join(pl.DataFrame(wl), left_on='spacer', right_on='spacer', how='left') # <<< kalhor annotate
     #print(xx.filter((pl.col('dss')==0) & (pl.col('u6s')==0) & (pl.col('tsos')==0)))
 
     # get rid of off targets 
@@ -1448,10 +1527,10 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
     # aggregate singe cell data at the allele level (dirty)
     # - how many umis support a given allele (seq)
     # - how many siblings are there? (alleles per integration in the same cell)
-    xx = ( 
+    data = ( 
         df
         .filter(pl.col('valid_ibar'))
-        .groupby(['cbc', 'raw_ibar', 'seq'])
+        .groupby(['cbc', 'raw_ibar', 'seq', 'spacer'])
             .agg([
                 pl.col('umi').n_unique().alias('umis_seq') # <- this feels too high for my taste
             ])
@@ -1459,7 +1538,7 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         )
 
     data = (
-        xx
+        data
             .with_column(
                     (
                         (pl.col('seq').str.count_match('WT')==1)
@@ -1469,43 +1548,44 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
             )
         )
 
-    fg = sns.catplot(data = data.to_pandas(), kind='boxen',
-        x='n_sib', y='umis_seq',  aspect=2,  row='wt')
+    if plot:
+        fg = sns.catplot(data = data.to_pandas(), kind='boxen',
+            x='n_sib', y='umis_seq',  aspect=2,  row='wt')
 
-    for ax in fg.axes_dict.values():
-        ax.grid()
-    plt.figure()
-    
-    fg = sns.displot(data=data.to_pandas(), 
-                x='n_sib', 
-                y='umis_seq', 
-                binwidth=[1,5],
-                cbar=True,
-                aspect=1, col='wt', hue='wt')
+        for ax in fg.axes_dict.values():
+            ax.grid()
+        plt.figure()
+        
+        fg = sns.displot(data=data.to_pandas(), 
+                    x='n_sib', 
+                    y='umis_seq', 
+                    binwidth=[1,5],
+                    cbar=True,
+                    aspect=1, col='wt', hue='wt')
 
-    for ax in fg.axes_dict.values():
-        ax.set_xlim(0, 10)
-        ax.grid()
+        for ax in fg.axes_dict.values():
+            ax.set_xlim(0, 10)
+            ax.grid()
 
-    plt.figure()
-    #data = data.join(ib.load_wl(True), left_on='spacer', right_on='spacer', how='left')
-    with plt.rc_context({'figure.figsize':(10,10)}):
-        ax = sns.scatterplot(data=data.to_pandas(), x='n_sib', y='umis_seq', hue='wt', s=10)
-        #ax.set_xlim(0, 20)
-        ax.grid()
-        ax.set_title(batch)
+        plt.figure()
+        #data = data.join(ib.load_wl(True), left_on='spacer', right_on='spacer', how='left')
+        with plt.rc_context({'figure.figsize':(10,10)}):
+            ax = sns.scatterplot(data=data.to_pandas(), x='n_sib', y='umis_seq', hue='wt', s=10)
+            #ax.set_xlim(0, 20)
+            ax.grid()
+            ax.set_title(batch)
 
-    plt.figure()
-    fg = sns.catplot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas(), x='wt', y='umis_seq', kind='boxen')
-    fg.ax.set_title(batch)
-    fg.ax.grid()
+        plt.figure()
+        fg = sns.catplot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas(), x='wt', y='umis_seq', kind='boxen')
+        fg.ax.set_title(batch)
+        fg.ax.grid()
 
-    plt.figure()
-    fg = sns.catplot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas(), x='wt', y='umis_seq', kind='box')
-    fg.ax.set_title(batch)
-    fg.ax.grid()
-    plt.yscale('log')
-    #sns.displot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas()['wt'])
+        plt.figure()
+        fg = sns.catplot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas(), x='wt', y='umis_seq', kind='box')
+        fg.ax.set_title(batch)
+        fg.ax.grid()
+        plt.yscale('log')
+        #sns.displot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas()['wt'])
 
     inspect = False
     if inspect:
@@ -1513,43 +1593,153 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         print(data.filter(pl.col('n_sib')==6).sort(['cbc', 'raw_ibar']))
 
     #####  ##### #####
-    # major filtering step where we keep the top ranking sequence as the final allele
+    ## annotate with kalhor db
+    print('annotate with kalhor db')
+    kalhor_map = (data.filter(pl.col('wt'))
+                .select(['raw_ibar', 'spacer']).unique()
+                .join(wl, left_on='spacer', right_on='spacer', how='left')
+            )       
+    data = (data
+            .join(kalhor_map, left_on='raw_ibar', right_on='raw_ibar', how='left')
+            .drop('spacer_right')
+            ) # <<< kalhor annotate
+    
+    #####  ##### #####
+    # major collapse event where we keep the top ranking sequence as the final allele
     data =  (
         data
         .sort('umis_seq', True)
         .groupby(['cbc', 'raw_ibar'], maintain_order=True)
         .head(1)
     )
-    print("% wt")
-    print(data['wt'].mean())
-    print("F % wt")
-    print(data.filter(pl.col('umis_seq')>1)['wt'].mean())
+    rich.print(f"%wt {data['wt'].mean() *100:.2f}")
+    rich.print(f"%wt {data.filter(pl.col('umis_seq')>1)['wt'].mean()*100 :.2f} F")
 
-    plt.figure()
-    fg = sns.displot(data=data.to_pandas(), x='umis_seq', aspect=2, log_scale=10)
-    fg.ax.axvline(1.5, c='r')
-    fg.ax.set_title(batch)
-    fg.ax.set_yscale('log')
-    fg.ax.grid()
+    if plot:
+        plt.figure()
+        fg = sns.displot(data=data.to_pandas(), x='umis_seq', aspect=2, log_scale=10)
+        fg.ax.axvline(1.5, c='r')
+        fg.ax.set_title(batch)
+        fg.ax.set_yscale('log')
+        fg.ax.grid()
 
-    plt.figure()
-    fg = sns.displot(data=data.to_pandas(), x='umis_seq', aspect=2, log_scale=10)
-    fg.ax.axvline(1.5, c='r')
-    fg.ax.set_title(batch)
-    fg.ax.grid()
+        plt.figure()
+        fg = sns.displot(data=data.to_pandas(), x='umis_seq', aspect=2, log_scale=10)
+        fg.ax.axvline(1.5, c='r')
+        fg.ax.set_title(batch)
+        fg.ax.grid()
 
     # actually filter umis seen once
     data = data.filter(pl.col('umis_seq')>1)
+    if plot:
+        plt.figure()
+        fg = sns.displot(
+            data=data.groupby('raw_ibar').agg(pl.col('cbc').n_unique()).to_pandas(),
+            x = 'cbc', 
+            aspect = 1.5,
+            kind='kde', 
+            log_scale=10,
+            )
+        fg.ax.set_title(batch)
+        fg.ax.grid()
+
+
+        fg = sns.displot(data=data.groupby('cbc').count().to_pandas(), x='count', kind='ecdf', aspect=1.0)
+        fg.ax.grid()
+        fg.ax.set_title(f'{batch} ibars per cell')
+
+        fg = sns.displot(data=data.groupby('raw_ibar').count().to_pandas(), x='count', kind='ecdf', aspect=1.0)
+        fg.ax.grid()
+        fg.ax.set_title(f'{batch} cells per ibar')
+
+        fg = sns.catplot(data=data.groupby('cbc').count().to_pandas(), y='count', kind='boxen', aspect=0.5)
+        fg.ax.grid()
+        fg.ax.set_title(f'{batch} ibars per cell')
+        fg.ax.set_ylim([0, fg.ax.get_ylim()[1]])
+
+        fg = sns.catplot(data=data.groupby('raw_ibar').count().to_pandas(), y='count', kind='boxen', aspect=0.5)
+        fg.ax.grid()
+        fg.ax.set_title(f'{batch} cells per ibar')
+        fg.ax.set_ylim([0, fg.ax.get_ylim()[1]])
+
+        fg = sns.catplot(data=data.groupby('cbc').count().with_column(pl.col('count')/len(valid_ibars)).to_pandas(), y='count', kind='boxen', aspect=0.5)
+        fg.ax.grid()
+        fg.ax.set_title(f'{batch} ibars per cell')
+        fg.ax.set_ylim([0, fg.ax.get_ylim()[1]])
+
+        fg = sns.catplot(data=data.groupby('raw_ibar').count().with_column(pl.col('count')/total_cells).to_pandas(), y='count', kind='boxen', aspect=0.5)
+        fg.ax.grid()
+        fg.ax.set_title(f'{batch} cells per ibar')
+        fg.ax.set_ylim([0, fg.ax.get_ylim()[1]])
+
+    rich.print(f"median ibars·per·cell {data.groupby('cbc').count().with_column(pl.col('count'))['count'].median()}")
+    rich.print(f"fraction of ibars covered {data.groupby('cbc').count().with_column(pl.col('count')/len(valid_ibars))['count'].median()*100:.2f}%")
+    rich.print(f"median cells·per·ibar {data.groupby('raw_ibar').count().with_column(pl.col('count'))['count'].median()}")
+    rich.print(f"fraction of cells covered {data.groupby('raw_ibar').count().with_column(pl.col('count')/total_cells)['count'].median()*100:.2f}%")
+
+    
+    if False:
+        mat = data.pivot(columns='raw_ibar', index='cbc', values='umis_seq')
+        dd = dict(zip(*data.select(['raw_ibar', 'nspeed']).unique()))
+        speed_sort = np.argsort([dd[i] for i  in mat.columns if i in dd.keys()])
+        np.array([dd[i] for i  in mat.columns if i in dd.keys()])[speed_sort]
+        plt.figure()
+        mapp = plt.pcolormesh(mat.drop('cbc').select(pl.all().log10()).to_numpy()[:,speed_sort])
+        plt.colorbar(mapp)
+
     plt.figure()
-    fg = sns.displot(
-        data=data.groupby('raw_ibar').agg(pl.col('cbc').n_unique()).to_pandas(),
-        x = 'cbc', 
-        aspect = 1.5,
-        kind='kde', 
-        log_scale=10,
-        )
+    fg = sns.catplot(
+            data=data
+                    .groupby(['raw_ibar', 'speed'])
+                    .agg(pl.col('cbc').count())
+                    .to_pandas(),
+            y='cbc', 
+            x='speed', 
+            kind='boxen')
+    fg.ax.set_ylim((0, total_cells))
     fg.ax.set_title(batch)
     fg.ax.grid()
+    
+    plt.figure()
+    fg = sns.catplot(
+            data=data
+                    .groupby(['raw_ibar', 'speed'])
+                    .agg(pl.col('cbc').count()/total_cells)
+                    .to_pandas(),
+            y='cbc', 
+            x='speed', 
+            kind='boxen')
+    fg.ax.set_ylim((0,1))
+    fg.ax.set_title(batch)
+    fg.ax.grid()
+
+    plt.figure()
+    fg = sns.catplot(
+            data=data
+                    .groupby(['raw_ibar', 'speed'])
+                    .agg(pl.col('cbc').count()/total_cells)
+                    .to_pandas(),
+            y='cbc', 
+            x='speed', 
+            alpha=0.8)
+    fg.ax.set_ylim((0,1))
+    fg.ax.set_title(batch)
+    fg.ax.grid()
+
+
+    fg = sns.catplot(
+            data=data
+                    .groupby(['raw_ibar', 'speed', 'wt'])
+                    .agg([pl.col('cbc').count(), pl.col('umis_seq').mean()])
+                    .to_pandas(),
+            y='umis_seq', 
+            x='speed', 
+            hue='wt',
+            kind='boxen')
+    fg.ax.grid()
+    fg.ax.set_title(batch)
+
+#fg.ax.set_ylim((0,1))
     # open questions
     # are we accounting for the G+?
     # - no: [···TSO···]G[···WT···]
@@ -1559,8 +1749,21 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
     # plot the fraction of the pool that a to top allele shows, instead of the raw umis_seq
     # annotate with wl
     # cbc and umi corrections
-    # 
-    import rich 
+    # single cell stats (ibars recovered)
+    # cells per ibar as ecdf
+    # cells per ibar as ecdf/boxen but normalized
+    # keep static list of ibars
+
+
     rich.print(':vampire:')
+    print(data.head())
+    data = (data
+       .with_column(pl.lit(batch).alias('sample_id'))
+       .with_column(pl.col('speed').cast(pl.Utf8))
+       .with_column(pl.col('raw_ibar').cast(pl.Utf8))
+       .with_column(pl.col('cbc').cast(pl.Utf8))
+       .with_column(pl.col('sample_id').cast(pl.Utf8))
+       .with_column(pl.col('diversity').cast(pl.Utf8))
+        )
     return(data)
  
