@@ -240,14 +240,16 @@ class matlin():
         aa = self.df.loc[cells].iloc[:,intid].apply(lambda x: x.value_counts())
 
         if axes is None:
-            fig, axes = plt.subplots(1,2)
+            fig, axes = plt.subplots(2,1)
 
         for i in axes:
             i.set_facecolor("#fafafafa")
             i.set_axisbelow(True)
 
+        #return(aa)
         aa.transpose().plot(kind='bar', stacked = True, legend = False, color = color, ax = axes[0])
         axes[0].grid(axis='y')
+        
         aa[[not(i == self.non_inf['wt'] or i == self.non_inf['NA']) for i in  aa.index]].transpose().plot(kind='bar', legend = False, stacked = True, color = color, ax = axes[1])
         axes[1].grid(axis='y')
 
@@ -324,6 +326,17 @@ class matlin():
         x = x * bints
         return(range(x, x+bints))
 
+
+    def ingest_ibars_csv(self, ifn):
+        self.df  = pd.read_csv(ifn).set_index('cbc')
+        self.df = self.df.fillna(self.non_inf['NA'], inplace = False)
+        self.intid_len = self.df.shape[1]
+        f_wt = self.df==".."
+        self.df[f_wt] = self.non_inf["wt"]
+
+        self.ibar_to_bint = dict([(f'bint{i}',v) for i,v in enumerate(self.df.columns)])
+        self.df.columns = [f'bint{i}' for i in range(self.df.shape[1])]
+
     def __read_table(self, ifn, omit_mm = True):
         tt  = pd.read_table(ifn, header=None)
         # TODO add headers to files since the pre-processing step
@@ -343,7 +356,6 @@ class matlin():
 
     def __omit_mm(self, bc):
         ''' Omits mismatch element from a barcode of the format mm.ins.del'''
-        bcs = bc.split('.')
         return(F'.{bcs[1]}.{bcs[2]}')
 
     def __encode_mat(self):

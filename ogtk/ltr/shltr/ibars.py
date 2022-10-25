@@ -1194,7 +1194,10 @@ def pl_fastq_to_df(fastq_ifn, rc=False, end = None, export = False):
         return(df)
 
 def pl_10xfastq_to_df(fastq_ifn, end = None, sample=None, export = False):
-    ''' Converts a pair of 10x-derived fastq files into a polars data frame
+    ''' 
+    DON'T USE THIS - IS IS INSANELY BAD IN TERMS OF MEMORY
+
+    Converts a pair of 10x-derived fastq files into a polars data frame
     unfinished since the real need is about paired fastqs
     
     This version keeps read1 as is while reverse complementing read2
@@ -1203,15 +1206,16 @@ def pl_10xfastq_to_df(fastq_ifn, end = None, sample=None, export = False):
     Performance notes:
     The difference in performance among concat vs join is negligible at 1e6 reads
      28.7 s for 'concat'
-     28.6? s for 'join'
+     28.6 s for 'join'
      since join guarantees that the reads are in the right order it is preferable
     --
     '''
     read1 = pl_fastq_to_df(fastq_ifn, end=end, export = False)
     read2 = pl_fastq_to_df(fastq_ifn.replace('_R1_', '_R2_'), rc=True, end=end, export = False)
 
-    read1 = read1.join(read2.with_column(pl.col('rid').str.replace(" 2:N:", " 1:N:")), left_on='rid', right_on='rid')
-    read1 = read1.rename({'seq':'r1_seq', "qual":"r1_qual", "seq_right":"r2_seq", "qual_right":"r2_qual"})
+    #read1 = read1.join(read2.with_column(pl.col('rid').str.replace(" 2:N:", " 1:N:")), left_on='rid', right_on='rid')
+    read1 = pl.concat([read1, read2])
+    #read1 = read1.rename({'seq':'r1_seq', "qual":"r1_qual", "seq_right":"r2_seq", "qual_right":"r2_qual"})
 
     if export:
         parquet_fn = fastq_ifn+'.parquet'
