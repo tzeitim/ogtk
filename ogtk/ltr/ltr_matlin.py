@@ -126,6 +126,9 @@ class matlin():
         print(f'dist matrix computed {self.dist.shape}')
 
     def hclust(self, condense = True, method = 'ward', optimal_ordering = False):
+        '''
+        perform hierarchical clustering. By default a `fastcluster` command is invoked. if optimal_ordering is True then a slower modality using `scipy.cluster.hierarchy.linkage` is used. 
+        '''
         if condense:
             dist = pdist(self.dist)
         else:
@@ -136,7 +139,7 @@ class matlin():
         if optimal_ordering:
             Z = hierarchy.linkage(dist,method=method, optimal_ordering=optimal_ordering)
         else:
-            Z = fastcluster.linkage(dist)
+            Z = fastcluster.linkage(dist, method=method)
 
         zl = hierarchy.leaves_list(Z)
 
@@ -327,7 +330,7 @@ class matlin():
         return(range(x, x+bints))
 
 
-    def ingest_ibars_csv(self, ifn):
+    def ingest_ibars_csv(self, ifn, encode_mat=True):
         self.df  = pd.read_csv(ifn).set_index('cbc')
         self.df = self.df.fillna(self.non_inf['NA'], inplace = False)
         self.intid_len = self.df.shape[1]
@@ -336,6 +339,9 @@ class matlin():
 
         self.ibar_to_bint = dict([(f'bint{i}',v) for i,v in enumerate(self.df.columns)])
         self.df.columns = [f'bint{i}' for i in range(self.df.shape[1])]
+
+        if encode_mat:
+            self.__encode_mat()
 
     def __read_table(self, ifn, omit_mm = True):
         tt  = pd.read_table(ifn, header=None)
