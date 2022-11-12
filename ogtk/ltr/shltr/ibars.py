@@ -981,7 +981,6 @@ def export_ibar_mols_to_matlin(rin, sample_id ='h1e11'):
                     .then(pl.col('seq'))
                     .otherwise("..").alias('seq'))
         .sort(['nspeed','kalhor_id'])
-        .pivot(columns='ibar', index='cbc', values="seq")
         )
     tt.write_csv(out_fn, has_header=True)
     return(tt)
@@ -1347,9 +1346,11 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, 
     )
     return(df)
 
-def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot=False, encode = False, valid_ibars = None, min_cov=2, sample=None, plot=False, return_encoded_reads=False):
+def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot=False, encode = False, valid_ibars = None, min_cov=2, sample=None, plot=False, return_encoded_reads=False, unfiltered=False, **kwargs):
     ''' input is pl-fastq
         df= pl.read_parquet('/local/users/polivar/src/artnilet//datain/20211217_scv2/direct_B3_shRNA_S11.sorted.top.parquet')
+        UMIS with less than `min_cov` reads are filtered out
+
     '''
 
     import rich 
@@ -1426,7 +1427,11 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         return(df)
     ### read level QC of patterns
     ####### TODO verify its functionality
-    read_qc = False
+    if 'read_qc' in kwargs.keys():
+        read_qc = kwargs['read_qc']
+    else:
+        read_qc = False
+
     if read_qc:
         index =['u6s', 'sts', 'dss', 'can'] 
         index =['u6s', 'can', 'dss'] 
@@ -1614,10 +1619,11 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         data
         .sort('umis_seq', True)
         .groupby(['cbc', 'raw_ibar'], maintain_order=True)
-        .head(1)
+        .head(1) # <- this is it!
     )
+    
     rich.print(f"%wt {data['wt'].mean() *100:.2f}")
-    rich.print(f"%wt {data.filter(pl.col('umis_seq')>1)['wt'].mean()*100 :.2f} F")
+    rich.print(f"%wt {data.filter(pl.col('umis_seq')>0)['wt'].mean()*100 :.2f} F")
 
     if plot:
         plt.figure()
@@ -1634,7 +1640,8 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         fg.ax.grid()
 
     # actually filter umis seen once
-    data = data.filter(pl.col('umis_seq')>1)
+    if not unfiltered:
+        data = data.filter(pl.col('umis_seq')>1)
     if plot:
         plt.figure()
         fg = sns.displot(
@@ -1676,10 +1683,10 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         fg.ax.set_title(f'{batch} cells per ibar')
         fg.ax.set_ylim([0, fg.ax.get_ylim()[1]])
 
-    rich.print(f"median ibars·per·cell {data.groupby('cbc').count().with_column(pl.col('count'))['count'].median()}")
-    rich.print(f"fraction of ibars covered {data.groupby('cbc').count().with_column(pl.col('count')/len(valid_ibars))['count'].median()*100:.2f}%")
-    rich.print(f"median cells·per·ibar {data.groupby('raw_ibar').count().with_column(pl.col('count'))['count'].median()}")
-    rich.print(f"fraction of cells covered {data.groupby('raw_ibar').count().with_column(pl.col('count')/total_cells)['count'].median()*100:.2f}%")
+    #rich.print(f"median ibars·per·cell {data.groupby('cbc').count().with_column(pl.col('count'))['count'].median()}")
+    #rich.print(f"fraction of ibars covered {data.groupby('cbc').count().with_column(pl.col('count')/len(valid_ibars))['count'].median()*100:.2f}%")
+    #rich.print(f"median cells·per·ibar {data.groupby('raw_ibar').count().with_column(pl.col('count'))['count'].median()}")
+    #rich.print(f"fraction of cells covered {data.groupby('raw_ibar').count().with_column(pl.col('count')/total_cells)['count'].median()*100:.2f}%")
 
     
     if False:
@@ -1691,72 +1698,73 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         mapp = plt.pcolormesh(mat.drop('cbc').select(pl.all().log10()).to_numpy()[:,speed_sort])
         plt.colorbar(mapp)
 
-    plt.figure()
-    fg = sns.catplot(
-            data=data
-                    .groupby(['raw_ibar', 'speed'])
-                    .agg(pl.col('cbc').count())
-                    .to_pandas(),
-            y='cbc', 
-            x='speed', 
-            kind='boxen')
-    fg.ax.set_ylim((0, total_cells))
-    fg.ax.set_title(batch)
-    fg.ax.grid()
-    
-    plt.figure()
-    fg = sns.catplot(
-            data=data
-                    .groupby(['raw_ibar', 'speed'])
-                    .agg(pl.col('cbc').count()/total_cells)
-                    .to_pandas(),
-            y='cbc', 
-            x='speed', 
-            kind='boxen')
-    fg.ax.set_ylim((0,1))
-    fg.ax.set_title(batch)
-    fg.ax.grid()
+    if do_plot:
+        plt.figure()
+        fg = sns.catplot(
+                data=data
+                        .groupby(['raw_ibar', 'speed'])
+                        .agg(pl.col('cbc').count())
+                        .to_pandas(),
+                y='cbc', 
+                x='speed', 
+                kind='boxen')
+        fg.ax.set_ylim((0, total_cells))
+        fg.ax.set_title(batch)
+        fg.ax.grid()
+        
+        plt.figure()
+        fg = sns.catplot(
+                data=data
+                        .groupby(['raw_ibar', 'speed'])
+                        .agg(pl.col('cbc').count()/total_cells)
+                        .to_pandas(),
+                y='cbc', 
+                x='speed', 
+                kind='boxen')
+        fg.ax.set_ylim((0,1))
+        fg.ax.set_title(batch)
+        fg.ax.grid()
 
-    plt.figure()
-    fg = sns.catplot(
-            data=data
-                    .groupby(['raw_ibar', 'speed'])
-                    .agg(pl.col('cbc').count()/total_cells)
-                    .to_pandas(),
-            y='cbc', 
-            x='speed', 
-            alpha=0.8)
-    fg.ax.set_ylim((0,1))
-    fg.ax.set_title(batch)
-    fg.ax.grid()
+        plt.figure()
+        fg = sns.catplot(
+                data=data
+                        .groupby(['raw_ibar', 'speed'])
+                        .agg(pl.col('cbc').count()/total_cells)
+                        .to_pandas(),
+                y='cbc', 
+                x='speed', 
+                alpha=0.8)
+        fg.ax.set_ylim((0,1))
+        fg.ax.set_title(batch)
+        fg.ax.grid()
 
 
-    fg = sns.catplot(
-            data=data
-                    .groupby(['raw_ibar', 'speed', 'wt'])
-                    .agg([pl.col('cbc').count(), pl.col('umis_seq').mean()])
-                    .to_pandas(),
-            y='umis_seq', 
-            x='speed', 
-            hue='wt',
-            kind='boxen')
-    fg.ax.grid()
-    fg.ax.set_title(batch)
+        fg = sns.catplot(
+                data=data
+                        .groupby(['raw_ibar', 'speed', 'wt'])
+                        .agg([pl.col('cbc').count(), pl.col('umis_seq').mean()])
+                        .to_pandas(),
+                y='umis_seq', 
+                x='speed', 
+                hue='wt',
+                kind='boxen')
+        fg.ax.grid()
+        fg.ax.set_title(batch)
 
-#fg.ax.set_ylim((0,1))
-    # open questions
-    # are we accounting for the G+?
-    # - no: [···TSO···]G[···WT···]
-    # - no: [···TSO···]GTGTAACTTAACACTGAGTG[···CNSCFL···] is non WT when it should
-    # - probably this doesn't matter since we are going for the top seq, unless these cases are the dominant allele
-    # analysis at the integration level (lineage tracing)
-    # plot the fraction of the pool that a to top allele shows, instead of the raw umis_seq
-    # annotate with wl
-    # cbc and umi corrections
-    # single cell stats (ibars recovered)
-    # cells per ibar as ecdf
-    # cells per ibar as ecdf/boxen but normalized
-    # keep static list of ibars
+    #fg.ax.set_ylim((0,1))
+        # open questions
+        # are we accounting for the G+?
+        # - no: [···TSO···]G[···WT···]
+        # - no: [···TSO···]GTGTAACTTAACACTGAGTG[···CNSCFL···] is non WT when it should
+        # - probably this doesn't matter since we are going for the top seq, unless these cases are the dominant allele
+        # analysis at the integration level (lineage tracing)
+        # plot the fraction of the pool that a to top allele shows, instead of the raw umis_seq
+        # annotate with wl
+        # cbc and umi corrections
+        # single cell stats (ibars recovered)
+        # cells per ibar as ecdf
+        # cells per ibar as ecdf/boxen but normalized
+        # keep static list of ibars
 
 
     rich.print(':vampire:')
@@ -1771,3 +1779,54 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         )
     return(data)
  
+def noise_spectrum(batch, df, columns = 'wts', index = ['sts', 'u6s', 'can', 'dss'], out_fn = None ):
+    '''
+    Generate the complex heatmaps that encode noise according to features
+    '''
+    df = (
+        
+        df
+        .lazy()
+        .with_columns([
+            pl.col('seq').str.count_match('TSO').alias('tsos'),
+            pl.col('seq').str.count_match('SCF1').alias('dss'),
+            pl.col('seq').str.count_match('XXX').alias('sts'),
+            pl.col('seq').str.count_match('·U6·').alias('u6s'),
+            pl.col('seq').str.count_match('bU6').alias('bu6s'),
+            pl.col('seq').str.count_match('CNSCFL').alias('can'),
+            pl.col('seq').str.count_match('WT').alias('wts'),
+            pl.col('spacer'),
+        ])
+        .collect()
+     )
+    #index =['u6s', 'sts', 'dss', 'can'] 
+    #columns = 'wts'
+    xxx = df.pivot(index=index, columns=columns, values='umi', aggregate_fn='count', sort_columns=True).sort(index)
+    rename_d =dict([(str(i), f'{columns}_{i}') for i in range(xxx.shape[1]-len(index))]) 
+
+    xxxp = (
+        xxx.rename(rename_d)
+        .to_pandas()
+        .set_index(index)
+        .apply(lambda x: 100*x/(df.shape[0]/1.0))
+        .fillna(0)
+        )
+    print(xxxp.apply(sum))
+    xxx = (
+        xxx.rename(rename_d)
+        .to_pandas()
+        .set_index(index)
+        .apply(lambda x: np.log10(x))
+        .fillna(0)
+    )    
+    fig, axes = plt.subplots(1,2, dpi=60, figsize=(10, 12))
+    sns.heatmap(xxxp, annot=True, fmt='.1f', ax=axes[0], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
+    axes[0].set_title(batch)
+    axes[0].set_yticklabels(axes[0].get_yticklabels(), rotation=0)
+    sns.heatmap(xxx, annot=True, fmt='.1f', ax=axes[1], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
+    axes[1].set_title(batch)
+    axes[1].set_yticklabels(axes[1].get_yticklabels(), rotation=0)
+    plt.tight_layout()
+    if out_fn is not None:
+        fig.savefig(out_fn)
+
