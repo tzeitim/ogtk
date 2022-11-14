@@ -1,4 +1,5 @@
 from logging import warning
+from typing import Sequence,Optional
 from sys import prefix
 import pysam
 import regex
@@ -1346,6 +1347,186 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, 
     )
     return(df)
 
+def extract_read_grammar_new(
+    batch: str,
+    parquet_ifn: str| None =None,
+    df: pl.DataFrame | None = None,
+    zombie=False,
+    do_plot=False,
+    encode = False,
+    valid_ibars = None,
+    min_cov=2,
+    sample=None,
+    plot=False,
+    return_encoded_reads=False,
+    unfiltered=False,
+    **kwargs,
+    ) -> pl.DataFrame:
+    ''' Encodes raw reads based on regular expressions. It doesn't aggregate results
+    '''
+    import rich 
+    rich.print(f'[red]{batch}')
+    wl = load_wl(True)
+    wts = "|".join(wl['spacer'])
+    
+    u6mx = 'GACGAAACACC' # 'GACGAAACACC'
+    tso = 'TTTCTTATATGGG'
+    u6bk = "GGAAAGAAACACCG" # broken u6
+    usibar=  'GCTAGA' # upstream ibar
+    dsibar=  'AATAGCAA' # downstream ibar
+    canscaf ='GGGTTAGAG'
+    primer = 'GGCTAGTCCGTTATCAACTTG'
+    scaf2 = 'GTTAACCTAA'
+
+    fuzzy_bu6 =     fuzzy_match_str(u6bk, '.{0,1}')
+    fuzzy_u6 =     fuzzy_match_str(u6mx, '.{0,1}')
+    fuzzy_usibar = fuzzy_match_str(usibar, wildcard=".{0,1}")
+    fuzzy_dsibar = fuzzy_match_str(dsibar, wildcard=".{0,1}")
+    fuzzy_tso =    fuzzy_match_str(tso, wildcard=".{0,1}")
+    fuzzy_scaff2 = fuzzy_match_str(scaf2, wildcard=".{0,1}")
+    fuzzy_stammering = fuzzy_match_str("GTGGGGTTA", ".") # scaffold stutter
+    fuzzy_primer=  fuzzy_match_str(primer, wildcard=".{0,1}?") # ??
+
+    if not zombie:
+        fuzzy_canspa=  fuzzy_match_str(canscaf, wildcard="") # ??
+    else:
+        fuzzy_canspa=  fuzzy_match_str(canscaf, wildcard="") # ?? used to be a wildcard='.'
+
+
+    ####
+    if all(i is None for i in [df, parquet_ifn]):
+        raise ValueError("you need to provide parquet_ifn or a pl")
+
+
+    if df is None:
+        if sample is not None:
+            df =pl.read_parquet(parquet_ifn).sample(sample).drop(['readid', 'qual' , 'start', 'end'])
+        else:
+            df = pl.read_parquet(parquet_ifn).drop(['readid', 'qual' , 'start', 'end'])
+
+    print(f'total_reads={df.shape[0]}')
+    if "cbc" in df.columns:
+        total_cells =df["cbc"].n_unique() 
+        print(f'{total_cells=}')
+    else:
+        total_umis =df["umi"].n_unique() 
+        print(f'{total_umis=}')
+
+
+
+    # It is faster to use fuzzy matching once so we encode first and then count
+    df = (
+        df
+        .lazy()
+        .with_column(pl.col('seq').alias('oseq'))
+        .with_column(pl.col('seq').str.replace_all(f'.*?({fuzzy_tso})', '[···TSO···]'))
+        .with_column(pl.col('seq').str.replace_all(f'.*({fuzzy_u6})', '[···U6···]'))
+        .with_column(pl.col('seq').str.replace_all(f'.*({fuzzy_bu6})', '[···bU6···]'))
+        .with_column(pl.col('seq').str.extract(f'CTAGA(.{"{6}"})({fuzzy_dsibar})', 1).alias('raw_ibar'))
+        .with_column(pl.col('seq').str.replace_all(f'({fuzzy_dsibar})', '[···SCF1···]'))
+        .with_column(pl.col('seq').str.replace_all(f'({fuzzy_scaff2})', '[···SCF2···]'))
+        .with_column(pl.col('seq').str.replace_all(f'({canscaf})', f'[···CNSCFL···]'))
+        .with_column(pl.col('seq').str.extract(f'({wts})', 1).alias('spacer'))
+        .with_column(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
+        .with_column(pl.col('seq').str.replace_all(f'({fuzzy_primer})', f'[···LIB···]'))
+        .with_column(pl.col('seq').str.replace_all(f'\[···SCF2···\].+\[···LIB···\]', f'[···SCF2···][···LIB···]'))
+        #.with_column(pl.col('seq').str.extract(f'([A-Z]{"{6}"})\[···SCF1···\]',1).alias('raw_ibar'))
+        #i######.with_column(pl.col('seq').str.replace_all(f'(\]{"CTAGA"})', '][···SCF0···]'))
+        .with_column(pl.col('seq').str.replace_all(f'\[···SCF2···\]\[···LIB···\].+', '[END]'))
+        .with_column(pl.col('seq').str.replace_all(f'{fuzzy_stammering}', '[XXX]'))
+        .with_column(pl.col('seq').str.replace_all(f'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
+        .drop([i for i in ['qual',  'readid', 'start', 'end'] if i in df.columns])
+  #      .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
+    ).collect()
+
+    return(df)
+
+def count_essential_patterns(df: pl.DataFrame, seq_col: str = 'seq') -> pl.DataFrame:
+    ''' Count appearances of expected patterns in encoded seqs, for example TSOs, U6s, cannonical scaffols, uncut matches
+    '''
+    # count matches for a series of patterns
+    df = (
+        
+        df
+        .lazy()
+        .with_columns([
+            pl.col(seq_col).str.count_match('TSO').alias('tsos'),
+            pl.col(seq_col).str.count_match('SCF1').alias('dss'),
+            pl.col(seq_col).str.count_match('XXX').alias('sts'),
+            pl.col(seq_col).str.count_match('·U6·').alias('u6s'),
+            pl.col(seq_col).str.count_match('bU6').alias('bu6s'),
+            pl.col(seq_col).str.count_match('CNSCFL').alias('can'),
+            pl.col(seq_col).str.count_match('WT').alias('wts'),
+            pl.col('spacer'),
+        ])
+        .collect()
+     )
+    return(df)
+
+def ibar_reads_to_molecules(
+        df: pl.DataFrame,
+        modality: str ='single-cell',
+        )-> pl.DataFrame:
+    ''' Returns a data frame at the level of molecules keep count of the reads behind each UMI as `umi_reads`
+        Additionally, top representative encoded sequences and original sequences are kept
+    '''
+    # collapse reads into molecules
+    # top_n should always be == 1
+    top_n =1
+    print('collapse into molecules')
+    groups =['cbc', 'umi', 'raw_ibar', 'spacer'] 
+    if modality =='single-molecule':
+        groups = groups[1:]
+    df =( df 
+            .lazy()
+            .groupby(groups)
+                .agg([
+                    pl.col('oseq').value_counts(sort=True).head(top_n), 
+                    pl.col('seq').value_counts(sort=True).head(top_n), 
+                    pl.col('seq').count().alias('umi_reads') 
+                    ])
+            .collect()
+                .explode('seq').unnest('seq').rename({'':'seq', 'counts':'umi_dom_reads'})
+                .explode('oseq').unnest('oseq').rename({'':'oseq'}).drop('counts')
+    )
+
+    return(df)
+
+def compute_lookahead_ibar_stats(
+        df: pl.DataFrame,
+        over: Sequence[str] = ['cbc', 'raw_ibar'],
+        modality: str | None = None,
+        )-> pl.DataFrame: 
+
+    '''
+    Returns a dataframe with additional fields where molecules and
+    n_alleles are computed by over the provided fields. It also flags
+    off-target reads based on the absence of a raw_ibar.
+
+    Two predefined modalities are supported:
+    "single-cell" = ['cbc', 'raw_ibar'] 
+    "single-molecule" = ['raw_ibar']
+
+    '''
+    if modality is not None:
+        if modality =="single-cell":
+            over = ['cbc', 'raw_ibar']
+        if modality =="single-molecule":
+            over = ['raw_ibar']
+
+    df = (
+        df
+        .lazy()
+        .with_columns([
+            pl.col('umi').n_unique().over(over).alias('mols'), 
+            pl.col('seq').n_unique().over(over).alias('n_alleles'),
+            #pl.col('seq').count().over(['cbc', 'raw_ibar']).alias('reads'),
+            pl.col('raw_ibar').is_null().alias('offt'),
+            ])
+            .collect()
+    )
+    return(df)
+
 def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot=False, encode = False, valid_ibars = None, min_cov=2, sample=None, plot=False, return_encoded_reads=False, unfiltered=False, **kwargs):
     ''' input is pl-fastq
         df= pl.read_parquet('/local/users/polivar/src/artnilet//datain/20211217_scv2/direct_B3_shRNA_S11.sorted.top.parquet')
@@ -1433,35 +1614,11 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         read_qc = False
 
     if read_qc:
-        index =['u6s', 'sts', 'dss', 'can'] 
-        index =['u6s', 'can', 'dss'] 
-        columns = 'wts'
-        xxx = df.pivot(index=index, columns=columns, values='umi', aggregate_fn='count', sort_columns=True).sort(index)
-        rename_d =dict([(str(i), f'{columns}_{i}') for i in range(xxx.shape[1]-len(index))]) 
+        noise_spectrum(batch, df)
 
-        xxxp = (
-            xxx.rename(rename_d)
-            .to_pandas()
-            .set_index(index)
-            .apply(lambda x: 100*x/(df.shape[0]/1.0))
-            .fillna(0)
-            )
-        print(xxxp.apply(sum))
-        xxx = (
-            xxx.rename(rename_d)
-            .to_pandas()
-            .set_index(index)
-            .apply(lambda x: np.log10(x))
-            .fillna(0)
-        )    
-        fig, axes = plt.subplots(1,2, dpi=60, figsize=(10, 12))
-        sns.heatmap(xxxp, annot=True, fmt='.1f', ax=axes[0], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
-        axes[0].set_title(batch)
-        sns.heatmap(xxx, annot=True, fmt='.1f', ax=axes[1], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
-        axes[1].set_title(batch)
-        plt.tight_layout()
-    #######
 
+    # ib.ibar_reads_to_molecules
+    # collapse reads into molecules
     print('collapse into molecules')
     df =( df 
             .lazy()
@@ -1479,7 +1636,9 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
     
     print(f'umis with less than {min_cov} reads were discarded {(df["umi_reads"]<min_cov).sum()}')
     df = df.filter(pl.col('umi_reads')>=min_cov)
+
     print('count matches for patterns')
+    # count_essential_patterns(df: pl.DataFrame) -> pl.DataFrame:
     # count matches for a series of patterns
     df = (
         
@@ -1497,8 +1656,8 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         ])
         .collect()
      )
-    print('compute look-ahead stats') 
-    # compute look-ahead stats 
+    print('computing look-ahead stats') 
+    # ib.compute_lookahead_ibar_stats
     df = (
         df
         .lazy()
@@ -1540,22 +1699,17 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         df
         .filter(pl.col('valid_ibar'))
         .groupby(['cbc', 'raw_ibar', 'seq', 'spacer'])
-            .agg([
-                pl.col('umi').n_unique().alias('umis_seq') # <- this feels too high for my taste
-            ])
+            .agg(pl.col('umi').n_unique().alias('umis_seq'))# <- this feels too high for my taste
             .with_columns(pl.col('seq').n_unique().over(['cbc', 'raw_ibar']).alias('n_sib'))
         )
-
+    ## create mask for wt
     data = (
         data
-            .with_column(
-                    (
-                        (pl.col('seq').str.count_match('WT')==1)
-                        & 
-                        (pl.col('seq').str.contains('\[···WT···\]\[···CNSCFL···\]'))
-                    ).alias('wt')
-            )
-        )
+        .with_column((
+       (pl.col('seq').str.count_match('WT')==1)
+       & 
+       (pl.col('seq').str.contains('\[···WT···\]\[···CNSCFL···\]'))
+        ).alias('wt')))
 
     if plot:
         fg = sns.catplot(data = data.to_pandas(), kind='boxen',
@@ -1768,7 +1922,6 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
 
 
     rich.print(':vampire:')
-    print(data.head())
     data = (data
        .with_column(pl.lit(batch).alias('sample_id'))
        .with_column(pl.col('speed').cast(pl.Utf8))
