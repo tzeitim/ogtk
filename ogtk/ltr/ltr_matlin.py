@@ -137,8 +137,10 @@ class matlin():
         print('computing linkage')
 
         if optimal_ordering:
+            print("optimal ordering can be slow")
             Z = hierarchy.linkage(dist,method=method, optimal_ordering=optimal_ordering)
         else:
+            print("using fastcluster")
             Z = fastcluster.linkage(dist, method=method)
 
         zl = hierarchy.leaves_list(Z)
