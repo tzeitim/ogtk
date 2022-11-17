@@ -676,9 +676,9 @@ def annotate_ibars(sample_id='h1e1', min_reads_umi=2, min_dom_cov=2):
 
     uncut = load_mol_ibarspl(sample_id, min_reads_umi, min_dom_cov)
     suncut = uncut.with_columns([
-                       pl.col('cseq').is_in(wl.spacer.to_list()).alias('wt'), 
-                       pl.col('cseq').apply(lambda x: spacer_id.get(x, None)).alias('kalhor'),
-                       pl.col('cseq').apply(lambda x: spacer_speed.get(x, None)).alias('speed')
+           pl.col('cseq').is_in(wl.spacer.to_list()).alias('wt'), 
+           pl.col('cseq').apply(lambda x: spacer_id.get(x, None)).alias('kalhor'),
+           pl.col('cseq').apply(lambda x: spacer_speed.get(x, None)).alias('speed')
         ])
     uncut = uncut.join(wl, left_on='cseq', right_on='spacer', how='left')
 
@@ -886,6 +886,54 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, 
         .with_column(pl.lit(name).alias('batch'))
     )
     return(df)
+
+def annotate_ibars(df: pl.DataFrame):
+    '''Annotates data frame using a pre-determined data base
+    '''
+    wl = load_wl(True)
+    df = df.join(wl, left_on='spacer', right_on='spacer', how='left') # <<< kalhor annotate
+    return(df)
+##################################
+    ## annotate with kalhor db
+    print('annotate with kalhor db')
+    kalhor_map = (data.filter(pl.col('wt'))
+                .select(['raw_ibar', 'spacer']).unique()
+                .join(wl, left_on='spacer', right_on='spacer', how='left')
+            )       
+    data = (data
+            .join(kalhor_map, left_on='raw_ibar', right_on='raw_ibar', how='left')
+            .drop('spacer_right')
+            ) # <<< kalhor annotate
+    
+##################################
+    wl = pl.DataFrame(load_wl())
+    spacer_id = dict([(i,ii) for i,ii in zip(wl.spacer, wl.kalhor_id)])
+    spacer_speed = dict([(i,ii) for i,ii in zip(wl.spacer, wl.speed)])
+
+    uncut = load_mol_ibarspl(sample_id, min_reads_umi, min_dom_cov)
+    suncut = uncut.with_columns([
+           pl.col('cseq').is_in(wl.spacer.to_list()).alias('wt'), 
+           pl.col('cseq').apply(lambda x: spacer_id.get(x, None)).alias('kalhor'),
+           pl.col('cseq').apply(lambda x: spacer_speed.get(x, None)).alias('speed')
+        ])
+    uncut = uncut.join(wl, left_on='cseq', right_on='spacer', how='left')
+
+    ss = (
+        uncut
+        .select(['ibar', 'kalhor_id', 'cseq'])
+        .filter(pl.col('kalhor_id').is_not_null())
+        .groupby('ibar')
+        .agg(pl.col('cseq').value_counts(sort=True).head(2))
+        .explode('cseq').unnest('cseq').rename({'':'cseq'})
+        .sort(['ibar','counts'], reverse=True)
+        .join(wl, left_on='cseq', right_on='spacer', how='left')
+    )
+
+    print([format(i, '.2f') for i in np.quantile(ss.counts.to_list(), np.arange(0,1, 0.1,))])
+    break_point = np.quantile(ss.counts.to_list(), 0.55)
+    ss = ss.filter(pl.col('counts')>break_point)
+    return(dict(zip(*ss.select(['ibar', 'kalhor_id']))))
+    
 
 def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1, ibar_ifn = None):
     ''' Expects filtered ibar tabulated file
@@ -1349,7 +1397,7 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, 
 
 def extract_read_grammar_new(
     batch: str,
-    parquet_ifn: str| None =None,
+    parquet_ifn: str| None = None,
     df: pl.DataFrame | None = None,
     zombie=False,
     do_plot=False,
@@ -1407,10 +1455,10 @@ def extract_read_grammar_new(
     print(f'total_reads={df.shape[0]}')
     if "cbc" in df.columns:
         total_cells =df["cbc"].n_unique() 
-        print(f'{total_cells=}')
+        #print(f'{total_cells=}')
     else:
         total_umis =df["umi"].n_unique() 
-        print(f'{total_umis=}')
+        #print(f'{total_umis=}')
 
 
 
@@ -1440,6 +1488,28 @@ def extract_read_grammar_new(
     ).collect()
 
     return(df)
+
+def empirical_kalhor_annotation(df: pl.DataFrame, drop_counts: bool=True)->pl.DataFrame:
+    ''' Determines the kalhor ids (and the metadata associated to each) to a given ibar-spacer pair.
+        This function should be run on samples that have not been induced.
+        Optionally show the evidence for a given spacer-ibar match.
+    '''
+
+    wl = load_wl(True).drop('clone')
+    # determine the top spacer per raw_ibar
+    tsp_df = (df
+            .groupby(['clone', 'raw_ibar'])
+            .agg(pl.col('spacer').value_counts(sort=True).head(1))
+            .explode('spacer')
+            .unnest('spacer')
+              .rename({'':'spacer', 'counts':'spacer_ibar_mols'})
+            .join(wl, right_on='spacer', left_on='spacer', how='inner')
+        )
+    if drop_counts:
+        tsp_df = tsp_df.drop('spacer_ibar_mols')
+    return(tsp_df)
+
+
 
 def count_essential_patterns(df: pl.DataFrame, seq_col: str = 'seq') -> pl.DataFrame:
     ''' Count appearances of expected patterns in encoded seqs, for example TSOs, U6s, cannonical scaffols, uncut matches
@@ -1932,26 +2002,15 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         )
     return(data)
  
-def noise_spectrum(batch, df, columns = 'wts', index = ['sts', 'u6s', 'can', 'dss'], out_fn = None ):
+def noise_spectrum(batch: str,
+                   df: pl.DataFrame,
+                   columns: str= 'wts',
+                   index: Sequence= ['sts', 'u6s', 'can', 'dss'],
+                   out_fn: str| None= None) -> None:
     '''
     Generate the complex heatmaps that encode noise according to features
     '''
-    df = (
-        
-        df
-        .lazy()
-        .with_columns([
-            pl.col('seq').str.count_match('TSO').alias('tsos'),
-            pl.col('seq').str.count_match('SCF1').alias('dss'),
-            pl.col('seq').str.count_match('XXX').alias('sts'),
-            pl.col('seq').str.count_match('·U6·').alias('u6s'),
-            pl.col('seq').str.count_match('bU6').alias('bu6s'),
-            pl.col('seq').str.count_match('CNSCFL').alias('can'),
-            pl.col('seq').str.count_match('WT').alias('wts'),
-            pl.col('spacer'),
-        ])
-        .collect()
-     )
+    df = count_essential_patterns(df)
     #index =['u6s', 'sts', 'dss', 'can'] 
     #columns = 'wts'
     xxx = df.pivot(index=index, columns=columns, values='umi', aggregate_fn='count', sort_columns=True).sort(index)
@@ -1972,14 +2031,21 @@ def noise_spectrum(batch, df, columns = 'wts', index = ['sts', 'u6s', 'can', 'ds
         .apply(lambda x: np.log10(x))
         .fillna(0)
     )    
-    fig, axes = plt.subplots(1,2, dpi=60, figsize=(10, 12))
+    
+
+    fig, axes = plt.subplots(2,1, dpi=60, figsize=(12, 6*len(index)))
+    
     sns.heatmap(xxxp, annot=True, fmt='.1f', ax=axes[0], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
     axes[0].set_title(batch)
     axes[0].set_yticklabels(axes[0].get_yticklabels(), rotation=0)
+    
     sns.heatmap(xxx, annot=True, fmt='.1f', ax=axes[1], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
     axes[1].set_title(batch)
     axes[1].set_yticklabels(axes[1].get_yticklabels(), rotation=0)
+    
     plt.tight_layout()
     if out_fn is not None:
         fig.savefig(out_fn)
+    
+    plt.show()
 
