@@ -4,6 +4,7 @@ from setuptools_rust import Binding, RustExtension
 with open("README.md", "r") as fh:
     long_description = fh.read()
 
+print('install pysam via conda since zlib-devel cannot be installed using pip')
 packages = setuptools.find_packages()
 packages.append('rogtk')
 setuptools.setup(
