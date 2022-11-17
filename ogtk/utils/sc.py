@@ -9,7 +9,7 @@ def print_stats(adata, rs):
     iset = len_intersect(adata, rs)
     print(f"A total of {iset[0]} cbs were found on both sets {iset[1]:0.2f} {iset[2]:0.2f} ")
 
-def metacellize (set_name, adata, adata_workdir, excluded_gene_patterns = [], excluded_gene_names=None , suspect_gene_names=['shRNA', 'rtTA', 'Fun','Cas9', 'hist1h2ap', "Hist1h2ap"], forbidden_mods = [18, 26, 27, 34], return_adatas=True, log_debug=False, explore=True, full_cpus=56, moderate_cpus=8):
+def metacellize (set_name, adata, adata_workdir, excluded_gene_patterns = [], excluded_gene_names=None , suspect_gene_names=['shRNA', 'rtTA', 'Fun','Cas9', 'hist1h2ap', "Hist1h2ap"], forbidden_mods = [18, 26, 27, 34], return_adatas=True, log_debug=False, explore=True, full_cpus=56, moderate_cpus=8,  properly_sampled_max_excluded_genes_fraction = 0.03):
     import anndata as ad
     import matplotlib.pyplot as plt
     import metacells as mc
@@ -94,7 +94,6 @@ def metacellize (set_name, adata, adata_workdir, excluded_gene_patterns = [], ex
 
     with plt.rc_context({"figure.figsize":(15,5)}):
         fig, ax = plt.subplots(1, 1)
-        properly_sampled_max_excluded_genes_fraction = 0.03
         
         excluded_genes_data = mc.tl.filter_data(full, var_masks=['~clean_gene'])[0]
         excluded_umis_of_cells = mc.ut.get_o_numpy(excluded_genes_data, name='__x__', sum=True)
