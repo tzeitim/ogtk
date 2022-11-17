@@ -474,3 +474,57 @@ def plot_characterization_ibar(df, wl, goods, key = 'a4e5', min_cov= 100):
 
     return(mdf)
     ##}
+
+def plot_sibling_noise():
+    '''
+    Used in single-cell workflow as a way of visualizing the basal noise and how eral signal scales with siblings
+    ''' 
+    # aggregate singe cell data at the allele level (dirty)
+    # - how many umis support a given allele (seq)
+    # - how many siblings are there? (alleles per integration in the same cell)
+    data = ( 
+        df
+        .filter(pl.col('valid_ibar'))
+        .groupby(['cbc', 'raw_ibar', 'seq', 'spacer'])
+            .agg(pl.col('umi').n_unique().alias('umis_seq'))# <- this feels too high for my taste
+            .with_columns(pl.col('seq').n_unique().over(['cbc', 'raw_ibar']).alias('n_sib'))
+        )
+    fg = sns.catplot(data = data.to_pandas(), kind='boxen',
+        x='n_sib', y='umis_seq',  aspect=2,  row='wt')
+
+    for ax in fg.axes_dict.values():
+        ax.grid()
+    plt.figure()
+    
+    fg = sns.displot(data=data.to_pandas(), 
+                x='n_sib', 
+                y='umis_seq', 
+                binwidth=[1,5],
+                cbar=True,
+                aspect=1, col='wt', hue='wt')
+
+    for ax in fg.axes_dict.values():
+        ax.set_xlim(0, 10)
+        ax.grid()
+
+    plt.figure()
+    #data = data.join(ib.load_wl(True), left_on='spacer', right_on='spacer', how='left')
+    with plt.rc_context({'figure.figsize':(10,10)}):
+        ax = sns.scatterplot(data=data.to_pandas(), x='n_sib', y='umis_seq', hue='wt', s=10)
+        #ax.set_xlim(0, 20)
+        ax.grid()
+        ax.set_title(batch)
+
+    plt.figure()
+    fg = sns.catplot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas(), x='wt', y='umis_seq', kind='boxen')
+    fg.ax.set_title(batch)
+    fg.ax.grid()
+
+    plt.figure()
+    fg = sns.catplot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas(), x='wt', y='umis_seq', kind='box')
+    fg.ax.set_title(batch)
+    fg.ax.grid()
+    plt.yscale('log')
+    #sns.displot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas()['wt'])
+
+

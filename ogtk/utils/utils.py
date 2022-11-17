@@ -525,11 +525,10 @@ def generate_cbc_correction_dictionaries(path_to_bam, force = False, verbose = F
         return(ofn)
     else:
     # make it if forced or not found
-
         entries = []
         if verbose:
             print(f'Opening bam file {path_to_bam} to screen for correction pairs', end = '....')
-        
+        print('') 
         bam = pysam.AlignmentFile(path_to_bam)
 
         df = pl.DataFrame(columns=[('CR', pl.Utf8), ('CB', pl.Utf8)] )

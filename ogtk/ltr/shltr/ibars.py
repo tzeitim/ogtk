@@ -555,7 +555,7 @@ def filter_umis_cov_tabix(tabix_fn, min_cov):
     filtered_umis = umi_counts[umi_counts>=min_cov].index.to_list()
     return((min_cov, filtered_umis))
 
-def return_valid_ibars_from_matrix(mat):
+def guess_ibars_mx(mat)-> Sequence:
     ''' Corrects detected ibars using the ranking method
     '''
     import pdb
@@ -582,7 +582,10 @@ def return_valid_ibars_from_matrix(mat):
     #pdb.set_trace()
     return(good)
 
-def convert_df_to_mat(df, ibar_field='raw_ibar'):
+def convert_df_to_mat(df: pl.DataFrame, ibar_field: str ='raw_ibar') -> pd.DataFrame:
+    '''
+        Returns a pandas data frame representing a matrix of umis across cell barcodes (rows) and ibars (columns)
+    '''
     mat = (
         df
         .groupby(['cbc', ibar_field])
@@ -594,7 +597,11 @@ def convert_df_to_mat(df, ibar_field='raw_ibar'):
     return(mat)
 
 
-def return_valid_ibars_from_df(df, ibar_field='raw_ibar', min_cells_per_ibar = 100, min_mols_per_ibar=1):
+def guess_ibars_df(df: pl.DataFrame,
+                   ibar_field: str='raw_ibar',
+                   min_cells_per_ibar: int = 100,
+                   min_mols_per_ibar: int=1
+                   )-> Sequence:
     ''' By grouping a dataframe by cbc and ibar into a matrix of umis, a correction by rank is applied
     '''
     mat = convert_df_to_mat(df, ibar_field)
@@ -607,7 +614,7 @@ def return_valid_ibars_from_df(df, ibar_field='raw_ibar', min_cells_per_ibar = 1
     mask_ibars = np.logical_and(mmask_ibars,cmask_ibars)
     mat = mat.iloc[:, mask_ibars]
 
-    valid_ibars= return_valid_ibars_from_matrix(mat)
+    valid_ibars= guess_ibars_mx(mat)
     return(valid_ibars)
 
 def return_compiled_corrector(): 
@@ -732,7 +739,7 @@ def compute_ibar_table_from_tabix_zombie(tbx_ifn, valid_cells):
                 .explode('seq').unnest('seq').rename({'':'seq', 'counts':'umi_dom_reads'})
     )
 
-    valid_ibars = return_valid_ibars_from_df(dff)
+    valid_ibars = guess_ibars_df(dff)
     data = (
         dff
         .with_column(pl.when(pl.col('ibar').is_in(valid_ibars)).then(pl.col('ibar')).otherwise('no_ibar'))
@@ -852,7 +859,7 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, 
     #pdb.set_trace()
     if valid_ibars is None:
         print('determining number of valid ibars')
-        valid_ibars = return_valid_ibars_from_df(df)
+        valid_ibars = guess_ibars_df(df)
         #valid_ibars.append('CAGTGC') # <- ibar unique to h1 that has mutation in scaffold
         #valid_ibars.append('ACAATG') # <- meh?
         #valid_ibars.append('TTTATA') # <- meh
@@ -1360,7 +1367,7 @@ def compute_ibar_table_from_tabix(tbx_ifn, valid_cells, name, valid_ibars=None, 
     #pdb.set_trace()
     if valid_ibars is None:
         print('determining number of valid ibars')
-        valid_ibars = return_valid_ibars_from_df(df)
+        valid_ibars = guess_ibars_df(df)
         #valid_ibars.append('CAGTGC') # <- ibar unique to h1 that has mutation in scaffold
         #valid_ibars.append('ACAATG') # <- meh?
         #valid_ibars.append('TTTATA') # <- meh
@@ -1545,6 +1552,7 @@ def ibar_reads_to_molecules(
     top_n =1
     print('collapse into molecules')
     groups =['cbc', 'umi', 'raw_ibar', 'spacer'] 
+
     if modality =='single-molecule':
         groups = groups[1:]
     df =( df 
@@ -1597,7 +1605,21 @@ def compute_lookahead_ibar_stats(
     )
     return(df)
 
-def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot=False, encode = False, valid_ibars = None, min_cov=2, sample=None, plot=False, return_encoded_reads=False, unfiltered=False, **kwargs):
+def extract_read_grammar(
+        batch,
+        parquet_ifn=None,
+        df=None,
+        zombie=False,
+        do_plot=False,
+        encode = False,
+        valid_ibars = None,
+        min_cov=2,
+        sample=None,
+        plot=False,
+        return_encoded_reads=False,
+        unfiltered=False,
+        **kwargs
+        ):
     ''' input is pl-fastq
         df= pl.read_parquet('/local/users/polivar/src/artnilet//datain/20211217_scv2/direct_B3_shRNA_S11.sorted.top.parquet')
         UMIS with less than `min_cov` reads are filtered out
@@ -1749,7 +1771,7 @@ def extract_read_grammar(batch, parquet_ifn=None, df=None, zombie=False, do_plot
         min_mols_per_ibar = 100
         min_cells_per_ibar = int(total_cells*0.2)
         print(f'{min_cells_per_ibar=} (20%)')
-        valid_ibars = return_valid_ibars_from_df(df, min_cells_per_ibar = min_cells_per_ibar, min_mols_per_ibar=min_mols_per_ibar)
+        valid_ibars = guess_ibars_df(df, min_cells_per_ibar = min_cells_per_ibar, min_mols_per_ibar=min_mols_per_ibar)
     else:
         # they are provided:
         print('using provided intid wl')
@@ -2049,3 +2071,44 @@ def noise_spectrum(batch: str,
     
     plt.show()
 
+def filter_ibars(
+        df: pl.DataFrame,
+        valid_ibars: Sequence | None=None,
+        min_mols_per_ibar: num=100,
+        fraction_cells_ibar: float= 0.2
+        )->pl.DataFrame:
+    ''' 
+    '''
+    print('flag ibars') 
+    # flag ibars 
+    if valid_ibars is None:
+        # determine valid ibars automatically
+        print('determining number of valid ibars')
+        min_cells_per_ibar = int(total_cells*fraction_cells_ibar)
+        print(f'{min_cells_per_ibar=} (20%)')
+
+        valid_ibars = guess_ibars_df(
+                df, 
+                min_cells_per_ibar = min_cells_per_ibar,
+                min_mols_per_ibar=min_mols_per_ibar)
+
+    else:
+        # they are provided:
+        print('using provided intid wl')
+    
+    print(f'{len(valid_ibars)=}')
+
+
+    df = df.with_column(pl.col('raw_ibar').is_in(valid_ibars).alias('valid_ibar'))
+    return(df)
+
+def mask_wt(df: pl.DataFrame) -> pl.DataFrame:
+    ''' Simple routine to add a boolean field that defines uncut entries
+    '''
+    wt_str = '\[···WT···\]\[···CNSCFL···\]'
+    df= (df
+         .with_column(( (pl.col('seq').str.count_match('WT')==1) 
+                       & (pl.col('seq').str.contains(wt_str)))
+    .alias('wt'))
+     )
+    return df
