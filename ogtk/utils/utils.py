@@ -218,7 +218,7 @@ def sfind(path, pattern, options = "-iname"):
 
 # TODO write a generalized version for tabulate_*fastqs
 
-def tabulate_single_umified_fastq(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False):
+def tabulate_single_umified_fastq(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False, rc=False):
     ''' tabulate fastq into tabix, supports a single long read 
         |readid | start | end  | cbc | umi | seq | qual|
 
@@ -258,8 +258,11 @@ def tabulate_single_umified_fastq(r1, cbc_len =16 , umi_len = 10, end = None, si
                 read_id = read1[0].split(' ')[0]
                 cbc_str = read1[1][0:cbc_len] if not single_molecule else read1[1][0:cbc_len+umi_len] 
                 umi_str = read1[1][cbc_len:cbc_len+umi_len] if not single_molecule else read1[1][0:cbc_len+umi_len] 
-                seq = read1[1][cbc_len+umi_len:].strip() 
+                seq =   read1[1][cbc_len+umi_len:].strip() 
                 qual =  read1[3][cbc_len+umi_len:].strip()
+                if rc:
+                    seq = rev_comp(seq)
+                    qual = qual[::-1]
                 out_str = '\t'.join([read_id, '0', '1', cbc_str, umi_str, seq, qual])+'\n'
                 if len(seq)>cbc_len+umi_len: 
                     R3.write(out_str)
@@ -285,7 +288,11 @@ def tabulate_single_umified_fastq(r1, cbc_len =16 , umi_len = 10, end = None, si
     print(subprocess.getoutput('date'))
     return(sorted_tab)
 
-def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False, rev_compr2=False):
+def paired_umified_fastqs_to_parquet():
+    ''' convert paired umified fastqs (e.g 10x) into parquet format
+    '''
+
+def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False, rev_comp_r2=False):
     ''' merge umified paired fastqs (e.g. 10x fastqs) into a single one tab file with fields:
         |readid | start | end  | cbc | umi | seq | qual|
 
@@ -294,7 +301,7 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
 
     if single_molecule = cbc and umi are the same
     if comparable it creates a tabix file for comparison purposes at a specified depth 1e5 by default
-    ``rev_compr2`` reverse-complements R2
+    ``rev_comp_r2`` reverse-complements R2
     previous name: tabulate_10x_fastqs
     TODO: implent full python interface otherwise bgzip might not be available in the system
     '''
@@ -302,7 +309,7 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     import bgzip
     r2 = r1.replace("R1", "R2")
 
-    rc = 'rc_' if rev_compr2 else ''
+    rc = 'rc_' if rev_comp_r2 else ''
     unsorted_tab = r1.split('_R1_')[0]+f'.{rc}unsorted.txt'
     sorted_tab = unsorted_tab.replace('unsorted.txt', 'sorted.txt.gz')
 
@@ -322,17 +329,18 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     print(subprocess.getoutput('date'))
 
     with open(unsorted_tab, 'wt') as R3:
-        with gzip.open(r1, 'rt') as R1, gzip.open(r2, 'rt') as R2:#, bgzip.BGZipWriter(R3) as zR3:
+        #with gzip.open(r1, 'rt') as R1, gzip.open(r2, 'rt') as R2:#, bgzip.BGZipWriter(R3) as zR3:
+        with gzip.open(r1, 'rt') as R1, gzip.open(r2, 'rt') as R2, bgzip.BGZipWriter(R3) as zR3:
             i1 = itertools.islice(grouper(R1, 4), 0, end)
             i2 = itertools.islice(grouper(R2, 4), 0, end)
             for read1,read2 in zip(i1, i2):
                 #read2 = list(read2)
                 read_id = read1[0].split(' ')[0]
-                cbc_str = read1[1][0:cbc_len] if not single_molecule else read1[1][0:cbc_len+umi_len] 
-                umi_str = read1[1][cbc_len:cbc_len+umi_len] if not single_molecule else read1[1][0:cbc_len+umi_len] 
+                cbc_str = read1[1][0:cbc_len] if not single_molecule else read1[1][0:cbc_len+umi_len] # there's a bug here. for single-mol ? it was corrected to read1[1][0:cbc_len] 
+                umi_str = read1[1][cbc_len:cbc_len+umi_len] if not single_molecule else read1[1][0:cbc_len+umi_len] # also here read1[1][0:cbc_len]
                 seq = read2[1].strip() 
                 qual =  read2[3].strip()
-                if rev_compr2:
+                if rev_comp_r2:
                     seq = rev_comp(seq)
                     qual = qual[::-1]
                 out_str = '\t'.join([read_id, '0', '1', cbc_str, umi_str, seq, qual])+'\n'
@@ -499,6 +507,51 @@ def merge_10x_fastq_dir(indir, force = False, read1_pattern = "_R1_"):
             
             #print(mbam_path)
      
+
+def generate_cbc_correction_dictionaries(path_to_bam, force = False, verbose = False, chunk_size=1e6):
+    '''
+    Generates a cellbarcode correction dictionary based on the cellranger barcoded BAM tags
+    TODO: there is a small fraction of uncorrected cell barcodes that seem to map to more than one corrected cell barcode
+    '''
+    import pysam
+    import os
+    import polars as pl
+
+    ofn = path_to_bam.replace('.bam', '.parquet')
+    print(f'scanning {path_to_bam}')
+    # load a pre-computed dictionary of found
+    if os.path.exists(ofn) and not force:
+        print('pre-computed map found, returning file name. Use force to regenerate')
+        return(ofn)
+    else:
+    # make it if forced or not found
+
+        entries = []
+        if verbose:
+            print(f'Opening bam file {path_to_bam} to screen for correction pairs', end = '....')
+        
+        bam = pysam.AlignmentFile(path_to_bam)
+
+        df = pl.DataFrame(columns=[('CR', pl.Utf8), ('CB', pl.Utf8)] )
+        
+        for read in bam:
+            if read.has_tag('CR') and read.has_tag('CB'):
+                entries.append((read.get_tag("CR"), read.get_tag("CB")))
+            
+
+            if len(entries)%chunk_size ==0:
+                df = (df.vstack(pl.DataFrame(entries, orient='row', columns=[('CR', pl.Utf8), ('CB', pl.Utf8)] ))
+                     .unique()
+                    )
+                entries = []
+
+        df = df.unique().write_parquet(ofn)
+
+        if verbose:
+            print(f'done')
+
+        return(ofn)
+
 def generate_correction_dictionaries(pickle_ofn, path_to_bam, force = False, verbose = False):
     '''
     Generates a cellbarcode correction dictionary based on the cellranger barcoded BAM tags
