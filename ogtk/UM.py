@@ -1190,6 +1190,7 @@ def merge_umi_to_pool(args):
 def compare_umi_to_pool(args):
     '''
     Returns the hammin distance between a given UMI to the rest of the pool
+    args = (seq, (index, pool))
     '''
     seq = args[0]
     index = args[1][0]
@@ -1201,7 +1202,7 @@ def compare_umi_to_pool(args):
         dists.append(string_hamming_distance((seq, best)))
     return(dists)
 
-def merge_all(seqs, jobs = 10, errors = 1, mode = "regex"):
+def merge_all(seqs, jobs = 10, errors = 1, mode = "dist"):
     ''' 
     Parallel wrapper for merge_umi_to_pool - expects seqs sorted by ocurrence 
     '''
