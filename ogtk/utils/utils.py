@@ -292,7 +292,7 @@ def paired_umified_fastqs_to_parquet():
     ''' convert paired umified fastqs (e.g 10x) into parquet format
     '''
 
-def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False, rev_comp_r2=False):
+def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False, rev_comp_r2=False, export_parquet = False):
     ''' merge umified paired fastqs (e.g. 10x fastqs) into a single one tab file with fields:
         |readid | start | end  | cbc | umi | seq | qual|
 
@@ -302,6 +302,8 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     if single_molecule = cbc and umi are the same
     if comparable it creates a tabix file for comparison purposes at a specified depth 1e5 by default
     ``rev_comp_r2`` reverse-complements R2
+
+    if export_parque is True an additional instance of the tabulated reads will get written as a parquet file.
     previous name: tabulate_10x_fastqs
     TODO: implent full python interface otherwise bgzip might not be available in the system
     '''
@@ -312,6 +314,7 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     rc = 'rc_' if rev_comp_r2 else ''
     unsorted_tab = r1.split('_R1_')[0]+f'.{rc}unsorted.txt'
     sorted_tab = unsorted_tab.replace('unsorted.txt', 'sorted.txt.gz')
+    parfn = unsorted_tab.replace('unsorted.txt', '.parquet')
 
     # round end to closest order of magnitude in powers of ten
     if end is not None:
@@ -324,6 +327,12 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
 
     if os.path.exists(sorted_tab) and not force:
         print(f'using pre-computed {sorted_tab}')
+        if export_parquet:
+            if os.path.exists(parfn) and not force:
+                return(parfn)
+            else:
+                export_tabix_parquet(sorted_tab, parfn)
+                return(parfn)
         return(sorted_tab)
 
     print(subprocess.getoutput('date'))
@@ -366,6 +375,10 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     c3 = subprocess.run(cmd_tabix.split())
     del_unsorted = subprocess.run(f'rm {unsorted_tab}'.split())
     print(subprocess.getoutput('date'))
+    
+    if export_parquet:
+        export_tabix_parquet(sorted_tab, parfn)
+
     return(sorted_tab)
 
 def tabulate_umified_fastqs(r1, cbc_len =16, umi_len = 10, end = None, single_molecule = False, force = False, comparable = False):
@@ -731,3 +744,18 @@ def rev_comp(seq):
     for c in reversed(seq):
         newSeq.append(revTbl[c])
     return "".join(newSeq)
+
+def export_tabix_parquet(tbxifn, parfn)->None:
+    ''' Small helper function that opens a tabix (gzipped) file and exports it back as parquet
+    '''
+    import polars as pl
+    import subprocess
+
+    print(subprocess.getoutput('date'))
+
+    df = pl.read_csv(tbxifn, sep='\t', has_header=False)
+    df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
+    df.write_parquet(parfn)
+
+    print(f'saved {parfn}')
+    print(subprocess.getoutput('date'))
