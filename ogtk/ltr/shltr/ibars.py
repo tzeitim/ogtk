@@ -2074,7 +2074,7 @@ def noise_spectrum(batch: str,
 def filter_ibars(
         df: pl.DataFrame,
         valid_ibars: Sequence | None=None,
-        min_mols_per_ibar: num=100,
+        min_mols_per_ibar: int=100,
         fraction_cells_ibar: float= 0.2
         )->pl.DataFrame:
     ''' 
