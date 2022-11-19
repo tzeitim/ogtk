@@ -529,18 +529,19 @@ def generate_cbc_correction_dictionaries(path_to_bam, force = False, verbose = F
     import pysam
     import os
     import polars as pl
+    import rich
 
     ofn = path_to_bam.replace('.bam', '.parquet')
     print(f'scanning {path_to_bam}')
     # load a pre-computed dictionary of found
     if os.path.exists(ofn) and not force:
-        print('pre-computed map found, returning file name. Use force to regenerate')
+        rich.print('pre-computed map found, returning file name. Use force to regenerate')
         return(ofn)
     else:
     # make it if forced or not found
         entries = []
         if verbose:
-            print(f'Opening bam file {path_to_bam} to screen for correction pairs', end = '....')
+            rich.print(f'Opening bam file {path_to_bam} to screen for correction pairs', end = '....')
         print('') 
         bam = pysam.AlignmentFile(path_to_bam)
 
@@ -555,6 +556,7 @@ def generate_cbc_correction_dictionaries(path_to_bam, force = False, verbose = F
                 df = (df.vstack(pl.DataFrame(entries, orient='row', columns=[('CR', pl.Utf8), ('CB', pl.Utf8)] ))
                      .unique()
                     )
+                rich.print(df.shape)
                 entries = []
 
         df = df.unique().write_parquet(ofn)
