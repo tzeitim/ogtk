@@ -17,7 +17,7 @@ def lala():
     pt.plot_sibling_noise()
 
 def reads_to_molecules(sample_id: str,
-           tbxifn: str, 
+           parquet_ifn: str, 
            valid_ibars: Sequence, 
            min_reads: int=1, 
            max_reads: int=1e6,
@@ -28,12 +28,14 @@ def reads_to_molecules(sample_id: str,
         Off-targets are defined by reads without an ibar pattern match.
         UMIs are filtered based on the number of reads
     '''
-    df = pl.read_csv(tbxifn, sep='\t', has_header=False)
-    df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
     
-    #df = df.head(int(1e6))
-    rdf = ib.extract_read_grammar_new(sample_id, df=df)
+    # takes some time but is light-weight
+    # TODO add cache point
+    rdf = ib.extract_read_grammar_new(parquet_ifn = parquet_ifn, batch = sample_id)
     tot_reads = rdf.shape[0]
+
+    # CPU-intensive
+    # TODO add thread control
     rdf = ib.ibar_reads_to_molecules(rdf, modality='single-cell')
     rdf = ib.count_essential_patterns(rdf)
 
@@ -64,7 +66,7 @@ def reads_to_molecules(sample_id: str,
 
     return(rdf
            .filter(pl.col('raw_ibar').is_not_null())
-           .filter(pl.col('raw_ibar').is_in(valid_ibars))
+#           .filter(pl.col('raw_ibar').is_in(valid_ibars))
            .filter(pl.col('umi_dom_reads')>=min_reads)
            .filter(pl.col('umi_dom_reads')<=max_reads)
            .with_columns(pl.lit(sample_id).alias('sample_id'))
@@ -72,7 +74,7 @@ def reads_to_molecules(sample_id: str,
            .with_columns(pl.lit(pc_offt).alias('qc_pc_offt'))
            .with_columns(pl.lit(tot_umis).alias('qc_tot_umis'))
            .with_columns(pl.lit(tot_reads).alias('qc_tot_reads'))
-           .with_column(pl.col('umi').n_unique().over(['cbc', 'raw_ibar', 'seq', 'spacer']).alias('umis_allele'))
+           .with_column(pl.col('umi').n_unique().over(['cbc', 'raw_ibar', 'seq', 'wt']).alias('umis_allele'))
                          # ^- this feels too high for my taste??
             .with_columns(pl.col('seq').n_unique().over(['cbc', 'raw_ibar']).alias('n_sib'))
 

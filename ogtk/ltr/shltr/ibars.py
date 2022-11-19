@@ -1421,6 +1421,7 @@ def extract_read_grammar_new(
     '''
     import rich 
     rich.print(f'[red]{batch}')
+
     wl = load_wl(True)
     wts = "|".join(wl['spacer'])
     
@@ -1468,7 +1469,7 @@ def extract_read_grammar_new(
         #print(f'{total_umis=}')
 
 
-
+    rich.print(f'[red]fuzzy encoding', end='')
     # It is faster to use fuzzy matching once so we encode first and then count
     df = (
         df
@@ -1493,6 +1494,7 @@ def extract_read_grammar_new(
         .drop([i for i in ['qual',  'readid', 'start', 'end'] if i in df.columns])
   #      .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
     ).collect()
+    rich.print(f'[green]done')
 
     return(df)
 
@@ -1560,6 +1562,7 @@ def ibar_reads_to_molecules(
             .groupby(groups)
                 .agg([
                     pl.col('oseq').value_counts(sort=True).head(top_n), 
+                    # TODO change this for a filter where we keep the top once and then force the other
                     pl.col('seq').value_counts(sort=True).head(top_n), 
                     pl.col('seq').count().alias('umi_reads') 
                     ])

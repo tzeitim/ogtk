@@ -303,7 +303,7 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     if comparable it creates a tabix file for comparison purposes at a specified depth 1e5 by default
     ``rev_comp_r2`` reverse-complements R2
 
-    if export_parque is True an additional instance of the tabulated reads will get written as a parquet file.
+    if export_parquet is True an additional instance of the tabulated reads will get written as a parquet file.
     previous name: tabulate_10x_fastqs
     TODO: implent full python interface otherwise bgzip might not be available in the system
     '''
