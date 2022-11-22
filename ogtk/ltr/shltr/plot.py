@@ -475,7 +475,7 @@ def plot_characterization_ibar(df, wl, goods, key = 'a4e5', min_cov= 100):
     return(mdf)
     ##}
 
-def plot_sibling_noise():
+def plot_sibling_noise(df):
     '''
     Used in single-cell workflow as a way of visualizing the basal noise and how eral signal scales with siblings
     ''' 
