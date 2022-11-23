@@ -18,9 +18,10 @@ def lala():
 
 def reads_to_molecules(sample_id: str,
            parquet_ifn: str, 
-           valid_ibars: Sequence, 
+           valid_ibars: Sequence | None=None, 
            min_reads: int=1, 
-           max_reads: int=1e6,
+           max_reads: int=int(1e6),
+           min_cells_per_ibar: int | None=1000,
            clone: str | None=None,
            ) -> pl.DataFrame:
     ''' Analytical routine to process UMIfied shRNA from bulk assays.
@@ -46,8 +47,10 @@ def reads_to_molecules(sample_id: str,
 
     ib.noise_spectrum(sample_id, rdf, index = ['dss'], columns='tsos')    
 
-    # determin valid_ibars in data
-    rdf = ib.filter_ibars(rdf, valid_ibars)
+    # determine valid_ibars in data
+
+    rdf = ib.filter_ibars(rdf, valid_ibars, min_cells_per_ibar=min_cells_per_ibar)
+    
 
     ## create mask for wt
     rdf = ib.mask_wt(rdf)
@@ -80,15 +83,20 @@ def reads_to_molecules(sample_id: str,
 
           )
 
-def allele_calling(data):
+def allele_calling(df: pl.DataFrame)-> pl.DataFrame:
+    ''' Given a mol-level data frame, return the top allele for individual ibar-cell data points
+    '''
+    import rich
     # major collapse event where we keep the top ranking sequence as the final allele
-    data =  (
-        data
-        .sort('umis_seq', True)
+    df =  (
+        df
+        .sort('umis_allele', True)
         .groupby(['cbc', 'raw_ibar'], maintain_order=True)
         .head(1) # <- this is it!
     )
-    
+    return(df)
+
+def basure():
     rich.print(f"%wt {data['wt'].mean() *100:.2f}")
     rich.print(f"%wt {data.filter(pl.col('umis_seq')>0)['wt'].mean()*100 :.2f} F")
 
