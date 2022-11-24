@@ -5,6 +5,7 @@ import os
 import subprocess
 import glob
 import itertools
+from typing import Optional, Sequence
 
 #https://docs.python.org/3/library/itertools.html#itertools.zip_longest
 def grouper(iterable, n, fillvalue=None):
@@ -761,3 +762,31 @@ def export_tabix_parquet(tbxifn, parfn)->None:
 
     print(f'saved {parfn}')
     print(subprocess.getoutput('date'))
+
+def cut(
+    s: pl.internals.series.Series,
+    bins: list[float],
+    labels: Optional[list[str]] = None,
+    break_point_label: str = "break_point",
+    category_label: str = "category",
+    maintain_order: bool = False,
+) -> pl.DataFrame:
+
+    import polars as pl
+    if maintain_order:
+        _arg_sort = pl.Series(name="_arg_sort", values=s.argsort())
+
+    result = pl.cut(s, bins, labels, break_point_label, category_label)
+
+    if maintain_order:
+        result = (
+            result
+            .select([
+                pl.all(),
+                _arg_sort,
+            ])
+            .sort('_arg_sort')
+            .drop('_arg_sort')
+        )
+
+    return result
