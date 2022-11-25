@@ -1,3 +1,4 @@
+import polars as pl
 import shutil
 import numpy as np
 import time
@@ -339,15 +340,15 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     print(subprocess.getoutput('date'))
 
     with open(unsorted_tab, 'wt') as R3:
-        #with gzip.open(r1, 'rt') as R1, gzip.open(r2, 'rt') as R2:#, bgzip.BGZipWriter(R3) as zR3:
-        with gzip.open(r1, 'rt') as R1, gzip.open(r2, 'rt') as R2, bgzip.BGZipWriter(R3) as zR3:
+        with gzip.open(r1, 'rt') as R1, gzip.open(r2, 'rt') as R2:#, bgzip.BGZipWriter(R3) as zR3:
+        #with gzip.open(r1, 'rt') as R1, gzip.open(r2, 'rt') as R2, bgzip.BGZipWriter(R3) as zR3:
             i1 = itertools.islice(grouper(R1, 4), 0, end)
             i2 = itertools.islice(grouper(R2, 4), 0, end)
             for read1,read2 in zip(i1, i2):
                 #read2 = list(read2)
                 read_id = read1[0].split(' ')[0]
-                cbc_str = read1[1][0:cbc_len] if not single_molecule else read1[1][0:cbc_len+umi_len] # there's a bug here. for single-mol ? it was corrected to read1[1][0:cbc_len] 
-                umi_str = read1[1][cbc_len:cbc_len+umi_len] if not single_molecule else read1[1][0:cbc_len+umi_len] # also here read1[1][0:cbc_len]
+                cbc_str = read1[1][0:cbc_len] if not single_molecule else read1[1][0:cbc_len] # there's a bug here. for single-mol ? it was corrected to read1[1][0:cbc_len] 
+                umi_str = read1[1][cbc_len:cbc_len+umi_len] if not single_molecule else read1[1][0:cbc_len] # also here read1[1][0:cbc_len]
                 seq = read2[1].strip() 
                 qual =  read2[3].strip()
                 if rev_comp_r2:
