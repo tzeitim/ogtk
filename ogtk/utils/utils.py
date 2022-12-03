@@ -347,8 +347,8 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
             for read1,read2 in zip(i1, i2):
                 #read2 = list(read2)
                 read_id = read1[0].split(' ')[0]
-                cbc_str = read1[1][0:cbc_len] if not single_molecule else read1[1][0:cbc_len] # there's a bug here. for single-mol ? it was corrected to read1[1][0:cbc_len] 
-                umi_str = read1[1][cbc_len:cbc_len+umi_len] if not single_molecule else read1[1][0:cbc_len] # also here read1[1][0:cbc_len]
+                cbc_str = read1[1][0:cbc_len] if not single_molecule else read1[1][0:umi_len] # there's a bug here. for single-mol ? it was corrected to read1[1][0:cbc_len] 
+                umi_str = read1[1][cbc_len:cbc_len+umi_len] if not single_molecule else read1[1][0:umi_len] # also here read1[1][0:cbc_len]
                 seq = read2[1].strip() 
                 qual =  read2[3].strip()
                 if rev_comp_r2:
@@ -791,3 +791,21 @@ def cut(
         )
 
     return result
+
+def rotate_labs(fg, ylim=None):
+    ''' Helper function to rotate labels from a seaborn FacetGrid object
+    '''
+    if len(fg.axes_dict)>0:
+        for ax in fg.axes_dict.values():
+            if ylim is not None:
+                ax.set_ylim(ylim)
+            ax.grid()
+            ax.set_xticklabels(ax.get_xticklabels(), rotation=90)
+            ax.set_axisbelow(True)
+    else:
+        ax = fg.ax
+        ax.grid()
+        ax.set_axisbelow(True)
+        art = fg.ax.set_xticklabels(fg.ax.get_xticklabels(), rotation=90)
+        if ylim is not None:
+            ax.set_ylim(ylim)
