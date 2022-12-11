@@ -649,14 +649,15 @@ def return_corrected_spacer(x, spacer_corrector, correction_pad='GGT'):
     match = spacer_corrector.search(x)
     return(f"{correction_pad}{match.group('spacer')}{match.group('rest')}"  if match else x)
 
-def load_wl(as_pl=False):
+def load_wl(as_pl: bool=False, turn_to_cat: bool= False):
     ''' load Kalhor table
     '''
     wl = pd.read_csv('/local/users/polivar/src/artnilet/conf/protospacers_singlecell.csv')
     wl.index = wl['kalhor_id']
     #cat_type = CategoricalDtype(categories=["b", "c", "d"], ordered=True)
-    wl['speed']= wl.speed.astype(pd.CategoricalDtype(categories=["fast", "mid", "slow"], ordered=True))
-    wl['diversity'] = wl['diversity'].astype(pd.CategoricalDtype(ordered=True))
+    if turn_to_cat:
+        wl['speed']= wl.speed.astype(pd.CategoricalDtype(categories=["fast", "mid", "slow"], ordered=True))
+        wl['diversity'] = wl['diversity'].astype(pd.CategoricalDtype(ordered=True))
     if as_pl:
         return(pl.DataFrame(wl))
     return(wl)
