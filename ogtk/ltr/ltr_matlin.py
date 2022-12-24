@@ -5,6 +5,7 @@ from scipy.cluster import hierarchy
 import ogtk
 import pdb
 import pandas as pd 
+import polars as pl
 import numpy as np
 from colorhash import ColorHash
 import matplotlib.pyplot as plt
@@ -331,8 +332,38 @@ class matlin():
         x = x * bints
         return(range(x, x+bints))
 
+    def ingest_ibars_pl(self, df, encode_mat=True, subset = ['kalhor_id', 'nspeed', 'raw_ibar']):
+        '''Direct convertion of a polars data frame into the character matrix of self.matlin object
+        '''
+
+            
+        df = (
+            df
+            .sort(subset)
+           )
+                
+        df =(df
+            .with_column(pl.when(~pl.col('wt'))
+                .then(pl.col('seq'))
+                .otherwise("..").alias('seq'))
+            .pivot(columns='raw_ibar', index='cbc', values='seq')
+            )
+
+        self.df  = df.to_pandas().set_index('cbc')
+        self.df = self.df.fillna(self.non_inf['NA'], inplace = False)
+        self.intid_len = self.df.shape[1]
+        f_wt = self.df==".."
+        self.df[f_wt] = self.non_inf["wt"]
+
+        self.ibar_to_bint = dict([(f'bint{i}',v) for i,v in enumerate(self.df.columns)])
+        self.df.columns = [f'bint{i}' for i in range(self.df.shape[1])]
+
+        if encode_mat:
+            self.__encode_mat()
 
     def ingest_ibars_csv(self, ifn, encode_mat=True):
+        ''' CSV convertion of a polars data frame into the character matrix of self.matlin object
+        '''
         self.df  = pd.read_csv(ifn).set_index('cbc')
         self.df = self.df.fillna(self.non_inf['NA'], inplace = False)
         self.intid_len = self.df.shape[1]
