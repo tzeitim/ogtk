@@ -251,7 +251,10 @@ def tabulate_single_umified_fastq(r1, cbc_len =16 , umi_len = 10, end = None, si
         print(f'using pre-computed {sorted_tab}')
         return(sorted_tab)
 
+
+    print("starting tabulation")
     print(subprocess.getoutput('date'))
+
 
     with open(unsorted_tab, 'wt') as R3:
         with gzip.open(r1, 'rt') as R1:#, bgzip.BGZipWriter(R3) as zR3:
@@ -287,6 +290,7 @@ def tabulate_single_umified_fastq(r1, cbc_len =16 , umi_len = 10, end = None, si
     cmd_tabix = f"tabix -f -b 2 -e 3 -s 4 --zero-based {sorted_tab}"
     c3 = subprocess.run(cmd_tabix.split())
     del_unsorted = subprocess.run(f'rm {unsorted_tab}'.split())
+    print("finished tabulation")
     print(subprocess.getoutput('date'))
     return(sorted_tab)
 
@@ -337,6 +341,7 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
                 return(parfn)
         return(sorted_tab)
 
+    print("starting tabulation")
     print(subprocess.getoutput('date'))
 
     with open(unsorted_tab, 'wt') as R3:
@@ -377,6 +382,7 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     c3 = subprocess.run(cmd_tabix.split())
     del_unsorted = subprocess.run(f'rm {unsorted_tab}'.split())
     print(subprocess.getoutput('date'))
+    print("finished tabulation")
     
     if export_parquet:
         export_tabix_parquet(sorted_tab, parfn)
@@ -409,6 +415,7 @@ def tabulate_umified_fastqs(r1, cbc_len =16, umi_len = 10, end = None, single_mo
         print(f'using pre-computed {sorted_tab}')
         return(sorted_tab)
 
+    print("starting tabulation")
     print(subprocess.getoutput('date'))
 
     with open(unsorted_tab, 'wt') as R3:
@@ -444,7 +451,8 @@ def tabulate_umified_fastqs(r1, cbc_len =16, umi_len = 10, end = None, single_mo
     c3 = subprocess.run(cmd_tabix.split())
     del_unsorted = subprocess.run(f'rm {unsorted_tab}'.split())
 
-    print(subprocess.getoutput('date'))
+    print("finished tabulation")
+    print(subprocess.getoutput('date'), end = "\n\n\n")
     return(sorted_tab)
 
 
