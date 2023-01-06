@@ -1,23 +1,27 @@
+import rich
+from pyaml import yaml
 
-class xp():
+class Xp():
     ''' Imports a yaml file into an instance of the class xp (experiment). Attributes are directly assigned via the yaml file
     '''
     def __init__(self, conf_fn=None, conf_dict=None):
         if conf_fn is not None:
-            from pyaml import yaml
             conf_dict = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
 
         for k,v in conf_dict.items():
             setattr(self, k, v)
 
         setattr(self, 'conf_fn', conf_fn)
+        if "xp_template" in vars(self):
+            self.consolidate_conf()
+
     def __str__(self):
         return '\n'.join([f'{i}:\t{ii}' for i,ii in self.__rich_repr__()])
 
     def __rich_repr__(self):
         for k,v in vars(self).items():
             yield k,v
-
+    
     def to_pl(self): 
         ''' Manually sanitize the vars() dictionary for direct coversion to a polars object
         '''
@@ -26,6 +30,17 @@ class xp():
         for k,v in vars(self).items():
              attrs[k] =[v]
         return pl.DataFrame(attrs)
+
+    def consolidate_conf(self):
+        ''' The self-referencing pointers in the configuration are evaluated
+        '''
+        xp_template = yaml.load(open(self.xp_template), Loader=yaml.FullLoader)
+        setattr(self, "workdir", xp_template['workdir'])
+        for k in [i for i in xp_template.keys() if i.startswith('wd_')]:
+            setattr(self, k, eval(xp_template[k]))
+
+        setattr(self, "consolidated", True)
+        rich.print(":vampire:")
 
 def return_file_name(sample_id, field):
     '''field can be:
@@ -118,39 +133,44 @@ def run_bcl2fq(xp_conf, **args):
     '''
     import subprocess
     import rich
+    from pyaml import yaml
+
     # load xp parameters
-    xp = db.xp(conf_fn=xp_conf)
+    xp = Xp(conf_fn=xp_conf)
+    if not xp.consolidated:
+        raise ValueError("Check the configuration to be automatically consolidated")
     # extract pre-processing config
-    pp = db.xp(conf_dict=getattr(xp, 'pp'))
+    pp = xp.pp #db.xp(conf_dict=getattr(xp, 'pp'))
     # extract bcl2fq config
-    b2fq = db.xp(conf_dict=pp.b2fq)
+    b2fq = pp['b2fq']
+    # populate xp-specific information
+    b2fq['outdir'] = xp.raw_reads
     #print(b2fq)
-    b2fq_g = db.xp(conf_fn=b2fq.template)
-    args = vars(b2fq)
+    b2fq_g = yaml.load(open(b2fq['template']), Loader=yaml.FullLoader)
+
     if args is not None:
-        for k,v in args.items():
-            setattr(b2fq, k, v)
+        for k in args.keys():# & b2fq.keys():
+            b2fq[k] = args[k]
             
-    for i in set(vars(b2fq).keys()).intersection(vars(b2fq_g).keys()):
-        print(f'-->{i}')
-    
-    return(b2fq_g)
-    import subprocess
-    import rich
-    # load xp parameters
-    xp = db.xp(conf_fn=xp_conf)
-    bcl = db.xp(conf_dict=xp.pp['bcl2fq'])
-    # extract pre-processing config
-    rich.print(bcl)
-    cmd = f"conda run -n {bcl.conda_env} {bcl.cmd}"
-    print(cmd)
-    
-    
-    subprocess.run(cmd.split(), shell=False)
+    for k in b2fq.keys() & b2fq_g.keys():
+        b2fq_g[k] = b2fq[k]
+        print(f'setting {k}-->{b2fq_g[k]}')
+    # populate command
+    # sanitize types
+    for k,v in b2fq_g.items():
+        b2fq_g[k] = str(v)
+
+    #bcl2fastq  --processing-threads THREADS --no-lane-splitting --barcode-mismatches BARCODEMM --sample-sheet SAMPLE_SHEET --runfolder-dir RUNDIR --output-dir OUTDIR OPTIONS'}
+    cmd = (
+        b2fq_g['cmd']
+            .replace('THREADS', b2fq_g['threads'])
+            .replace('BARCODEMM', b2fq_g['barcode_mismatches'])
+            .replace('SAMPLE_SHEET', b2fq_g['samplesheet'])
+            .replace('RUNDIR', b2fq_g['rundir'])
+            .replace('OUTDIR', b2fq_g['outdir'])
+            .replace('OPTIONS', b2fq_g['options'])
+        )
+    cmd = f"conda run -n {b2fq_g['conda_env']} {cmd}"
+    subprocess.run(cmd.split(), shell=False)#, stdout=open(, 'w'), stderr=open(, 'w'))
     return(cmd)
-    cmd = f'bash -i -c "conda activate {bcl.conda_env}; {bcl.cmd}"'
-    
-    cmd = subprocess.run(cmd.split(), shell=True)
-    
-    #subprocess.run(bcl.cmd.split())
     
