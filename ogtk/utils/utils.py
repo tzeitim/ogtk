@@ -334,6 +334,7 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     if os.path.exists(sorted_tab) and not force:
         print(f'using pre-computed {sorted_tab}')
         if export_parquet:
+            print("exporting to parquet")
             if os.path.exists(parfn) and not force:
                 return(parfn)
             else:
