@@ -573,28 +573,3 @@ def clone_purity_denoise(pairs_m):
     return(pairs_m)
 
 
-def return_file_name(sample_id, field):
-    '''field can be:
-        [ge_lib, lin_lib, tabix, rc_tabix]
-    '''
-    rootdir = '/local/users/polivar/src/artnilet/'
-    import polars as pl
-    import pandas as pd
-    import os
-
-    xps = (
-        pl.read_csv('/local/users/polivar/src/artnilet/conf/xpdb_datain.txt', sep='\t')
-        .filter(pl.col('sample_id')==sample_id)
-    )
-
-    lin_lib = xps['lin_lib'].to_list()[0]
-    if 'tabix' in field:
-        value = xps['lin_lib'].str.replace(f'_R1.+.fastq.gz', '.sorted.txt.gz').to_list()[0]
-        #value = lin_lib.replace(f'S.{"{1,}"}_R1.+.fastq.gz', '.sorted.txt.gz')
-        if 'rc' in field:
-            value = value.replace('sorted', 'rc_sorted')
-
-    return_value = f'{rootdir}/datain/{value}'
-    if not os.path.exists(return_value):
-        print(f'There was an issue while trying to open file {return_value}')
-    return(return_value)
