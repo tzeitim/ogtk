@@ -1,5 +1,9 @@
 import rich
+import os
 from pyaml import yaml
+from rich.console import Console
+from rich.text import Text
+import polars as pl
 
 class Xp():
     ''' Imports a yaml file into an instance of the class xp (experiment). Attributes are directly assigned via the yaml file
@@ -7,6 +11,7 @@ class Xp():
     def __init__(self, conf_fn=None, conf_dict=None):
         self.conf_fn = conf_fn
         self.consolidated = False
+        self.console = Console()
 
         if conf_fn is not None:
             conf_dict = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
@@ -28,7 +33,6 @@ class Xp():
     def to_pl(self): 
         ''' Manually sanitize the vars() dictionary for direct coversion to a polars object
         '''
-        import polars as pl
         attrs = {}
         for k,v in vars(self).items():
              attrs[k] =[v]
@@ -37,14 +41,23 @@ class Xp():
     def consolidate_conf(self):
         ''' The self-referencing pointers in the configuration are evaluated
         '''
+        # import information from experiment template
         if self.xp_template is not None:
             xp_template = yaml.load(open(self.xp_template), Loader=yaml.FullLoader)
 
+            # still undecided on whether to import everything or be more selective.
+            # for now we import all
             self.workdir =  xp_template['workdir']
             self.wd_datain = xp_template['datain']
 
-            for k in [i for i in xp_template.keys() if i.startswith('wd_')]:
-                setattr(self, k, eval(xp_template[k]))
+            for k in xp_template.keys():
+                if k.startswith('wd_'):
+                    # some variables are special and need to be evaluated
+                    setattr(self, k, eval(xp_template[k]))
+                else:
+                    # direct assignment
+                    setattr(self, k, xp_template[k])
+
 
             setattr(self, "consolidated", True)
             rich.print(":vampire:")
@@ -54,7 +67,6 @@ class Xp():
     def init_workdir(self):
         ''' create dir tree for a given experiment
         '''
-        import os
         if not self.consolidated:
             raise ValueError("An experiment object needs to be consolidated first, for this an `xp_template is needed`")
 
@@ -69,10 +81,16 @@ class Xp():
     def reset_done(self, pattern='*'):
         '''
         '''
-        import os
         cmd = f'rm {self.wd_logs}/.{pattern}_done'
         print(cmd)
         os.system(cmd)
+
+    def print(self, text, style="bold magenta"):
+        '''
+        '''
+        text = Text(text)
+        text.stylize(style)
+        self.console.print(text)
 
 
 def return_file_name(sample_id, field):
@@ -80,9 +98,7 @@ def return_file_name(sample_id, field):
         [ge_lib, lin_lib, tabix, rc_tabix]
     '''
     rootdir = '/local/users/polivar/src/artnilet/'
-    import polars as pl
     import pandas as pd
-    import os
 
     xps = (
         pl.read_csv('/local/users/polivar/src/artnilet/conf/xpdb_datain.txt', sep='\t')
@@ -103,15 +119,11 @@ def return_file_name(sample_id, field):
 
 
 def load_db(rootdir: str='/local/users/polivar/src/artnilet')-> None:
-    import rich
-    import polars as pl
-
     rich.print(f'loaded {rootdir}')
 
 def create_db(rootdir: str | None= None, fields = ['sample_id', 'ge_lib', 'lin_lib'])-> None:
     '''
     '''
-    import os
     if rootdir is None:
         raise ValueError("A root dir must be provided") 
 
@@ -121,13 +133,10 @@ def create_db(rootdir: str | None= None, fields = ['sample_id', 'ge_lib', 'lin_l
     else:
         print("not implemented")
 
-def run_cranger(xp, force=False, dry=False, **args):
+def run_cranger(xp, force=False, dry=False, verbose=False, **args):
     ''' Uses the convoluted way of the xp class
     '''
     import subprocess
-    import rich
-    import os
-    from pyaml import yaml
 
     if not xp.consolidated:
         raise ValueError("Check the configuration be consolidated")
@@ -151,7 +160,7 @@ def run_cranger(xp, force=False, dry=False, **args):
             
     for k in cr.keys() & cr_g.keys():
         cr_g[k] = cr[k]
-        print(f'setting {k}-->\t{cr_g[k]}')
+        xp.print(f'setting {k}\t-->\t{cr_g[k]}', 'yellow')
 
     # populate command
     # sanitize types
@@ -162,16 +171,17 @@ def run_cranger(xp, force=False, dry=False, **args):
     for k,v in cr_g.items():
         cr_g[k] = str(v)
 
-    rich.print(cr)
-    rich.print(cr_g)
+    if verbose:
+        rich.print(cr)
+        rich.print(cr_g)
     #cmd: BIN count --uiport=UIPORT --id=SAMPLE_ID --fastqs=FASTQ_DIR --sample=FASTQ_SAMPLE_STR --transcriptome=TRANSCRIPTOME --localcores=LOCAL_CORES --localmem=LOCAL_MEM OPTIONS
     cmd = (
             cr_g['cmd']
             .replace('BIN', cr_g['bin'])
             .replace('UIPORT', cr_g['uiport'])
             .replace('SAMPLE_ID', xp.sample_id)
-            .replace('FASTQ_DIR', f'{xp.wd_fastq}/ge')
-            .replace('FASTQ_SAMPLE_STR', xp.sample_id+'_ge')
+            .replace('FASTQ_DIR', f'{xp.wd_fastq}/{xp.scrna_suffix}')
+            .replace('FASTQ_SAMPLE_STR', f'{xp.sample_id}_{xp.scrna_suffix}')
             .replace('TRANSCRIPTOME', cr_g['transcriptome'])
             .replace('LOCAL_CORES', cr_g['localcores'])
             .replace('LOCAL_MEM', cr_g['localmem'])
@@ -180,11 +190,18 @@ def run_cranger(xp, force=False, dry=False, **args):
 
     done_token = f"{xp.wd_logs}/.cr_done"
 
+    xp.print(cmd)
+    xp.print(f"{xp.wd_logs}/cr.out\n{xp.wd_logs}/cr.err", "green")
+
     if not dry:
         if os.path.exists(done_token) and not force:
             return(0)
 
-        p1 = subprocess.run(cmd.split(), shell=False, stdout=open(f'{xp.wd_logs}/cr.out', 'w'), stderr=open(f'{xp.wd_logs}/cr.err', 'w'), cwd=xp.wd_scrna)
+        p1 = subprocess.run(cmd.split(), 
+                            shell=False, 
+                            stdout=open(f'{xp.wd_logs}/cr.out', 'w'), 
+                            stderr=open(f'{xp.wd_logs}/cr.err', 'w'), 
+                            cwd=xp.wd_scrna)
 
         if p1.returncode == 0:
             subprocess.run(f'touch {done_token}'.split())
@@ -193,15 +210,12 @@ def run_cranger(xp, force=False, dry=False, **args):
 
         return(p1)
     else:
-        return(cmd)
+        return(0)
 
-def run_bcl2fq(xp, force=False, dry=False, **args):
+def run_bcl2fq(xp, force=False, dry=False, verbose=False, **args):
     ''' Uses the convoluted way of the xp class
     '''
     import subprocess
-    import rich
-    import os
-    from pyaml import yaml
 
     if not xp.consolidated:
         raise ValueError("Check the configuration be consolidated")
@@ -224,12 +238,16 @@ def run_bcl2fq(xp, force=False, dry=False, **args):
             
     for k in b2fq.keys() & b2fq_g.keys():
         b2fq_g[k] = b2fq[k]
-        print(f'setting {k}-->\t{b2fq_g[k]}')
+        xp.print(f'setting {k}\t-->\t{b2fq_g[k]}', 'yellow')
 
     # populate command
     # sanitize types
     for k,v in b2fq_g.items():
         b2fq_g[k] = str(v)
+
+    if verbose:
+        rich.print(b2fq)
+        rich.print(b2fq_g)
 
     #bcl2fastq  --processing-threads THREADS --no-lane-splitting --barcode-mismatches BARCODEMM --sample-sheet SAMPLE_SHEET --runfolder-dir RUNDIR --output-dir OUTDIR OPTIONS'}
     cmd = (
@@ -244,6 +262,9 @@ def run_bcl2fq(xp, force=False, dry=False, **args):
     cmd = f"conda run -n {b2fq_g['conda_env']} {cmd}"
     done_token = f"{xp.wd_logs}/.bcl2fq_done"
 
+    xp.print(cmd)
+    xp.print(f"{xp.wd_logs}/bcl2fastq.out\n{xp.wd_logs}/bcl2fastq.err", "green")
+
     if not dry:
         if os.path.exists(done_token) and not force:
             return(0)
@@ -255,5 +276,11 @@ def run_bcl2fq(xp, force=False, dry=False, **args):
 
         return(p1)
     else:
-        return(cmd)
+        return(0)
     
+def tabulate_xp(xp, force=False):
+    '''
+    '''
+    import ogtk.utils as ut
+    r1= ut.sfind(f'{xp.wd_fastq}/{xp.shrna_suffix}', pattern=xp.sample_id+"*R1*")[0]
+    ut.tabulate_paired_umified_fastqs(r1=r1, force=force, rev_comp_r2=True, export_parquet=True)
