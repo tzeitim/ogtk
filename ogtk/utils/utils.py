@@ -385,6 +385,7 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     print("finished tabulation")
     
     if export_parquet:
+        print("exporting to parquet")
         export_tabix_parquet(sorted_tab, parfn)
 
     return(sorted_tab)
