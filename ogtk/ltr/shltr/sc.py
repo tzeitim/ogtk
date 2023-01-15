@@ -21,6 +21,7 @@ def reads_to_molecules(sample_id: str,
            valid_ibars: Sequence | None=None, 
            min_reads: int=1, 
            max_reads: int=int(1e6),
+           down_sample=None,
            min_cells_per_ibar: int | None=1000,
            clone: str | None=None,
            ) -> pl.DataFrame:
@@ -32,7 +33,7 @@ def reads_to_molecules(sample_id: str,
     
     # takes some time but is light-weight
     # TODO add cache point
-    rdf = ib.extract_read_grammar_new(parquet_ifn = parquet_ifn, batch = sample_id)
+    rdf = ib.extract_read_grammar_new(parquet_ifn = parquet_ifn, batch = sample_id, sample=down_sample)
     tot_reads = rdf.shape[0]
 
     # CPU-intensive
@@ -48,9 +49,7 @@ def reads_to_molecules(sample_id: str,
     ib.noise_spectrum(sample_id, rdf, index = ['dss'], columns='tsos')    
 
     # determine valid_ibars in data
-
     rdf = ib.filter_ibars(rdf, valid_ibars, min_cells_per_ibar=min_cells_per_ibar)
-    
 
     ## create mask for wt
     rdf = ib.mask_wt(rdf)
@@ -83,18 +82,58 @@ def reads_to_molecules(sample_id: str,
 
           )
 
-def allele_calling(df: pl.DataFrame)-> pl.DataFrame:
-    ''' Given a mol-level data frame, return the top allele for individual ibar-cell data points
+def allele_calling(
+        df: pl.DataFrame, 
+        min_umis_allele: int=2
+        )-> pl.DataFrame:
+    ''' Given a mol-level data frame, returns the top allele for individual ibar-cell data points
+    umis_allele is computed going over ['cbc', 'raw_ibar', 'seq', 'wt']  from `reads_to_molecules()`
     '''
-    import rich
-    # major collapse event where we keep the top ranking sequence as the final allele
+    # major collapse event where the top ranking sequence as the final allele is selected.
     df =  (
-        df
-        .sort('umis_allele', True)
-        .groupby(['cbc', 'raw_ibar'], maintain_order=True)
-        .head(1) # <- this is it!
+            df
+            #.filter(pl.col('wt').is_not())
+            .sort('umis_allele', True) # we give priority to non-wt
+            #.sort(['umis_allele', 'wt'], [True, False]) # we give priority to non-wt
+            .filter(pl.col('umis_allele')>=min_umis_allele)
+            .groupby(['cbc', 'raw_ibar'], maintain_order=True)
+            .head(1) # <- this is it!
     )
     return(df)
+
+def to_matlin(df, subset='cluster', cells=100):
+    ''' Returns a matlin object from an allele-called (e.g. `allele_calling()`)
+    '''
+    matl = ogtk.ltr.matlin()
+    #subset = ['kalhor_id', 'nspeed', 'raw_ibar']
+    matl.ingest_ibars_pl(df.head(cells* df['raw_ibar'].n_unique()), subset=subset)
+
+    return matl
+
+
+def to_compare_top_alleles(df):
+    ''' Returns a data frame with the number of umis supporting wt and non-wt states of a given ibar-cell
+    Fields:
+    true = wt
+    false = non-wt
+    lt = log wt
+    lf = log non-wt
+    '''
+    df = (df
+       .filter(pl.col('valid_cell'))
+       .filter(pl.col('valid_ibar'))
+       #.select(['cbc', 'raw_ibar', 'wt', 'umis_allele'])
+       .pivot(index=['cbc', 'raw_ibar'], columns='wt', values='umis_allele')
+    )
+    df = (df
+          .fill_null(0)
+          .with_columns(
+              [(1+pl.col('true')).log10().alias('lt'), 
+               (1+pl.col('false')).log10().alias('lf')]
+          ))
+    return(df)
+
+
 
 def basure():
     rich.print(f"%wt {data['wt'].mean() *100:.2f}")
