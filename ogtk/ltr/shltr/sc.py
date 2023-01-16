@@ -21,7 +21,7 @@ def reads_to_molecules(sample_id: str,
            valid_ibars: Sequence | None=None, 
            min_reads: int=1, 
            max_reads: int=int(1e6),
-           down_sample=None,
+           down_sample: int | None =None,
            min_cells_per_ibar: int | None=1000,
            clone: str | None=None,
            ) -> pl.DataFrame:
@@ -79,7 +79,9 @@ def reads_to_molecules(sample_id: str,
            .with_column(pl.col('umi').n_unique().over(['cbc', 'raw_ibar', 'seq', 'wt']).alias('umis_allele'))
                          # ^- this feels too high for my taste??
             .with_columns(pl.col('seq').n_unique().over(['cbc', 'raw_ibar']).alias('n_sib'))
-
+           # normalize umi counts based on the unfiltered size of the cell
+           .with_column(pl.col('umi').n_unique().over('cbc').alias('umis_cell'))
+           .with_column((pl.col('umis_allele')/pl.col('umis_cell')).prefix('norm_'))
           )
 
 def allele_calling(
