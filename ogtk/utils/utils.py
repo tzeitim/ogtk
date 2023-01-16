@@ -819,3 +819,21 @@ def rotate_labs(fg, ylim=None):
         art = fg.ax.set_xticklabels(fg.ax.get_xticklabels(), rotation=90)
         if ylim is not None:
             ax.set_ylim(ylim)
+
+def import_mols(h5_ifn):
+    import h5py
+    import polars as pl
+    #h5_ifn = '/local/users/polivar/src/artnilet/workdir/20230114_p2_tnxivtx20c/scrna/p2_tnxivtx20c/outs/molecule_info.h5'
+    mols = h5py.File(h5_ifn)
+    
+    mm = pl.DataFrame(
+        {
+        'barcode_idx':mols['barcode_idx'][()],
+        'count':mols['count'][()],
+        'feature_idx':mols['feature_idx'][()],
+        'umi':mols['umi'][()]
+        }
+        )
+    return(mm)
+    # then do something like
+    #mmm= mm.groupby(['barcode_idx', 'umi']).agg(pl.col('feature_idx').n_unique())
