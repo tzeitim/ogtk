@@ -1101,15 +1101,7 @@ def extract_read_grammar_new(
     parquet_ifn: str| None = None,
     df: pl.DataFrame | None = None,
     zombie = False,
-    do_plot = False,
-    encode = False,
-    valid_ibars = None,
-    min_cov = 2,
     sample = None,
-    plot = False,
-    return_encoded_reads = False,
-    unfiltered = False,
-    **kwargs,
     ) -> pl.DataFrame:
     ''' Encodes raw reads based on regular expressions. It doesn't aggregate results
     '''
@@ -1119,8 +1111,6 @@ def extract_read_grammar_new(
     wl = load_wl(True)
     wts = "|".join(wl['spacer'])
 
-    wts_g = "|".join([i[1:] for i in wl['spacer']])
-    
     u6mx = 'GACGAAACACC' # 'GACGAAACACC'
     tso = 'TTTCTTATATGGG'
     u6bk = "GGAAAGAAACACCG" # broken u6
@@ -1207,8 +1197,8 @@ def empirical_kalhor_annotation(df: pl.DataFrame, drop_counts: bool=True)->pl.Da
             .agg(pl.col('spacer').value_counts(sort=True).head(1))
             .explode('spacer')
             .unnest('spacer')
-              #.rename({'':'spacer', 'counts':'spacer_ibar_mols'}) # remove rename
-              .rename({'counts':'spacer_ibar_mols'}) # remove rename
+             #.rename({'':'spacer', 'counts':'spacer_ibar_mols'}) # remove rename
+            .rename({'counts':'spacer_ibar_mols'}) # remove rename
             .join(wl, right_on='spacer', left_on='spacer', how='inner')
         )
     if drop_counts:
