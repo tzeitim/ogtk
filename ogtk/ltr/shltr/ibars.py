@@ -714,7 +714,8 @@ def annotate_ibars(sample_id='h1e1', min_reads_umi=2, min_dom_cov=2):
         .filter(pl.col('kalhor_id').is_not_null())
         .groupby('ibar')
         .agg(pl.col('cseq').value_counts(sort=True).head(2))
-        .explode('cseq').unnest('cseq').rename({'':'cseq'})
+        #.explode('cseq').unnest('cseq').rename({'':'cseq'}) # remove rename
+        .explode('cseq').unnest('cseq') # remove rename
         .sort(['ibar','counts'], reverse=True)
         .join(wl, left_on='cseq', right_on='spacer', how='left')
     )
@@ -755,7 +756,8 @@ def compute_ibar_table_from_tabix_zombie(tbx_ifn, valid_cells):
             
             .groupby(['cbc', 'umi', 'ibar'], maintain_order=False)
                 .agg([pl.col('seq').value_counts(sort=True).head(1), pl.col('seq').count().alias('umi_reads')])
-                .explode('seq').unnest('seq').rename({'':'seq', 'counts':'umi_dom_reads'})
+                #.explode('seq').unnest('seq').rename({'':'seq', 'counts':'umi_dom_reads'}) # remove rename
+                .explode('seq').unnest('seq').rename({'counts':'umi_dom_reads'}) # remove rename
     )
 
     valid_ibars = guess_ibars_df(dff)
@@ -827,7 +829,8 @@ def annotate_ibars(df: pl.DataFrame):
         .filter(pl.col('kalhor_id').is_not_null())
         .groupby('ibar')
         .agg(pl.col('cseq').value_counts(sort=True).head(2))
-        .explode('cseq').unnest('cseq').rename({'':'cseq'})
+        #.explode('cseq').unnest('cseq').rename({'':'cseq'}) # remove rename
+        .explode('cseq').unnest('cseq') # remove rename
         .sort(['ibar','counts'], reverse=True)
         .join(wl, left_on='cseq', right_on='spacer', how='left')
     )
@@ -1204,7 +1207,8 @@ def empirical_kalhor_annotation(df: pl.DataFrame, drop_counts: bool=True)->pl.Da
             .agg(pl.col('spacer').value_counts(sort=True).head(1))
             .explode('spacer')
             .unnest('spacer')
-              .rename({'':'spacer', 'counts':'spacer_ibar_mols'})
+              #.rename({'':'spacer', 'counts':'spacer_ibar_mols'}) # remove rename
+              .rename({'counts':'spacer_ibar_mols'}) # remove rename
             .join(wl, right_on='spacer', left_on='spacer', how='inner')
         )
     if drop_counts:
