@@ -1097,15 +1097,15 @@ def extract_read_grammar_new(
     batch: str,
     parquet_ifn: str| None = None,
     df: pl.DataFrame | None = None,
-    zombie=False,
-    do_plot=False,
+    zombie = False,
+    do_plot = False,
     encode = False,
     valid_ibars = None,
-    min_cov=2,
-    sample=None,
-    plot=False,
-    return_encoded_reads=False,
-    unfiltered=False,
+    min_cov = 2,
+    sample = None,
+    plot = False,
+    return_encoded_reads = False,
+    unfiltered = False,
     **kwargs,
     ) -> pl.DataFrame:
     ''' Encodes raw reads based on regular expressions. It doesn't aggregate results
@@ -1260,8 +1260,8 @@ def ibar_reads_to_molecules(
                     pl.col('seq').count().alias('umi_reads') 
                     ])
             .collect()
-                .explode('seq').unnest('seq').rename({'':'seq', 'counts':'umi_dom_reads'})
-                .explode('oseq').unnest('oseq').rename({'':'oseq'}).drop('counts')
+                .explode('seq').unnest('seq').rename({'counts':'umi_dom_reads'})
+                .explode('oseq').unnest('oseq').drop('counts')
     )
 
     return(df)
