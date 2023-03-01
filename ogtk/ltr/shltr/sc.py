@@ -21,11 +21,12 @@ def reads_to_molecules(sample_id: str,
            valid_ibars: Sequence | None=None, 
            min_reads: int=1, 
            max_reads: int=int(1e6),
-           down_sample: int | None =None,
+           down_sample: int | None=None,
            min_cells_per_ibar: int | None=1000,
            clone: str | None=None,
+           columns_ns: str | Sequence='tsos',
            ) -> pl.DataFrame:
-    ''' Analytical routine to process UMIfied shRNA from bulk assays.
+    ''' Analytical routine to process UMIfied shRNA from single-cell assays (parquet format).
         If `clone` is not provided it assumes that can be found as the first element of a dash-splitted `sample_id` string. 
         Off-targets are defined by reads without an ibar pattern match.
         UMIs are filtered based on the number of reads
@@ -33,7 +34,7 @@ def reads_to_molecules(sample_id: str,
     
     # takes some time but is light-weight
     # TODO add cache point
-    rdf = ib.extract_read_grammar_new(parquet_ifn = parquet_ifn, batch = sample_id, sample=down_sample)
+    rdf = ib.extract_read_grammar_new(parquet_ifn = parquet_ifn, batch = sample_id, sample = down_sample)
     tot_reads = rdf.shape[0]
 
     # CPU-intensive
@@ -46,7 +47,7 @@ def reads_to_molecules(sample_id: str,
     if clone is None:
         clone = sample_id.split('_')[0]
 
-    ib.noise_spectrum(sample_id, rdf, index = ['dss'], columns='tsos')    
+    ib.noise_spectrum(sample_id, rdf, index = ['dss'], columns=columns_ns)    
 
     # determine valid_ibars in data
     rdf = ib.filter_ibars(rdf, valid_ibars, min_cells_per_ibar=min_cells_per_ibar)
@@ -58,6 +59,9 @@ def reads_to_molecules(sample_id: str,
     if plot:
         pt.plot_sibling_noise(rdf)
 
+    # TODO a small number (56 cases in 5M) of molecules ar the 
+    # ['cbc', 'umi','raw_ibar'] level map to more than one seq
+
     #gather stats
     pc_offt = rdf.filter(~pl.col("valid_ibar")).shape[0]/rdf.shape[0]
     tot_umis = rdf.select('umi').n_unique()
@@ -66,23 +70,18 @@ def reads_to_molecules(sample_id: str,
     print(f'{tot_umis=}')
     print(f'{tot_reads=}')
 
-    return(rdf
+    rdf = (rdf
            .filter(pl.col('raw_ibar').is_not_null())
-#           .filter(pl.col('raw_ibar').is_in(valid_ibars))
            .filter(pl.col('umi_dom_reads')>=min_reads)
            .filter(pl.col('umi_dom_reads')<=max_reads)
-           .with_columns(pl.lit(sample_id).alias('sample_id'))
-           .with_columns(pl.lit(clone).alias('clone'))
-           .with_columns(pl.lit(pc_offt).alias('qc_pc_offt'))
-           .with_columns(pl.lit(tot_umis).alias('qc_tot_umis'))
-           .with_columns(pl.lit(tot_reads).alias('qc_tot_reads'))
-           .with_column(pl.col('umi').n_unique().over(['cbc', 'raw_ibar', 'seq', 'wt']).alias('umis_allele'))
+           .with_columns(pl.col('umi').n_unique().over(['cbc', 'raw_ibar', 'seq', 'wt']).alias('umis_allele'))
                          # ^- this feels too high for my taste??
-            .with_columns(pl.col('seq').n_unique().over(['cbc', 'raw_ibar']).alias('n_sib'))
-           # normalize umi counts based on the unfiltered size of the cell
-           .with_column(pl.col('umi').n_unique().over('cbc').alias('umis_cell'))
-           .with_column((pl.col('umis_allele')/pl.col('umis_cell')).prefix('norm_'))
-          )
+           .with_columns(pl.col('seq').n_unique().over(['cbc', 'raw_ibar']).alias('n_sib'))
+           )
+    rdf = qc_stats(rdf, sample_id, clone, pc_offt, tot_umis, tot_reads)
+    # normalize umi counts based on the size of the cell and levels of expression of the ibar
+    rdf = normalize(rdf)
+    return(rdf)    
 
 def allele_calling(
         df: pl.DataFrame, 
@@ -135,6 +134,28 @@ def to_compare_top_alleles(df):
           ))
     return(df)
 
+def normalize(df):
+    ''' normalize umi counts based on the size of the cell and levels of expression of the ibar
+    '''
+    return(df
+        .with_columns(pl.col('umi').n_unique().over('cbc').alias('umis_cell'))
+        .with_columns(pl.col('umi').n_unique().over('raw_ibar').alias('umis_ibar'))
+        .with_columns((pl.col('umis_allele')/pl.col('umis_cell')).prefix('cs_norm_'))
+        .with_columns((pl.col('umis_allele')/pl.col('umis_ibar')).prefix('ib_norm_'))
+        .with_columns((pl.col('umis_allele')/pl.col('umis_cell')/pl.col('umis_ibar')).prefix('db_norm_'))
+    )
+
+def qc_stats(df, sample_id, clone, pc_offt, tot_umis, tot_reads):
+    ''' helper function that consolidates QC metrics into df
+    '''
+    return(
+            df
+           .with_columns(pl.lit(sample_id).alias('sample_id'))
+           .with_columns(pl.lit(clone).alias('clone'))
+           .with_columns(pl.lit(pc_offt).alias('qc_pc_offt'))
+           .with_columns(pl.lit(tot_umis).alias('qc_tot_umis'))
+           .with_columns(pl.lit(tot_reads).alias('qc_tot_reads'))
+           )
 
 
 def basure():
@@ -189,20 +210,20 @@ def basure():
         fg.ax.set_title(f'{batch} cells per ibar')
         fg.ax.set_ylim([0, fg.ax.get_ylim()[1]])
 
-        fg = sns.catplot(data=data.groupby('cbc').count().with_column(pl.col('count')/len(valid_ibars)).to_pandas(), y='count', kind='boxen', aspect=0.5)
+        fg = sns.catplot(data=data.groupby('cbc').count().with_columns(pl.col('count')/len(valid_ibars)).to_pandas(), y='count', kind='boxen', aspect=0.5)
         fg.ax.grid()
         fg.ax.set_title(f'{batch} ibars per cell')
         fg.ax.set_ylim([0, fg.ax.get_ylim()[1]])
 
-        fg = sns.catplot(data=data.groupby('raw_ibar').count().with_column(pl.col('count')/total_cells).to_pandas(), y='count', kind='boxen', aspect=0.5)
+        fg = sns.catplot(data=data.groupby('raw_ibar').count().with_columns(pl.col('count')/total_cells).to_pandas(), y='count', kind='boxen', aspect=0.5)
         fg.ax.grid()
         fg.ax.set_title(f'{batch} cells per ibar')
         fg.ax.set_ylim([0, fg.ax.get_ylim()[1]])
 
-    #rich.print(f"median ibars·per·cell {data.groupby('cbc').count().with_column(pl.col('count'))['count'].median()}")
-    #rich.print(f"fraction of ibars covered {data.groupby('cbc').count().with_column(pl.col('count')/len(valid_ibars))['count'].median()*100:.2f}%")
-    #rich.print(f"median cells·per·ibar {data.groupby('raw_ibar').count().with_column(pl.col('count'))['count'].median()}")
-    #rich.print(f"fraction of cells covered {data.groupby('raw_ibar').count().with_column(pl.col('count')/total_cells)['count'].median()*100:.2f}%")
+    #rich.print(f"median ibars·per·cell {data.groupby('cbc').count().with_columns(pl.col('count'))['count'].median()}")
+    #rich.print(f"fraction of ibars covered {data.groupby('cbc').count().with_columns(pl.col('count')/len(valid_ibars))['count'].median()*100:.2f}%")
+    #rich.print(f"median cells·per·ibar {data.groupby('raw_ibar').count().with_columns(pl.col('count'))['count'].median()}")
+    #rich.print(f"fraction of cells covered {data.groupby('raw_ibar').count().with_columns(pl.col('count')/total_cells)['count'].median()*100:.2f}%")
 
     
     if False:
@@ -285,13 +306,35 @@ def basure():
 
     rich.print(':vampire:')
     data = (data
-       .with_column(pl.lit(batch).alias('sample_id'))
-       .with_column(pl.col('speed').cast(pl.Utf8))
-       .with_column(pl.col('raw_ibar').cast(pl.Utf8))
-       .with_column(pl.col('cbc').cast(pl.Utf8))
-       .with_column(pl.col('sample_id').cast(pl.Utf8))
-       .with_column(pl.col('diversity').cast(pl.Utf8))
+       .with_columns(pl.lit(batch).alias('sample_id'))
+       .with_columns(pl.col('speed').cast(pl.Utf8))
+       .with_columns(pl.col('raw_ibar').cast(pl.Utf8))
+       .with_columns(pl.col('cbc').cast(pl.Utf8))
+       .with_columns(pl.col('sample_id').cast(pl.Utf8))
+       .with_columns(pl.col('diversity').cast(pl.Utf8))
         )
     return(data)
 
+def compute_clonal_composition(df, clone_dict: dict | None=None, normalize=True)->pl.DataFrame:
+    ''' Provided a chimera data set (cells from two cell lines), assign
+        (per-cell) the normalized|total molecule counts mapping to cell-line specific
+        integrations. 
+    '''
 
+    if clone_dict is None:
+        print("using hard coded clone dict")
+        clone_dict = {3:"g10", 0:"g10", 1:"h1", -1:"h1", 2:"h1"}
+    
+    values = "ncounts" if normalize else 'counts'
+
+    per_cell_clonal_composition = (df
+             .filter(pl.col('cluster').is_not_null())
+             .with_columns(pl.col('cluster').apply(lambda x : clone_dict[x]))
+             .with_columns(pl.col('raw_ibar').n_unique().over(['cluster']).alias('csize'))
+             .groupby(['cbc', 'csize', 'umis_cell'])
+             .agg(pl.col('cluster').value_counts()).explode('cluster').unnest('cluster').rename({"":"clon"})
+             .with_columns((pl.col('counts')/pl.col('csize')).prefix('n'))
+             .pivot(index=['cbc', 'umis_cell'], columns='clon', values=values).sort('cbc')   
+             .fill_nan(0).fill_null(0)
+            )
+    return(per_cell_clonal_composition)
