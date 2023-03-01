@@ -47,16 +47,22 @@ class Xp():
 
             # still undecided on whether to import everything or be more selective.
             # for now we import all
-            self.workdir =  xp_template['workdir']
+            #self.workdir =  xp_template['workdir']
             self.wd_datain = xp_template['datain']
 
             for k in xp_template.keys():
                 if k.startswith('wd_'):
                     # some variables are special and need to be evaluated
-                    setattr(self, k, eval(xp_template[k]))
+                    if k not in vars(self):
+                        setattr(self, k, eval(xp_template[k]))
+                    else:
+                        self.print(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
                 else:
                     # direct assignment
-                    setattr(self, k, xp_template[k])
+                    if k not in vars(self):
+                        setattr(self, k, xp_template[k])
+                    else:
+                        self.print(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
 
 
             setattr(self, "consolidated", True)
@@ -74,12 +80,12 @@ class Xp():
             wd_dir = getattr(self, i)
             if not os.path.exists(wd_dir):
                 os.system(f"mkdir -p {wd_dir}")
-                print(f"created\t{wd_dir}")
+                self.print(f":construction:\t{wd_dir}")
             else:
-                print(f"found\t{wd_dir}")
+                self.print(f":mag:\t{wd_dir}")
 
     def reset_done(self, pattern='*'):
-        '''
+        ''' patterns can be: "cr", "bcl2fq", ""
         '''
         cmd = f'rm {self.wd_logs}/.{pattern}_done'
         print(cmd)
@@ -88,9 +94,9 @@ class Xp():
     def print(self, text, style="bold magenta"):
         '''
         '''
-        text = Text(text)
-        text.stylize(style)
-        self.console.print(text)
+        #text = Text(text)
+        #text.stylize(style)
+        self.console.print(text, style=style)
 
 
 def return_file_name(sample_id, field):
@@ -269,7 +275,10 @@ def run_bcl2fq(xp, force=False, dry=False, verbose=False, **args):
         if os.path.exists(done_token) and not force:
             return(0)
 
-        p1 = subprocess.run(cmd.split(), shell=False, stdout=open(f'{xp.wd_logs}/bcl2fastq.out', 'w'), stderr=open(f'{xp.wd_logs}/bcl2fastq.err', 'w'))
+        p1 = subprocess.run(cmd.split(),
+                            shell=False,
+                            stdout=open(f'{xp.wd_logs}/bcl2fastq.out', 'w'),
+                            stderr=open(f'{xp.wd_logs}/bcl2fastq.err', 'w'))
 
         if p1.returncode == 0:
             subprocess.run(f'touch {done_token}'.split())
@@ -279,8 +288,42 @@ def run_bcl2fq(xp, force=False, dry=False, verbose=False, **args):
         return(0)
     
 def tabulate_xp(xp, force=False):
-    '''
+    ''' 
+    Tabulates paired fastq of umified reads (R1:UMI:CB, R2:RNA) into the
+    parquet format. The xp configuration requires a `tabulate` field which in
+    turn needs a list of prefixes bound to a boolean variable that will
+    determine whether read2 is reverse-complemented.
+    For example (yaml format):
+    ```
+     tabulate:
+       shrna: true
+       zshrna: false
+    ```
     '''
     import ogtk.utils as ut
-    r1= ut.sfind(f'{xp.wd_fastq}/{xp.shrna_suffix}', pattern=xp.sample_id+"*R1*")[0]
-    ut.tabulate_paired_umified_fastqs(r1=r1, force=force, rev_comp_r2=True, export_parquet=True)
+
+    if 'tabulate' in vars(xp):
+        for suffix in xp.tabulate.keys():
+            xp.print(f"{suffix}", 'bold red')
+            path_to_reads = f'{xp.wd_fastq}/{suffix}'
+            rev_comp_r2 = xp.tabulate[suffix]
+            xp.print("path to reads:")
+            xp.print(path_to_reads, 'bold white')
+
+            pattern =f'{xp.sample_id}*R1*'
+            xp.print(f"pattern={pattern}", 'bold green')
+            xp.print(f"reverse complement r2 ={rev_comp_r2}", 'bold green')
+
+            r1 = ut.sfind(path_to_reads, pattern=pattern)
+            print(r1)
+            if len(r1)==0:
+                raise ValueError(f'No files found under the pattern {pattern}')
+            if not isinstance(r1, list):
+                r1 = [r1]
+            for found in r1:
+                xp.print(f"tabbing {found}")
+                outdir = f'{xp.wd_samplewd}/{suffix}'
+                ut.tabulate_paired_umified_fastqs(r1=found, force=force, rev_comp_r2=rev_comp_r2, export_parquet=True, outdir=outdir)
+
+    else:
+        raise ValueError('No "tabulate" attribute in xp. When specified, add an additional prefix field bound to a boolean variable that will determine the reverse-complementarity of read2. yaml example:\ntabulate:\n  shrna: true\n  zshrna: false\n')
