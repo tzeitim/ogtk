@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import polars as pl
 from . import ibars as ib
-
+from . import plot_bulk as pt
 
 def lalla():
     print("lalal")
