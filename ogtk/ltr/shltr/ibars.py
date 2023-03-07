@@ -1238,24 +1238,25 @@ def ibar_reads_to_molecules(
     '''
     # collapse reads into molecules
     # top_n should always be == 1
-    top_n =1
+    top_n = 1
     print('collapse into molecules')
     groups =['cbc', 'umi', 'raw_ibar', 'spacer'] 
 
     if modality =='single-molecule':
         groups = groups[1:]
-    df =( df 
-            .lazy()
-            .groupby(groups)
-                .agg([
-                    pl.col('oseq').value_counts(sort=True).head(top_n), 
-                    # TODO change this for a filter where we keep the top once and then force the other
-                    pl.col('seq').value_counts(sort=True).head(top_n), 
-                    pl.col('seq').count().alias('umi_reads') 
-                    ])
-            .collect()
-                .explode('seq').unnest('seq').rename({'counts':'umi_dom_reads'})
-                .explode('oseq').unnest('oseq').drop('counts')
+    df = (
+        df 
+        .lazy()
+        .groupby(groups)
+            .agg([
+                pl.col('oseq').value_counts(sort=True).head(top_n), 
+                # TODO change this for a filter where we keep the top one and then force the other
+                pl.col('seq').value_counts(sort=True).head(top_n), 
+                pl.col('seq').count().alias('umi_reads') 
+                ])
+        .collect()
+        .explode('seq').unnest('seq').rename({'counts':'umi_dom_reads'})
+        .explode('oseq').unnest('oseq').drop('counts')
     )
 
     return(df)
@@ -1298,7 +1299,7 @@ def compute_lookahead_ibar_stats(
 
 def noise_spectrum(batch: str,
                    df: pl.DataFrame,
-                   columns: str= 'wts',
+                   columns: str | Sequence = 'wts',
                    index: Sequence= ['sts', 'u6s', 'can', 'dss'],
                    out_fn: str| None= None) -> None:
     '''
@@ -1375,7 +1376,8 @@ def filter_ibars(
 
     else:
         # they are provided:
-        print('using provided intid wl')
+        print('using provided valid ibars')
+
     
     print(f'{len(valid_ibars)=}')
 
