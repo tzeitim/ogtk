@@ -9,7 +9,19 @@ def print_stats(adata, rs):
     iset = len_intersect(adata, rs)
     print(f"A total of {iset[0]} cbs were found on both sets {iset[1]:0.2f} {iset[2]:0.2f} ")
 
-def metacellize (set_name, adata, adata_workdir, excluded_gene_patterns = [], excluded_gene_names=None , suspect_gene_names=['shRNA', 'rtTA', 'Fun','Cas9', 'hist1h2ap', "Hist1h2ap"], forbidden_mods = [18, 26, 27, 34], return_adatas=True, log_debug=False, explore=True, full_cpus=56, moderate_cpus=8,  properly_sampled_max_excluded_genes_fraction = 0.03):
+def metacellize (set_name, 
+                 adata, 
+                 adata_workdir, 
+                 excluded_gene_patterns = [], 
+                 excluded_gene_names=None, 
+                 suspect_gene_names=['shRNA', 'rtTA', 'Fun','Cas9', 'hist1h2ap', "Hist1h2ap"], 
+                 forbidden_mods = [18, 26, 27, 34], 
+                 return_adatas=True, 
+                 log_debug=False, 
+                 explore=True, 
+                 full_cpus=56, 
+                 moderate_cpus=8, 
+                 properly_sampled_max_excluded_genes_fraction = 0.03):
     import anndata as ad
     import matplotlib.pyplot as plt
     import metacells as mc
@@ -254,6 +266,7 @@ def metacellize (set_name, adata, adata_workdir, excluded_gene_patterns = [], ex
 
         batch_counts = clean.obs.groupby('metacell').apply(lambda x: x.batch.value_counts(normalize=False)).unstack()
 
+        print(batch_counts.head())
         batch_frac = batch_counts.apply(lambda x: x/sum(x), axis=1)
         batch_frac.columns = [ f'{i}_frac' for i in batch_frac.columns]
 
