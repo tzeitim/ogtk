@@ -8,10 +8,10 @@ import polars as pl
 class Xp():
     ''' Imports a yaml file into an instance of the class xp (experiment). Attributes are directly assigned via the yaml file
     '''
-    def __init__(self, conf_fn=None, conf_dict=None):
+    def __init__(self, conf_fn=None, conf_dict=None, verbose = True):
         self.conf_fn = conf_fn
         self.consolidated = False
-        self.console = Console()
+        self.console = Console(width=500)
 
         if conf_fn is not None:
             conf_dict = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
@@ -21,7 +21,7 @@ class Xp():
                 setattr(self, k, v)
 
         if "xp_template" in vars(self):
-            self.consolidate_conf()
+            self.consolidate_conf(verbose = verbose)
 
     def __str__(self):
         return '\n'.join([f'{i}:\t{ii}' for i,ii in self.__rich_repr__()])
@@ -38,7 +38,7 @@ class Xp():
              attrs[k] =[v]
         return pl.DataFrame(attrs)
 
-    def consolidate_conf(self):
+    def consolidate_conf(self, verbose = True):
         ''' The self-referencing pointers in the configuration are evaluated
         '''
         # import information from experiment template
@@ -56,13 +56,15 @@ class Xp():
                     if k not in vars(self):
                         setattr(self, k, eval(xp_template[k]))
                     else:
-                        self.print(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
+                        if verbose:
+                            self.print(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
                 else:
                     # direct assignment
                     if k not in vars(self):
                         setattr(self, k, xp_template[k])
                     else:
-                        self.print(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
+                        if verbose:
+                            self.print(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
 
 
             setattr(self, "consolidated", True)
@@ -97,6 +99,23 @@ class Xp():
         #text = Text(text)
         #text.stylize(style)
         self.console.print(text, style=style)
+
+    def export_xpconf(self, out_fn = None, out_dir=None):
+        ''' Saves current instance of an experiment to the sample_wd directory as default
+        '''
+        if out_fn is None:
+            out_fn = f'{self.sample_id}_xpconf.yaml'
+        if out_dir is None:
+            out_dir = f'{self.wd_samplewd}'
+
+        out_fn = f'{out_dir}/{out_fn}'
+        self.print(f'Saving xp conf to {out_fn}')
+
+        xp_dic = vars(self).copy()
+        del xp_dic['console']
+    
+        with open(out_fn, 'w') as outfile:
+            yaml.dump(xp_dic, outfile)
 
 
 def return_file_name(sample_id, field):
@@ -198,6 +217,7 @@ def run_cranger(xp, force=False, dry=False, verbose=False, **args):
 
     xp.print(cmd)
     xp.print(f"{xp.wd_logs}/cr.out\n{xp.wd_logs}/cr.err", "green")
+    # TODO add a cr entry for the cmd ran
 
     if not dry:
         if os.path.exists(done_token) and not force:
