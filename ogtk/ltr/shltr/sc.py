@@ -18,6 +18,7 @@ def lala():
 
 def reads_to_molecules(sample_id: str,
            parquet_ifn: str, 
+           corr_dict_fn: str | None= None,
            valid_ibars: Sequence | None=None, 
            min_reads: int=1, 
            max_reads: int=int(1e6),
@@ -25,6 +26,8 @@ def reads_to_molecules(sample_id: str,
            min_cells_per_ibar: int | None=1000,
            clone: str | None=None,
            columns_ns: str | Sequence='tsos',
+           cache_dir: str='/local/users/polivar/src/artnilet/cache',
+           use_cache: bool=True
            ) -> pl.DataFrame:
     ''' Analytical routine to process UMIfied shRNA from single-cell assays (parquet format).
         If `clone` is not provided it assumes that can be found as the first element of a dash-splitted `sample_id` string. 
@@ -34,53 +37,65 @@ def reads_to_molecules(sample_id: str,
     
     # takes some time but is light-weight
     # TODO add cache point
-    rdf = ib.extract_read_grammar_new(parquet_ifn = parquet_ifn, batch = sample_id, sample = down_sample)
-    tot_reads = rdf.shape[0]
+    cache_out = f'{cache_dir}/{sample_id}_r2mols.parquet'
+    import os
 
-    # CPU-intensive
-    # TODO add thread control
-    rdf = ib.ibar_reads_to_molecules(rdf, modality='single-cell')
-    rdf = ib.count_essential_patterns(rdf)
+    if not use_cache or not os.path.exists(cache_out):
+        rdf = ib.extract_read_grammar_new(parquet_ifn = parquet_ifn, batch = sample_id, sample = down_sample)
+        tot_reads = rdf.shape[0]
 
-    # guess from the first field of the sample_id the clone of origin
-    # if `clone` is not specified
-    if clone is None:
-        clone = sample_id.split('_')[0]
+        # correct cbc if path to dictionary is provided
+        if corr_dict_fn is not None:
+            print('correcting with dic')
+            rdf = ogtk.utils.cd.correct_cbc_pl(rdf, ogtk.utils.cd.load_corr_dict(corr_dict_fn))
+        # CPU-intensive
+        # TODO add thread control
+        rdf = ib.ibar_reads_to_molecules(rdf, modality='single-cell')
+        rdf = ib.count_essential_patterns(rdf)
 
-    ib.noise_spectrum(sample_id, rdf, index = ['dss'], columns=columns_ns)    
+        # guess from the first field of the sample_id the clone of origin
+        # if `clone` is not specified
+        if clone is None:
+            clone = sample_id.split('_')[0]
 
-    # determine valid_ibars in data
-    rdf = ib.filter_ibars(rdf, valid_ibars, min_cells_per_ibar=min_cells_per_ibar)
+        ib.noise_spectrum(sample_id, rdf, index = ['dss'], columns=columns_ns)    
 
-    ## create mask for wt
-    rdf = ib.mask_wt(rdf)
+        # determine valid_ibars in data
+        rdf = ib.filter_ibars(rdf, valid_ibars, min_cells_per_ibar=min_cells_per_ibar)
 
-    plot = False
-    if plot:
-        pt.plot_sibling_noise(rdf)
+        ## create mask for wt
+        rdf = ib.mask_wt(rdf)
 
-    # TODO a small number (56 cases in 5M) of molecules ar the 
-    # ['cbc', 'umi','raw_ibar'] level map to more than one seq
+        plot = False
+        if plot:
+            pt.plot_sibling_noise(rdf)
 
-    #gather stats
-    pc_offt = rdf.filter(~pl.col("valid_ibar")).shape[0]/rdf.shape[0]
-    tot_umis = rdf.select('umi').n_unique()
+        # TODO a small number (56 cases in 5M) of molecules ar the 
+        # ['cbc', 'umi','raw_ibar'] level map to more than one seq
 
-    print(f'{pc_offt=:.2%}')
-    print(f'{tot_umis=}')
-    print(f'{tot_reads=}')
+        #gather stats
+        pc_offt = rdf.filter(~pl.col("valid_ibar")).shape[0]/rdf.shape[0]
+        tot_umis = rdf.select('umi').n_unique()
 
-    rdf = (rdf
-           .filter(pl.col('raw_ibar').is_not_null())
-           .filter(pl.col('umi_dom_reads')>=min_reads)
-           .filter(pl.col('umi_dom_reads')<=max_reads)
-           .with_columns(pl.col('umi').n_unique().over(['cbc', 'raw_ibar', 'seq', 'wt']).alias('umis_allele'))
-                         # ^- this feels too high for my taste??
-           .with_columns(pl.col('seq').n_unique().over(['cbc', 'raw_ibar']).alias('n_sib'))
-           )
-    rdf = qc_stats(rdf, sample_id, clone, pc_offt, tot_umis, tot_reads)
-    # normalize umi counts based on the size of the cell and levels of expression of the ibar
-    rdf = normalize(rdf)
+        print(f'{pc_offt=:.2%}')
+        print(f'{tot_umis=}')
+        print(f'{tot_reads=}')
+
+        rdf = (rdf
+               .filter(pl.col('raw_ibar').is_not_null())
+               .filter(pl.col('umi_dom_reads')>=min_reads)
+               .filter(pl.col('umi_dom_reads')<=max_reads)
+               .with_columns(pl.col('umi').n_unique().over(['cbc', 'raw_ibar', 'seq', 'wt']).alias('umis_allele'))
+                             # ^- this feels too high for my taste??
+               .with_columns(pl.col('seq').n_unique().over(['cbc', 'raw_ibar']).alias('n_sib'))
+               )
+        rdf = qc_stats(rdf, sample_id, clone, pc_offt, tot_umis, tot_reads)
+        # normalize umi counts based on the size of the cell and levels of expression of the ibar
+        rdf = normalize(rdf)
+        rdf.write_parquet(cache_out)
+    else:
+        print(f'loading from {cache_out}')
+        rdf = pl.read_parquet(cache_out)
     return(rdf)    
 
 def allele_calling(
