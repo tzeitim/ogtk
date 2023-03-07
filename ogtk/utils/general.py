@@ -298,7 +298,7 @@ def paired_umified_fastqs_to_parquet():
     ''' convert paired umified fastqs (e.g 10x) into parquet format
     '''
 
-def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False, rev_comp_r2=False, export_parquet = False):
+def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False, rev_comp_r2=False, export_parquet = False, outdir: str|None=None):
     ''' merge umified paired fastqs (e.g. 10x fastqs) into a single one tab file with fields:
         |readid | start | end  | cbc | umi | seq | qual|
 
@@ -316,11 +316,25 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     import gzip
     import bgzip
     r2 = r1.replace("R1", "R2")
-
     rc = 'rc_' if rev_comp_r2 else ''
+
     unsorted_tab = r1.split('_R1_')[0]+f'.{rc}unsorted.txt'
     sorted_tab = unsorted_tab.replace('unsorted.txt', 'sorted.txt.gz')
     parfn = unsorted_tab.replace('unsorted.txt', '.parquet')
+    
+    if outdir is not None:
+        import os
+        if not os.path.exists(outdir):
+            os.system(f'mkdir -p {outdir}')
+            print(f'created {outdir}')
+        basename = unsorted_tab.split('/')[-1]
+        unsorted_tab = f'{outdir}/{basename}'
+
+        basename = sorted_tab.split('/')[-1]
+        sorted_tab = f'{outdir}/{basename}'
+
+        basename = parfn.split('/')[-1]
+        parfn = f'{outdir}/{basename}'
 
     # round end to closest order of magnitude in powers of ten
     if end is not None:
@@ -334,10 +348,10 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     if os.path.exists(sorted_tab) and not force:
         print(f'using pre-computed {sorted_tab}')
         if export_parquet:
-            print("exporting to parquet")
             if os.path.exists(parfn) and not force:
                 return(parfn)
             else:
+                print("exporting to parquet")
                 export_tabix_parquet(sorted_tab, parfn)
                 return(parfn)
         return(sorted_tab)
@@ -531,105 +545,6 @@ def merge_10x_fastq_dir(indir, force = False, read1_pattern = "_R1_"):
             #ogtk.UM.annotate_bam(mbam_path)
             
             #print(mbam_path)
-     
-
-def generate_cbc_correction_dictionaries(path_to_bam, force = False, verbose = False, chunk_size=1e6):
-    '''
-    Generates a cellbarcode correction dictionary based on the cellranger barcoded BAM tags
-    TODO: there is a small fraction of uncorrected cell barcodes that seem to map to more than one corrected cell barcode
-    '''
-    import pysam
-    import os
-    import polars as pl
-    import rich
-
-    ofn = path_to_bam.replace('.bam', '.parquet')
-    print(f'scanning {path_to_bam}')
-    # load a pre-computed dictionary of found
-    if os.path.exists(ofn) and not force:
-        rich.print('pre-computed map found, returning file name. Use force to regenerate')
-        return(ofn)
-    else:
-    # make it if forced or not found
-        entries = []
-        if verbose:
-            rich.print(f'Opening bam file {path_to_bam} to screen for correction pairs', end = '....')
-        print('') 
-        bam = pysam.AlignmentFile(path_to_bam)
-
-        df = pl.DataFrame(columns=[('CR', pl.Utf8), ('CB', pl.Utf8)] )
-        
-        for read in bam:
-            if read.has_tag('CR') and read.has_tag('CB'):
-                entries.append((read.get_tag("CR"), read.get_tag("CB")))
-            
-
-            if len(entries)%chunk_size ==0:
-                df = (df.vstack(pl.DataFrame(entries, orient='row', columns=[('CR', pl.Utf8), ('CB', pl.Utf8)] ))
-                     .unique()
-                    )
-                rich.print(df.shape)
-                entries = []
-
-        df = df.unique().write_parquet(ofn)
-
-        if verbose:
-            print(f'done')
-
-        return(ofn)
-
-def generate_correction_dictionaries(pickle_ofn, path_to_bam, force = False, verbose = False):
-    '''
-    Generates a cellbarcode correction dictionary based on the cellranger barcoded BAM tags
-    TODO: there is a small fraction of uncorrected cell barcodes that seem to map to more than one corrected cell barcode
-    '''
-    import pysam
-    import itertools
-    import pickle 
-    import pyaml
-    import os
-
-    # load a pre-computed dictionary of found
-    if os.path.exists(pickle_ofn) and not force:
-        dd =  pickle.load(open(pickle_ofn, 'rb')) 
-        print(dd['qc'])
-        return(dd)
-    else:
-    # make it if forced or not found
-        bam = pysam.AlignmentFile(path_to_bam)
-        cbc_corr = []
-        umi_corr = []
-
-        if verbose:
-            print(f'Opening bam file {path_to_bam} to screen for correction pairs', end = '....')
-
-        for read in bam:
-            if read.has_tag('CR') and read.has_tag('CB'):
-                cbc_corr.append((read.get_tag('CR'), read.get_tag('CB')))
-            if read.has_tag('UR') and read.has_tag('UB'):
-                umi_corr.append((read.get_tag('UR'), read.get_tag('UB')))
-
-        if verbose:
-            print(f'done')
-
-        dict_cbc = dict(cbc_corr)
-        dict_umi = dict(umi_corr)
-
-        # quick QCs
-        before_dict_cbc = set([i[1] for i in cbc_corr])
-        before_dict_umi = set([i[1] for i in umi_corr])
-
-        qc_str = f'Missed barcode cases = {len(before_dict_cbc) - len(set(dict_cbc.values()))}'
-        qc_str = qc_str + f'Missed umi cases = {len(before_dict_umi) - len(set(dict_umi.values()))}'
-
-        print(qc_str)
-
-        dd = {'cell_barcodes':dict_cbc, 'umi_barcodes':dict_umi, 'qc':qc_str}
-        with open(pickle_ofn, 'wb') as handle:
-            pickle.dump(dd, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-        return(dd)
-
 
 def fill_sge_template(job_name, cmd, wd, pe = 'smp', ram = '7G', run_time = "00:10:00", job_reservation = False):
     ''' Main utility to generated a sge job script
