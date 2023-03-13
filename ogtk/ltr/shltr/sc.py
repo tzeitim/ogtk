@@ -330,26 +330,33 @@ def basure():
         )
     return(data)
 
-def compute_clonal_composition(df, clone_dict: dict | None=None, normalize=True)->pl.DataFrame:
+def compute_clonal_composition(
+       df, 
+       clone_dict: dict | None=None,
+       normalize_cluster_size=False,
+       )->pl.DataFrame:
     ''' Provided a chimera data set (cells from two cell lines), assign
         (per-cell) the normalized|total molecule counts mapping to cell-line specific
         integrations. 
+        df is a mol-level data frame
+        the normalization corresponds to the size of the ibar cluster
     '''
 
     if clone_dict is None:
-        print("using hard coded clone dict")
+        print("using hardcoded clone dict")
         clone_dict = {3:"g10", 0:"g10", 1:"h1", -1:"h1", 2:"h1"}
     
+    cell_size = 'ib_norm_umis_allele' if normalize else 'umis_cell'
     values = "ncounts" if normalize else 'counts'
 
     per_cell_clonal_composition = (df
              .filter(pl.col('cluster').is_not_null())
              .with_columns(pl.col('cluster').apply(lambda x : clone_dict[x]))
-             .with_columns(pl.col('raw_ibar').n_unique().over(['cluster']).alias('csize'))
-             .groupby(['cbc', 'csize', 'umis_cell'])
-             .agg(pl.col('cluster').value_counts()).explode('cluster').unnest('cluster').rename({"":"clon"})
-             .with_columns((pl.col('counts')/pl.col('csize')).prefix('n'))
-             .pivot(index=['cbc', 'umis_cell'], columns='clon', values=values).sort('cbc')   
+             .with_columns(pl.col('raw_ibar').n_unique().over(['cluster']).alias('cluster_size'))
+             .groupby(['cbc', 'cluster_size', 'umis_cell'])
+             .agg(pl.col('cluster').value_counts()).explode('cluster').unnest('cluster').rename({"cluster":"clone_score"})
+             .with_columns((pl.col('counts')/pl.col('cluster_size')).prefix('n'))
+             .pivot(index=['cbc', 'umis_cell'], columns='clone_score', values=values).sort('cbc')   
              .fill_nan(0).fill_null(0)
             )
     return(per_cell_clonal_composition)

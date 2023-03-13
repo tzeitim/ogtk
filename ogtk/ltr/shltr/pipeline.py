@@ -16,6 +16,9 @@ def _plot_cc(exp,
     cell_size_metric = "n_genes_by_counts",
     vmax=100,
     cluster_suffix='',
+    pseudo_c=0,
+    clone_numer='h1',
+    clone_denom='g10',
     ):
     ''' cell size vs clone composition 
     '''
@@ -28,10 +31,13 @@ def _plot_cc(exp,
                        right_on='cbc',
                        how='outer')
             .with_columns(pl.col('total_counts').fill_null(0))
-            )
+            .with_columns(((pseudo_c+pl.col(clone_numer))/(pseudo_c+pl.col(clone_denom))).log10().alias('log_ratio')
+                          ))
 
     data = data.filter(pl.col('total_counts')<max_cell_size)
     data = data.filter(pl.col('umis_cell')<tmax_cell_size)
+    data = data.filter(pl.col('log_ratio')<=lim).filter(pl.col('log_ratio')>=-lim)
+
 
     #data = data.filter(pl.col('total_counts')>1e3)
     #data = data.filter(pl.col('umis_cell')<500)
@@ -41,8 +47,9 @@ def _plot_cc(exp,
     #ax.set_ylim((0, 500))
 
     fig, (ax, ax2, ax3) = plt.subplots(1,3, figsize=(3*15,15))
-    sns.histplot(x=data[cell_size_metric], 
-                 y=np.log10(data['h1']/data['g10']),
+    sns.histplot(data=data.to_pandas(),
+                 x=cell_size_metric,
+                 y='log_ratio',
                  bins=100, ax= ax, cmap='RdYlBu_r', vmax=vmax)
 
 
@@ -51,8 +58,9 @@ def _plot_cc(exp,
     ax.grid()
     ax.set_ylabel('H1/G10')
 
-    sns.histplot(x=data['umis_cell'],
-                 y=np.log10(data['h1']/data['g10']),
+    sns.histplot(data=data.to_pandas(),
+                 x='umis_cell',
+                 y='log_ratio',
                  bins=100, ax= ax2, cmap='RdYlBu_r', vmax=vmax)
 
     ax2.set_xlim((0, tmax_cell_size))
@@ -64,7 +72,8 @@ def _plot_cc(exp,
 
     sns.histplot(data=data.to_pandas(),
                 x=cell_size_metric,
-                 y='umis_cell', bins=100,
+                 y='umis_cell', 
+                 bins=100,
                  log_scale=(False, False),
                  ax = ax3, cmap='RdYlBu_r', vmax=vmax)
     ax3.grid()
@@ -72,11 +81,14 @@ def _plot_cc(exp,
     plt.figure()
 
     sns.displot(data=data.to_pandas(),
-                x=data[cell_size_metric],
-                y=np.log10(data['h1']/data['g10']),
+                x=cell_size_metric,
+                y='log_ratio',
                 bins=100,
                 log_scale=(False, False),
-                col=f'leiden{cluster_suffix}', col_wrap=6, cmap='RdYlBu_r', vmax=50)
+                col=f'leiden{cluster_suffix}', 
+                col_wrap=6, 
+                cmap='RdYlBu_r', 
+                vmax=50)
 
 class Xp(db.Xp):
     def __init__(self, conf_fn):
@@ -174,12 +186,10 @@ class Xp(db.Xp):
         self.raw_adata = self.load_10_mtx()
         #self.adata.obs['bath'] = self.sample_id
 
-
-
-    def score_clone(self, min_cell_size: int = 0):
-        ''' Quantifies clonal composition of cells based on molecule cumulative counts of clone-specific ibars
-        '''
-        self.cc = shltr.sc.compute_clonal_composition(self.mols.filter(pl.col('umis_cell')>min_cell_size))
+    @wraps(shltr.sc.compute_clonal_composition)
+    def score_clone(self, min_cell_size=0, *args, **kwargs):
+        fn = shltr.sc.compute_clonal_composition
+        self.cc = fn(self.mols.filter(pl.col('umis_cell')>min_cell_size), *args, **kwargs)
 
 
     def init_object(self, sample_name: str| None= None):
