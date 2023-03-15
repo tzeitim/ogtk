@@ -1,4 +1,6 @@
 from ogtk.utils import db
+import matplotlib.pyplot as plt
+import seaborn as sns
 import ogtk.utils as ut
 import ogtk.ltr.shltr as shltr
 import scanpy as sc
@@ -16,23 +18,28 @@ def _plot_cc(exp,
     cell_size_metric = "n_genes_by_counts",
     vmax=100,
     cluster_suffix='',
-    pseudo_c=0,
-    clone_numer='h1',
-    clone_denom='g10',
+    pseudo_counts=0,
+    clone_numerator='h1',
+    clone_denominator='g10',
+    expr = None,
     ):
     ''' cell size vs clone composition 
     '''
     import matplotlib.pyplot as plt
     import seaborn as sns
     import numpy as np
-
-    data = (exp.cc.join(ut.sc.adobs_pd_to_df(exp.ad_sc), 
-                       left_on='cbc', 
-                       right_on='cbc',
-                       how='outer')
+    
+    cn = clone_numerator
+    cd = clone_denominator
+    a = pseudo_counts
+    
+    data = (pl.DataFrame(exp.ad_sc.obs)
             .with_columns(pl.col('total_counts').fill_null(0))
-            .with_columns(((pseudo_c+pl.col(clone_numer))/(pseudo_c+pl.col(clone_denom))).log10().alias('log_ratio')
-                          ))
+            .with_columns(((a+pl.col(cn))/(a+pl.col(cd))).log10().alias('log_ratio'))
+            )
+
+    if expr is not None:
+        data = data.filter(expr)
 
     data = data.filter(pl.col('total_counts')<max_cell_size)
     data = data.filter(pl.col('umis_cell')<tmax_cell_size)
@@ -162,23 +169,28 @@ class Xp(db.Xp):
         '''
 
         self.mols = self.load_guide_molecules(valid_ibars = valid_ibars, clone = clone)
+        self.mols = self.annotate_ibars(ibar_ann=ibar_ann)
+        self.score_clone(min_cell_size=min_cell_size)
         
-        dfc = (pl
-           .scan_parquet(ibar_ann)
-           .drop('sample_id').unique()
-            #.filter(pl.col('sample_id')==sample_id)
-            #.filter(pl.col('cluster')!=0)
-            .collect()
+
+    def annotate_ibars(self, 
+                  ibar_ann: str = '/local/users/polivar/src/artnilet/workdir/scv2/all_parquetino_clusters',
+       ):
+
+        dfc = (pl.scan_parquet(ibar_ann)
+               .drop('sample_id').unique()
+                #.filter(pl.col('sample_id')==sample_id)
+                #.filter(pl.col('cluster')!=0)
+                .collect()
             )
 
-        self.mols = (self.mols.join(
+        dfc = (self.mols.join(
                     dfc, 
                     left_on =['raw_ibar'], 
                     right_on=['raw_ibar'], 
                     how='left')
                     )
-
-        self.score_clone(min_cell_size=min_cell_size)
+        return(dfc)
 
     def init_adata(self):
         ''' Loads the raw cell ranger counts matrix
@@ -187,9 +199,22 @@ class Xp(db.Xp):
         #self.adata.obs['bath'] = self.sample_id
 
     @wraps(shltr.sc.compute_clonal_composition)
+
     def score_clone(self, min_cell_size=0, *args, **kwargs):
+        # when computing clonal composition directly merge this information to the ad_sc.obs 
         fn = shltr.sc.compute_clonal_composition
-        self.cc = fn(self.mols.filter(pl.col('umis_cell')>min_cell_size), *args, **kwargs)
+
+        cc = fn(self.mols.filter(pl.col('umis_cell')>min_cell_size), *args, **kwargs)
+        #cc = cc.with_columns(pl.col('total_counts').fill_null(0))
+        self.cc = cc.clone()
+
+        cc = cc.with_columns((pl.col('cbc') + '-1')).rename({'cbc':'index'}).to_pandas().set_index('index')
+
+        self.ad_sc.obs = self.ad_sc.obs.merge(
+            right=cc,
+            left_index=True,
+            right_index=True,
+            how='left')
 
 
     def init_object(self, sample_name: str| None= None):
@@ -201,9 +226,9 @@ class Xp(db.Xp):
         self.init_workdir()
         db.run_cranger(self, localcores=75, uiport=7777)
 
-        db.tabulate_xp(self)
-
         self.load_final_ad(sample_name=sample_name)
+
+        db.tabulate_xp(self)
 
         self.init_mols(valid_ibars = self.default_ibars(), clone=self.clone)
         #self.init_adata()
@@ -212,28 +237,35 @@ class Xp(db.Xp):
         ''' Loads final version of mcs and scs adatas
         ''' 
         mcs_ad_path = f'{self.wd_scrna}/{sample_name}.mcells_f.h5ad'
-        scs_ad_path = f'{self.wd_scrna}/{sample_name}.mcells_f.h5ad'
+        scs_ad_path = f'{self.wd_scrna}/{sample_name}.scells_f.h5ad'
         
         if os.path.exists(mcs_ad_path) and os.path.exists(scs_ad_path):
             self.print(f'loading final adatas:\n{mcs_ad_path}\n{scs_ad_path}', 'bold white')
-
             self.ad_mc = ad.read_h5ad(mcs_ad_path)
             self.ad_sc = ad.read_h5ad(scs_ad_path)
+
         else:
-            self.print(f'No final adatas found, compute them manually using .do_mc(explore=True), select best parameters and re-run .do_mc(explore=False)', 'bold red')
+            self.print(f'No final adatas found, compute them manually using .do_mc(explore=True), select best parameters and re-run .do_mc(explore=False)', 'bold red', force = True)
+            raise ValueError 
 
     def save_final_ad(self, sample_name):
         '''
         '''
         mcs_ad_path = f'{self.wd_scrna}/{sample_name}.mcells_f.h5ad'
-        scs_ad_path = f'{self.wd_scrna}/{sample_name}.mcells_f.h5ad'
+        scs_ad_path = f'{self.wd_scrna}/{sample_name}.scells_f.h5ad'
 
         self.print(f'saving final adatas:\n{mcs_ad_path}\n{scs_ad_path}', 'bold cyan')
 
         self.ad_mc.write_h5ad(mcs_ad_path)
         self.ad_sc.write_h5ad(scs_ad_path)
 
-    def do_mc(self, sample_name: str | None= None, explore = True, forbidden_mods:Sequence | None=None, force = False):
+    def do_mc(
+           self,
+           sample_name: str | None= None,
+           explore = True,
+           forbidden_mods:Sequence | None=None,
+           force = False
+           ):
         '''
         '''
         if sample_name is None:
@@ -254,7 +286,6 @@ class Xp(db.Xp):
 
             if self.adata is None:
                 self.init_adata()
-
 
             res = ut.sc.metacellize(set_name = sample_name,
                               adata=self.raw_adata, 
@@ -284,6 +315,55 @@ class Xp(db.Xp):
         self.metadata = metadata
        
         self.save_final_ad(sample_name)
+
+    @wraps(shltr.sc.allele_calling)
+    def init_alleles(self, 
+                     expr: None | pl.Expr=None,
+                     valid_ibars: Sequence| None= None,
+               *args, **kwargs):
+        ''' 
+        '''
+        if valid_ibars is None:
+            valid_ibars = self.default_ibars()
+
+        ax = sns.histplot(self.mols['db_norm_umis_allele'].log10(),
+                          element='step')
+        plt.show()
+        if expr is not None:
+            plt.figure()
+            ax = sns.histplot(self.mols.filter(expr)['db_norm_umis_allele'].log10(), 
+                              element='step')
+            plt.show()
+            self.alleles = shltr.sc.allele_calling(self.mols.filter(expr), *args, **kwargs)
+        else:
+            self.alleles = shltr.sc.allele_calling(self.mols, *args, **kwargs)
+
+        self.alleles = (self.alleles
+                        .with_column(pl.col('raw_ibar').is_in(valid_ibars)
+                            .alias('valid_ibar'))
+                        .sort(['cluster', 'raw_ibar'])
+                        )
+
+        self.alleles = self.alleles.join(ut.sc.adobs_pd_to_df(self.ad_sc), 
+                                 left_on='cbc', 
+                                 right_on='cbc', 
+                                 how='left')
+
+        self.alleles = self.alleles.filter(pl.col('umis_cell').is_not_null())
+
+    @wraps(shltr.sc.to_matlin)
+    def init_matlin(self, cells= 100, cores=4, *args, **kwargs):
+
+        fn = shltr.sc.to_matlin
+        self.matl = fn(self.alleles, cells=cells, *args, **kwargs)
+
+        self.matl.plot_mat(rows=range(0, self.matl.df.shape[0]))
+        plt.figure()
+        self.matl.allele_distance(cores=cores)    
+        self.matl.hclust(optimal_ordering=False)
+        self.matl.plot_mat(rows=range(0, self.matl.df.shape[0]))
+        plt.show()
+        return()
 
     def default_ibars(self):
             '''
