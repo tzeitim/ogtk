@@ -858,11 +858,11 @@ def explore_related_genes(adata,
                          suspect_gene_names,
                           lateral_mods=[],
                           force=False,
-                          grid = False,
-                          dpi=100,
-                     columns = 3,
-                          unit =5,
-                          f=1,
+                          grid=True,
+                          dpi=900,
+                     columns=4,
+                          unit=6,
+                          aspect_f=0.75,
                          ):
     
     if 'related_genes_similarity' not in adata.varp or force:
@@ -928,7 +928,7 @@ def explore_related_genes(adata,
 
     if grid:
         plt.rcParams.update(plt.rcParamsDefault)
-        fig, axes = plt.subplots(rows, columns, dpi=dpi, figsize=(unit, f*unit ))
+        fig, axes = plt.subplots(rows, columns, dpi=dpi, figsize=(unit, aspect_f*unit ))
         iaxes = iter(axes.flat)
 
     
@@ -959,7 +959,7 @@ def explore_related_genes(adata,
                               vmin=0,
                               vmax=1,
                               cmap=cmap,
-                              #linewidths=0.01,
+                              linewidths=0.01,
                               square=True,
                               ax = ax,
                               cbar=False)
@@ -969,7 +969,7 @@ def explore_related_genes(adata,
                               vmin=0,
                               vmax=1,
                               cmap=cmap,
-                              #linewidths=0.01,
+                              linewidths=0.01,
                               square=True,
                               cbar=False)
         ax.set_title(f'{set_name} Gene Module {gene_module} {lateral_txt}', fontsize=2)
