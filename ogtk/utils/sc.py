@@ -646,8 +646,7 @@ def explore_related_genes(adata,
             from scipy.cluster import hierarchy 
             Z = hierarchy.linkage(similarity_of_module, 'ward')
             zl = hierarchy.leaves_list(Z)
-
-        similarity_of_module = similarity_of_module.iloc[zl, zl]
+            similarity_of_module = similarity_of_module.iloc[zl, zl]
 
         labels = (x.with_columns(
                     pl.when(pl.col('gene_name').is_in(suspect_gene_names))
