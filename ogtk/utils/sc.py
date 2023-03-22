@@ -326,9 +326,6 @@ def m9tacellize(set_name,
     return([clean, metacells])
 
 
-
-
-
 def adobs_pd_to_df(adata):
     ''' Converts an adata.obs pd data frame to a pl data frame. It strips out the '-1' cell ranger suffix.
     '''
@@ -552,22 +549,22 @@ def qc_masks(adata,
     ###
     
     
-def explore_related_genes(adata, 
+def analyze_related_genes(adata, 
                           adata_workdir,
                           set_name,
                           usual_suspects,
                          suspect_gene_names,
+                          explore=True,
                           lateral_mods=[],
                           force=False,
                           grid=True,
                           dpi=900,
-                     columns=4,
+                         columns=4,
                           unit=6,
                           aspect_f=0.75,
                           cluster = True,
                          ):
     
-
     if 'related_genes_similarity' not in adata.varp or force:
         mc.pl.relate_genes(adata, random_seed=123456)
     
@@ -597,12 +594,21 @@ def explore_related_genes(adata,
                         ).alias('suspect_gene')
                     )
     pl_var =(pl_var
-             .with_columns(pl.col('suspect_gene').any().over('related_genes_module')
+             .with_columns(pl.col('suspect_gene')
+                           .any().over('related_genes_module')
              .alias('suspect_module'))
             )
     
-    suspect_gene_names_pl = pl_var.filter(pl.col('suspect_gene'))['gene_name'].sort().to_list()
-    suspect_gene_modules_pl = pl_var.filter((pl.col('suspect_gene')) & (pl.col('related_genes_module')>=0))['related_genes_module'].unique()                                        
+    suspect_gene_names_pl = (
+            pl_var.filter(pl.col('suspect_gene')
+                          )['gene_name'].sort().to_list()
+            )
+    suspect_gene_modules_pl = (
+            pl_var.filter(
+                        (pl.col('suspect_gene')) & (pl.col('related_genes_module')>=0)
+            )['related_genes_module'].unique()                                        
+             )
+
     module_of_genes = adata.var['related_genes_module']
     suspect_gene_modules = np.unique(module_of_genes[suspect_genes_mask])
     suspect_gene_modules = suspect_gene_modules[suspect_gene_modules >= 0]
@@ -611,13 +617,14 @@ def explore_related_genes(adata,
     #    soc = module_of_genes[module_of_genes == i]
         #print(f'm{i}::{len(soc)}::\t{"  ".join(sorted(soc.index.to_list()))}') 
     
-    suspect_gene_modules_pl = (pl_var
+    suspect_gene_modules_pl = (
+            pl_var
             .filter(pl.col('suspect_module'))
             .groupby(['related_genes_module'])
             .agg(pl.col('gene_name'))
             .with_columns(pl.col('gene_name').arr.join(", "))
             .sort('related_genes_module')
-                              )
+          )
     
     all_modules = [i for i in np.unique(module_of_genes) if int(i) >0]
     all_modules_pl = pl_var.filter(pl.col('related_genes_module')>0)['related_genes_module']
@@ -627,13 +634,11 @@ def explore_related_genes(adata,
     row_factor = len(suspect_gene_modules_pl)
     rows =(row_factor//columns) + (row_factor % columns >0 )
  
-
     if grid:
         plt.rcParams.update(plt.rcParamsDefault)
         fig, axes = plt.subplots(rows, columns, dpi=dpi, figsize=(unit, aspect_f*unit ))
         iaxes = iter(axes.flat)
 
-    
     def heatmap_mod(x, cmap='RdYlBu'):
         ''' polars-based module plotting
         ''' 
@@ -653,6 +658,7 @@ def explore_related_genes(adata,
                     .then(pl.col('gene_name').str.replace('^', '(*)'))
                     .otherwise(pl.col('gene_name'))
                     ))['gene_name']
+
         similarity_of_module.index = \
         similarity_of_module.columns = labels
 
@@ -671,7 +677,6 @@ def explore_related_genes(adata,
                               square=True,
                               ax = ax,
                               cbar=False)
- 
 
         else:
             ax = sns.heatmap(similarity_of_module,
@@ -691,6 +696,7 @@ def explore_related_genes(adata,
 
         return pl.DataFrame()
 
+    # apply heatmap plotting function
     ret = (pl_var
            .filter(
                 (pl.col('suspect_module')) &
@@ -704,7 +710,6 @@ def explore_related_genes(adata,
             ax.tick_params(labelsize=0, width=0, pad=-2, axis='both', which='major')
 
     plt.tight_layout(pad=-0.125)
-    return pl_var  
 
     # Do we really want to exclude initially all genes that are related to a given module?
     lateral_genes_mask = suspect_genes_mask
@@ -720,6 +725,7 @@ def explore_related_genes(adata,
             #lateral_genes_mask = forbiden_genes_mask | module_genes_mask
             lateral_genes_mask |= module_genes_mask
     
+    return pl_var  
     lateral_gene_names = sorted(adata.var_names[lateral_genes_mask])
 
     if force_usual_suspects:
