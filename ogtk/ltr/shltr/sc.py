@@ -99,13 +99,28 @@ def reads_to_molecules(sample_id: str,
     return(rdf)    
 
 def allele_calling(
-        df: pl.DataFrame, 
-        min_umis_allele: int=2
+        mols: pl.DataFrame, 
+        min_umis_allele: int=2,
         )-> pl.DataFrame:
     ''' Given a mol-level data frame, returns the top allele for individual ibar-cell data points
     umis_allele is computed going over ['cbc', 'raw_ibar', 'seq', 'wt']  from `reads_to_molecules()`
     '''
     # major collapse event where the top ranking sequence as the final allele is selected.
+
+    df = (
+        mols
+        #.filter(pl.col('wt').is_not())
+        .sort('umis_allele', descending=True) # we give priority to non-wt
+        #.sort('db_norm_umis_allele', descending=False) # we give priority to non-wt
+        #.sort(['umis_allele', 'wt'], [True, False]) # we give priority to non-wt
+        #.filter(pl.col('umis_allele')>=2)
+        .groupby(['cbc', 'raw_ibar'], maintain_order=True)
+        .head(1) # <- this is it!
+        .select(['cbc', 'raw_ibar', 'seq', 'wt','umis_allele', 'cluster'])
+        .with_columns(pl.col('raw_ibar').n_unique().over('cbc').alias('cov'))
+    )
+
+    return(df)
     df =  (
             df
             #.filter(pl.col('wt').is_not())
@@ -115,14 +130,20 @@ def allele_calling(
             .groupby(['cbc', 'raw_ibar'], maintain_order=True)
             .head(1) # <- this is it!
     )
-    return(df)
 
-def to_matlin(df, subset='cluster', cells=100):
+def to_matlin(df, expr: None | pl.Expr, subset='cluster', cells=100):
     ''' Returns a matlin object from an allele-called (e.g. `allele_calling()`)
     '''
     matl = ogtk.ltr.matlin()
     #subset = ['kalhor_id', 'nspeed', 'raw_ibar']
-    matl.ingest_ibars_pl(df.head(cells* df['raw_ibar'].n_unique()), subset=subset)
+    tot_ibars = df['raw_ibar'].n_unique()
+    top = cells * tot_ibars
+    top = cells 
+
+    if expr is None:
+        matl.ingest_ibars_pl(df.sample(top), subset=subset)
+    else:
+        matl.ingest_ibars_pl(df.filter(expr), subset=subset)
 
     return matl
 
@@ -349,14 +370,15 @@ def compute_clonal_composition(
     cell_size = 'ib_norm_umis_allele' if normalize else 'umis_cell'
     values = "ncounts" if normalize else 'counts'
 
-    per_cell_clonal_composition = (df
-             .filter(pl.col('cluster').is_not_null())
-             .with_columns(pl.col('cluster').apply(lambda x : clone_dict[x]))
-             .with_columns(pl.col('raw_ibar').n_unique().over(['cluster']).alias('cluster_size'))
-             .groupby(['cbc', 'cluster_size', 'umis_cell'])
-             .agg(pl.col('cluster').value_counts()).explode('cluster').unnest('cluster').rename({"cluster":"clone_score"})
-             .with_columns((pl.col('counts')/pl.col('cluster_size')).prefix('n'))
-             .pivot(index=['cbc', 'umis_cell'], columns='clone_score', values=values).sort('cbc')   
-             .fill_nan(0).fill_null(0)
-            )
+    per_cell_clonal_composition = (
+        df
+         .filter(pl.col('cluster').is_not_null())
+         .with_columns(pl.col('cluster').apply(lambda x : clone_dict[x]))
+         .with_columns(pl.col('raw_ibar').n_unique().over(['cluster']).alias('cluster_size'))
+         .groupby(['cbc', 'cluster_size', 'umis_cell'])
+         .agg(pl.col('cluster').value_counts()).explode('cluster').unnest('cluster').rename({"cluster":"clone_score"})
+         .with_columns((pl.col('counts')/pl.col('cluster_size')).prefix('n'))
+         .pivot(index=['cbc', 'umis_cell'], columns='clone_score', values=values).sort('cbc')   
+         .fill_nan(0).fill_null(0)
+        )
     return(per_cell_clonal_composition)

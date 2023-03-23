@@ -100,7 +100,8 @@ def _plot_cc(exp,
 class Xp(db.Xp):
     def __init__(self, conf_fn):
         super().__init__(conf_fn)
-        self.adata = None
+        self.raw_adata = None
+        self.explored = False
 
     def load_10_mtx(self, cache = True, batch = None):
         ''' Loads the corresponding 10x matrix for a given experiment
@@ -192,10 +193,11 @@ class Xp(db.Xp):
                     )
         return(dfc)
 
-    def init_adata(self):
+    def init_adata(self, force:bool=True):
         ''' Loads the raw cell ranger counts matrix
         '''
-        self.raw_adata = self.load_10_mtx()
+        if self.raw_adata is None or force:
+            self.raw_adata = self.load_10_mtx()
         #self.adata.obs['bath'] = self.sample_id
 
     @wraps(shltr.sc.compute_clonal_composition)
@@ -226,7 +228,9 @@ class Xp(db.Xp):
         self.init_workdir()
         db.run_cranger(self, localcores=75, uiport=7777)
 
-        self.load_final_ad(sample_name=sample_name)
+        res = self.load_final_ad(sample_name=sample_name)
+        if res >0:
+            return
 
         db.tabulate_xp(self)
 
@@ -236,82 +240,115 @@ class Xp(db.Xp):
     def load_final_ad(self, sample_name):
         ''' Loads final version of mcs and scs adatas
         ''' 
-        mcs_ad_path = f'{self.wd_scrna}/{sample_name}.mcells_f.h5ad'
-        scs_ad_path = f'{self.wd_scrna}/{sample_name}.scells_f.h5ad'
+        mcs_fad_path = self.return_path('mcs_fad_path')
+        scs_fad_path = self.return_path('scs_fad_path')
         
-        if os.path.exists(mcs_ad_path) and os.path.exists(scs_ad_path):
-            self.print(f'loading final adatas:\n{mcs_ad_path}\n{scs_ad_path}', 'bold white')
-            self.ad_mc = ad.read_h5ad(mcs_ad_path)
-            self.ad_sc = ad.read_h5ad(scs_ad_path)
+        if os.path.exists(mcs_fad_path) and os.path.exists(scs_fad_path):
+            self.print(f'loading final adatas:\n{mcs_fad_path}\n{scs_fad_path}', 'bold white')
+            self.ad_mc = ad.read_h5ad(mcs_fad_path)
+            self.ad_sc = ad.read_h5ad(scs_fad_path)
+            return 0
 
         else:
             self.print(f'No final adatas found, compute them manually using .do_mc(explore=True), select best parameters and re-run .do_mc(explore=False)', 'bold red', force = True)
+            return 1
             raise ValueError 
 
     def save_final_ad(self, sample_name):
         '''
         '''
-        mcs_ad_path = f'{self.wd_scrna}/{sample_name}.mcells_f.h5ad'
-        scs_ad_path = f'{self.wd_scrna}/{sample_name}.scells_f.h5ad'
+        mcs_fad_path = self.return_path('mcs_fad_path')
+        scs_fad_path = self.return_path('scs_fad_path')
 
-        self.print(f'saving final adatas:\n{mcs_ad_path}\n{scs_ad_path}', 'bold cyan')
+        self.print(f'saving final adatas:\n{mcs_fad_path}\n{scs_fad_path}', 'bold cyan')
 
-        self.ad_mc.write_h5ad(mcs_ad_path)
-        self.ad_sc.write_h5ad(scs_ad_path)
+        self.ad_mc.write_h5ad(mcs_fad_path)
+        self.ad_sc.write_h5ad(scs_fad_path)
 
+    def return_path(self, kind, sample_name:str|None=None):
+        if sample_name is None:
+            sample_name = self.sample_id
+        #_f for final
+        mcs_ad_path = f'{self.wd_scrna}/{sample_name}.mcells.h5ad'
+        mcs_fad_path = mcs_ad_path.replace('mcells', 'mcells_f')
+        
+        scs_ad_path = mcs_ad_path.replace('mcells', 'scells')
+        scs_fad_path = mcs_fad_path.replace('mcells', 'scells')
+        
+        otl_ad_path = mcs_ad_path.replace('mcells', 'outliers')
+        
+        return locals()[kind]
+    
+    def clear_mc(self, 
+                 kinds:Sequence|None=None,
+                ):
+        if kinds is None:
+            kinds = ['mcs_ad_path', 'scs_ad_path', 'otl_ad_path', 'mcs_fad_path', 'scs_fad_path']
+        for i in kinds:
+            i = self.return_path(i)
+            if os.path.exists(i):
+                print(f'removing {i}')
+                os.system(f'rm {i}') 
+        
+        
+    @wraps(ut.sc.metacellize)
     def do_mc(
-           self,
-           sample_name: str | None= None,
-           explore = True,
-           forbidden_mods:Sequence | None=None,
-           force = False
+        self,
+           sample_name:str|None= None,
+           lateral_mods:Sequence|None=None,
+           force:bool=False,
+           explore:bool=True,
+           full_cpus:int=8,
+           target_metacell_size:int=100,
+           *args,
+           **kwargs,
            ):
-        '''
-        '''
         if sample_name is None:
             sample_name = self.sample_id
 
-        mcs_ad_path = f'{self.wd_scrna}/{sample_name}.mcells.h5ad'
-        scs_ad_path = mcs_ad_path.replace('mcells', 'scells')
-        outl_ad_path = mcs_ad_path.replace('mcells', 'outliers')
+        mcs_ad_path = self.return_path('mcs_ad_path')
+        scs_ad_path = self.return_path('scs_ad_path')
+        otl_ad_path = self.return_path('otl_ad_path')
 
         if os.path.exists(scs_ad_path) and os.path.exists(mcs_ad_path) and not force:
             self.print('loading cached adatas')
             mcs = ad.read_h5ad(mcs_ad_path)
             scs = ad.read_h5ad(scs_ad_path)
-            outliers = ad.read_h5ad(outl_ad_path)
+            outliers = ad.read_h5ad(otl_ad_path)
             metadata = None
                                     
         else:
-
-            if self.adata is None:
-                self.init_adata()
-
+            self.init_adata(force)
             res = ut.sc.metacellize(set_name = sample_name,
                               adata=self.raw_adata, 
-                              adata_workdir=self.wd_scrna, 
-                              explore=explore, 
-                              return_adatas=True,
-                              forbidden_mods=forbidden_mods)
+                              adata_workdir=self.wd_scrna,
+                              explore = explore,
+                              *args,
+                              **kwargs)
             if not explore:
-                scs, mcs, outliers, metadata = res
-        
+                scs, mcs,  metadata = res
+            else:
+                self.explored = True
+                print(f'{explore=}')
+                return
         # cluster metacells
         mcs = ut.sc.scanpyfi(mcs.copy())
         # cluster single-cells
         scs = ut.sc.scanpyfi(scs.copy())
 
+        
         # propagate metacell results to single-cells
-        scs.obs = scs.obs.merge(
+        scsm = scs.obs.merge(
                 right=mcs.obs.reset_index(drop=True), 
                 left_on='metacell', 
                 right_index=True, 
                 how='outer', 
                 suffixes=['', '_mc'])
 
+        # rigth way to overwrite .obs ?
+        scs.obs = scsm.loc[scs.obs.index]
         self.ad_sc = scs
         self.ad_mc = mcs
-        self.outliers = outliers
         self.metadata = metadata
        
         self.save_final_ad(sample_name)
@@ -326,14 +363,13 @@ class Xp(db.Xp):
         if valid_ibars is None:
             valid_ibars = self.default_ibars()
 
-        ax = sns.histplot(self.mols['db_norm_umis_allele'].log10(),
-                          element='step')
-        plt.show()
+        #ax = sns.histplot(self.mols['db_norm_umis_allele'].log10(),
+        #                  element='step', fill=False)
         if expr is not None:
             plt.figure()
-            ax = sns.histplot(self.mols.filter(expr)['db_norm_umis_allele'].log10(), 
-                              element='step')
-            plt.show()
+         #   ars = sns.histplot(self.mols.filter(expr)['db_norm_umis_allele'].log10(), 
+         #                      ax = ax, color='orange', fill=True,
+         #                     element='step')
             self.alleles = shltr.sc.allele_calling(self.mols.filter(expr), *args, **kwargs)
         else:
             self.alleles = shltr.sc.allele_calling(self.mols, *args, **kwargs)
@@ -351,12 +387,13 @@ class Xp(db.Xp):
 
         self.alleles = self.alleles.filter(pl.col('umis_cell').is_not_null())
 
+
     @wraps(shltr.sc.to_matlin)
     def init_matlin(self, cells= 100, cores=4, *args, **kwargs):
 
+        plt.rcParams['figure.dpi'] = 100
         fn = shltr.sc.to_matlin
         self.matl = fn(self.alleles, cells=cells, *args, **kwargs)
-
         self.matl.plot_mat(rows=range(0, self.matl.df.shape[0]))
         plt.figure()
         self.matl.allele_distance(cores=cores)    
@@ -376,4 +413,9 @@ class Xp(db.Xp):
     @wraps(_plot_cc)
     def plot_cc(self, *args, **kwargs):
         _plot_cc(self, *args, **kwargs)
+
+
+
+
+
 
