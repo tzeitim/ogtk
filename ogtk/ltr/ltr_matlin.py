@@ -332,15 +332,17 @@ class matlin():
         x = x * bints
         return(range(x, x+bints))
 
-    def ingest_ibars_pl(self, df, encode_mat=True, subset = ['kalhor_id', 'nspeed', 'raw_ibar']):
-        '''Direct convertion of a polars data frame into the character matrix of self.matlin object
-        '''
+    def ingest_ibars_pl(self, 
+            df, 
+            encode_mat=True, 
+            subset=['kalhor_id', 'nspeed', 'raw_ibar'],
+            ):
 
+        '''Direct convertion of a polars data frame into the character matrix
+        of self.matlin object 
+        '''
             
-        df = (
-            df
-            .sort(subset)
-           )
+        df = df.sort(subset)
                 
         df =(df
             .with_column(pl.when(~pl.col('wt'))
