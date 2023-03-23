@@ -8,10 +8,11 @@ import polars as pl
 class Xp():
     ''' Imports a yaml file into an instance of the class xp (experiment). Attributes are directly assigned via the yaml file
     '''
-    def __init__(self, conf_fn=None, conf_dict=None, verbose = True):
+    def __init__(self, conf_fn=None, conf_dict=None, quiet=True):
         self.conf_fn = conf_fn
         self.consolidated = False
         self.console = Console(width=500)
+        self.quiet = quiet
 
         if conf_fn is not None:
             conf_dict = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
@@ -21,7 +22,7 @@ class Xp():
                 setattr(self, k, v)
 
         if "xp_template" in vars(self):
-            self.consolidate_conf(verbose = verbose)
+            self.consolidate_conf()
 
     def __str__(self):
         return '\n'.join([f'{i}:\t{ii}' for i,ii in self.__rich_repr__()])
@@ -38,7 +39,7 @@ class Xp():
              attrs[k] =[v]
         return pl.DataFrame(attrs)
 
-    def consolidate_conf(self, verbose = True):
+    def consolidate_conf(self):
         ''' The self-referencing pointers in the configuration are evaluated
         '''
         # import information from experiment template
@@ -56,19 +57,16 @@ class Xp():
                     if k not in vars(self):
                         setattr(self, k, eval(xp_template[k]))
                     else:
-                        if verbose:
-                            self.print(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
+                        self.print(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
                 else:
                     # direct assignment
                     if k not in vars(self):
                         setattr(self, k, xp_template[k])
                     else:
-                        if verbose:
-                            self.print(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
+                        self.print(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
 
 
             setattr(self, "consolidated", True)
-            rich.print(":vampire:")
         else:
             print('an experiment template is needed')
 
@@ -93,12 +91,13 @@ class Xp():
         print(cmd)
         os.system(cmd)
 
-    def print(self, text, style="bold magenta"):
+    def print(self, text, style="bold magenta", force=False):
         '''
         '''
         #text = Text(text)
         #text.stylize(style)
-        self.console.print(text, style=style)
+        if not self.quiet or force:
+            self.console.print(text, style=style)
 
     def export_xpconf(self, out_fn = None, out_dir=None):
         ''' Saves current instance of an experiment to the sample_wd directory as default
@@ -158,7 +157,7 @@ def create_db(rootdir: str | None= None, fields = ['sample_id', 'ge_lib', 'lin_l
     else:
         print("not implemented")
 
-def run_cranger(xp, force=False, dry=False, verbose=False, **args):
+def run_cranger(xp, force=False, dry=False, **args):
     ''' Uses the convoluted way of the xp class
     '''
     import subprocess
@@ -196,9 +195,8 @@ def run_cranger(xp, force=False, dry=False, verbose=False, **args):
     for k,v in cr_g.items():
         cr_g[k] = str(v)
 
-    if verbose:
-        rich.print(cr)
-        rich.print(cr_g)
+    xp.print(cr)
+    xp.print(cr_g)
     #cmd: BIN count --uiport=UIPORT --id=SAMPLE_ID --fastqs=FASTQ_DIR --sample=FASTQ_SAMPLE_STR --transcriptome=TRANSCRIPTOME --localcores=LOCAL_CORES --localmem=LOCAL_MEM OPTIONS
     cmd = (
             cr_g['cmd']
@@ -238,7 +236,7 @@ def run_cranger(xp, force=False, dry=False, verbose=False, **args):
     else:
         return(0)
 
-def run_bcl2fq(xp, force=False, dry=False, verbose=False, **args):
+def run_bcl2fq(xp, force=False, dry=False, **args):
     ''' Uses the convoluted way of the xp class
     '''
     import subprocess
@@ -271,9 +269,8 @@ def run_bcl2fq(xp, force=False, dry=False, verbose=False, **args):
     for k,v in b2fq_g.items():
         b2fq_g[k] = str(v)
 
-    if verbose:
-        rich.print(b2fq)
-        rich.print(b2fq_g)
+    xp.print(b2fq)
+    xp.print(b2fq_g)
 
     #bcl2fastq  --processing-threads THREADS --no-lane-splitting --barcode-mismatches BARCODEMM --sample-sheet SAMPLE_SHEET --runfolder-dir RUNDIR --output-dir OUTDIR OPTIONS'}
     cmd = (
@@ -347,3 +344,4 @@ def tabulate_xp(xp, force=False):
 
     else:
         raise ValueError('No "tabulate" attribute in xp. When specified, add an additional prefix field bound to a boolean variable that will determine the reverse-complementarity of read2. yaml example:\ntabulate:\n  shrna: true\n  zshrna: false\n')
+
