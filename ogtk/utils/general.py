@@ -690,7 +690,7 @@ def export_tabix_parquet(tbxifn, parfn)->None:
     print(subprocess.getoutput('date'))
 
 def cut(
-    s: pl.internals.series.Series,
+    s,# pl.internals.series.Series,
     bins: list[float],
     labels: Optional[list[str]] = None,
     break_point_label: str = "break_point",
