@@ -1,4 +1,5 @@
 from anndata import AnnData
+import os
 from functools import wraps
 import matplotlib.pyplot as plt
 import metacells as mc
@@ -33,10 +34,10 @@ def metacellize(
     excluded_gene_names: Sequence|None=None, 
     target_metacell_size=100,
     suspect_gene_names=['shRNA', 'rtTA', 'Fun','Cas9', 'Hist1h2ap'], 
-    suspect_gene_patterns = ['mt-.*', 'Dnaj'],
+    suspect_gene_patterns = ['mt-.*', 'Dnaj.*'],
     usual_suspects=['Pcna', 'Pclaf', 'Jun', 'Top2a', 'Txn', 'Hsp90ab1', 'Fos', 'Dnaj', 'Ube2c'],
     force_usual_suspects=True,
-    manual_ban: Sequence | None=None,
+    manual_ban: Sequence | None=[],
     lateral_modules: Sequence | None=None,
     return_adatas=True, 
     log_debug=False, 
@@ -48,6 +49,7 @@ def metacellize(
     properly_sampled_min_cell_total=500,
     properly_sampled_max_cell_total=20000,
     force:bool=False,
+    grid:bool=True,
                 ):
     '''
     '''
@@ -70,9 +72,10 @@ def metacellize(
     if lateral_modules is None:
         lateral_modules = []
 
-    clean_adata(adata, properly_sampled_min_cell_total=1000, force=force)
-
-    qc_masks(adata, 'test', '.', force=force)
+    clean_adata(adata, properly_sampled_min_cell_total=properly_sampled_min_cell_total, force=force)
+    ##
+    adata = qc_masks(adata, 'test', '.', force=force).copy()
+    print(adata)
 
     pl_var = (
             analyze_related_genes(
@@ -83,6 +86,8 @@ def metacellize(
                 suspect_gene_patterns=suspect_gene_patterns, 
                 set_name=set_name, 
                 lateral_modules=lateral_modules,
+                manual_ban=manual_ban,
+                grid=grid,
                 explore = explore)
             )
     if explore:
@@ -119,6 +124,9 @@ def scanpyfi(
        min_n_genes_by_counts = None, 
        max_n_genes_by_counts = None, 
        max_pct_counts_mt = None,
+       blacklisted_genes:Sequence|None=None,
+       n_pcs=40,
+       s=10,
       qc = False):
     '''Run vanilla scanpy clustering 
     '''
@@ -160,9 +168,10 @@ def scanpyfi(
     #sc.pl.scatter(adata, x='total_counts', y='pct_counts_mt')
     #sc.pl.scatter(adata, x='total_counts', y='n_genes_by_counts')
     
-    raw_b = "AY036118 Acta1 Actb Actc1 Actg1 Afp Ahdc1 Aldh1a3 Arhgap28 Arl6ip1 Aspm Bhlhe40 Bmp2 Camk1d Car4 Cas9 Ccn2 Ccnd1 Ccnd2 Cdh11 Cdk8 Cdx2 Cdx4 Cenpf Chchd2 Cited2 Clcn3 Clu Cmss1 Cnn1 Col23a1 Cox6c Cox7c Cp Cped1 Crabp1 Cxcl14 Cyp26a1 Cyp51 D10Wsu102e Dbi Dcc Ddit4 Dkk1 Dlc1 Dlx1 Dlx2 Dmrt2 Dynlt1b Egfem1 Eno1 Erh Fam110b Fat4 Fau Fbn2 Fgf14 Fgf8 Flrt2 Fos Frem1 Fst Gapdh Gas1 Gm10076 Gm10260 Gm19951 Gm20628 Gm32061 Gm42418 Gm45889 Gm53 Gng5 Gpc3 Gphn Gpt2 H1f0 Hebp2 Hist1h1a Hist1h1b Hist1h1c Hist1h1d Hist1h1e Hist1h1t Hist1h2aa Hist1h2ab Hist1h2ac Hist1h2ad Hist1h2ae Hist1h2af Hist1h2ag Hist1h2ah Hist1h2ai Hist1h2ak Hist1h2an Hist1h2ao Hist1h2ap Hist1h2bb Hist1h2bc Hist1h2be Hist1h2bf Hist1h2bg Hist1h2bh Hist1h2bj Hist1h2bk Hist1h2bl Hist1h2bm Hist1h2bn Hist1h2bp Hist1h2bq Hist1h2br Hist1h3a Hist1h3b Hist1h3c Hist1h3d Hist1h3e Hist1h3f Hist1h3g Hist1h3h Hist1h3i Hist1h4a Hist1h4b Hist1h4c Hist1h4d Hist1h4f Hist1h4h Hist1h4i Hist1h4j Hist1h4k Hist1h4m Hist1h4n Hist2h2aa1 Hist2h2ab Hist2h2ac Hist2h2bb Hist2h2be Hist2h3b Hist2h3c1 Hist2h3c2 Hist2h4 Hist3h2a Hist3h2ba Hist4h4 Hmgcr Hmgcs1 Hoxa10 Hoxa11os Hoxa9 Hoxc10 Hsp90aa1 Hsp90ab1 Hsp90b1 Hspa12a Hspa12b Hspa13 Hspa14 Hspa1a Hspa1b Hspa1l Hspa2 Hspa4 Hspa4l Hspa5 Hspa8 Hspa9 Hspb1 Hspb11 Hspb2 Hspb3 Hspb6 Hspb7 Hspb8 Hspb9 Hspbap1 Hspbp1 Hspd1 Hspe1 Hspe1-rs1 Hspg2 Hsph1 Id1 Id3 Idi1 Ier3 Igfbp2 Il17rd Insig1 Jun Krt18 Krt7 Krt8 Lix1 Macf1 Mafb Mcm10 Mcm2 Mcm3 Mcm3ap Mcm4 Mcm5 Mcm6 Mcm7 Mcm8 Mcm9 Mcmbp Mcmdc2 Mest Mif Msgn1 Myl3 Myl4 Myl7 Nckap5 Ndnf Ndufa4 Nes Nkx2-5 Nkx3-1 Nlgn1 Nme2 Nnat Nppa Nrg3 P3h2 Pax1 Pcdh9 Pcna Pcsk5 Pdlim3 Perp Pf4 Pfkfb3 Phlda2 Pim1 Plod2 Polr2l Ppia Ptn Ptprn2 Qk Rbfox2 Rbms1 Rbp4 Reln Rgmb Rmst Rnaset2a Rnf128 Rpl10 Rpl10-ps3 Rpl10a Rpl10l Rpl11 Rpl12 Rpl13 Rpl13a Rpl14 Rpl15 Rpl17 Rpl18 Rpl18a Rpl19 Rpl21 Rpl22 Rpl22l1 Rpl23 Rpl23a Rpl24 Rpl26 Rpl27 Rpl27a Rpl28 Rpl29 Rpl3 Rpl30 Rpl31 Rpl32 Rpl34 Rpl35 Rpl35a Rpl36 Rpl36-ps4 Rpl36a Rpl36a-ps1 Rpl36al Rpl37 Rpl37a Rpl38 Rpl39 Rpl39l Rpl3l Rpl4 Rpl41 Rpl5 Rpl6 Rpl7 Rpl7a Rpl7l1 Rpl8 Rpl9 Rpl9-ps1 Rpl9-ps6 Rplp0 Rplp1 Rplp2 Rps10 Rps11 Rps12 Rps13 Rps14 Rps15 Rps15a Rps16 Rps17 Rps18 Rps19 Rps19bp1 Rps2 Rps20 Rps21 Rps23 Rps24 Rps25 Rps26 Rps27 Rps27a Rps27l Rps27rt Rps28 Rps29 Rps3 Rps3a1 Rps4x Rps5 Rps6 Rps6ka1 Rps6ka2 Rps6ka3 Rps6ka4 Rps6ka5 Rps6ka6 Rps6kb1 Rps6kb2 Rps6kc1 Rps6kl1 Rps7 Rps8 Rps9 Rpsa Rspo3 Sec61b Sec61g Serpinh1 Sfrp1 Sfrp5 Sh3bgr Slc2a1 Slc2a3 Smoc1 Snrpg Sox4 Sox9 Sp5 Srrm2 T Tbx6 Tcf15 Tead1 Tinagl1 Tmod1 Tmsb10 Tmsb4x Tnnc1 Tnni1 Tnni3 Tomm6 Top2a Trim30a Tuba1a Tuba1b Tuba1c Uba52 Ube2c Uncx Utrn Wfdc1 Wls Wnt6 Zfp36l1 Zfp36l2 rtTA shRNA"
+    if blacklisted_genes is None:
+        raw_b = return_raw_gene_str()
+        blacklisted_genes = raw_b.split(' ')
 
-    blacklisted_genes = raw_b.split(' ')
     black_mask = adata.var_names.isin(blacklisted_genes)
 
     np.sum(black_mask)
@@ -178,13 +187,13 @@ def scanpyfi(
 
     np.sum(adata.var.highly_variable)
     
-    sc.tl.pca(adata, svd_solver='arpack', )
+    sc.tl.pca(adata, svd_solver='arpack', n_comps=2*n_pcs)
 
     #sc.pl.pca(adata, color='total_counts', s=60)
 
-    #sc.pl.pca_variance_ratio(adata, log=True)
+    sc.pl.pca_variance_ratio(adata, log=True, n_pcs=2*n_pcs)
 
-    sc.pp.neighbors(adata, n_neighbors=15)
+    sc.pp.neighbors(adata, n_neighbors=15, n_pcs=n_pcs)
 
     sc.tl.leiden(adata)
 
@@ -200,11 +209,11 @@ def scanpyfi(
     hox= [ i for i in adata.var_names if i.startswith('Hox')]
 
     with plt.rc_context({'figure.dpi':100}):
-        sc.pl.umap(adata, color=['total_counts', 'leiden'], s=10, ncols=2, vmax=1000 )
+        sc.pl.umap(adata, color=['total_counts', 'leiden'], s=s, ncols=2, )
         plt.figure()
-        sc.pl.umap(adata, color=blood, s=10, ncols=2)
+        sc.pl.umap(adata, color=blood, s=s, ncols=2)
         plt.figure()
-        sc.pl.umap(adata, color=['shRNA', 'Cas9'], s=10, ncols=2)
+        sc.pl.umap(adata, color=['shRNA', 'Cas9'], s=s, ncols=2)
         plt.figure()
         
         #sc.pl.umap(adata, color=blood, s=3, ncols=2, )
@@ -230,7 +239,6 @@ def clean_adata(
                ):
     ''' 
     '''
-    import metacells as mc
     if 'excluded_gene' in adata.var.columns and not force:
         print('use the force')
         return adata
@@ -264,6 +272,8 @@ def qc_masks(adata,
              adata_workdir,
              force:bool=False,
             ):
+    ''' wraps mc.pl.extract_clean_data(adata) together with histograms for cell, gene and gene module exclusion.
+    '''
     total_umis_of_cells = mc.ut.get_o_numpy(adata, name='__x__', sum=True)
 
     if 'mc_clean' in adata.uns and not force:
@@ -279,6 +289,7 @@ def qc_masks(adata,
     fg.ax.set(xlabel='UMIs', ylabel='Density', yticks=[])
     fg.ax.axvline(x=properly_sampled_min_cell_total, color='darkgreen')
     fg.ax.axvline(x=properly_sampled_max_cell_total, color='crimson')
+    fg.ax.set_xlim((1, 1e5))
     fg.ax.set_xscale('log')
     fg.ax.set_title(f'{set_name}')
     fg.savefig(f'{adata_workdir}/{set_name}_umi_dplot.png')
@@ -319,7 +330,8 @@ def qc_masks(adata,
     fg.savefig(f'{adata_workdir}/{set_name}_fr_excluded.png')
 
     adata.uns['mc_clean'] = True
-    adata = mc.pl.extract_clean_data(adata)
+    clean = mc.pl.extract_clean_data(adata)
+    return clean
     ###
     
     
@@ -334,12 +346,13 @@ def analyze_related_genes(
       suspect_gene_patterns: None | Sequence = None,
       lateral_modules=[],
       force:bool=False,
-      grid=True,
+      grid=False,
       dpi=900,
       columns=4,
       unit=6,
       aspect_f=0.75,
       cluster = True,
+      manual_ban:Sequence=[],
      ):
     
     if 'related_genes_similarity' not in adata.varp or force:
@@ -355,7 +368,7 @@ def analyze_related_genes(
 
     for i in ['Rpl', 'Rps', 'Mcm', 'Hsp', 'Hist', 'mt-']:
         suspect_gene_patterns.append(i)
-    print(suspect_gene_patterns)
+    print(f'{suspect_gene_patterns=}')
 
     suspect_genes_mask = mc.tl.find_named_genes(
                                 adata,
@@ -422,7 +435,7 @@ def analyze_related_genes(
     # plotting
     if grid:
         plt.rcParams.update(plt.rcParamsDefault)
-        fig, axes = plt.subplots(rows, columns, dpi=dpi, figsize=(unit, aspect_f*unit ))
+        fig, axes = plt.subplots(rows, columns, dpi=dpi, figsize=(unit, aspect_f*unit * rows ))
         iaxes = iter(axes.flat)
 
     def heatmap_mod(x, cmap='RdYlBu'):
@@ -474,7 +487,8 @@ def analyze_related_genes(
                               square=True,
                               cbar=False)
 
-        ax.set_title(f'{set_name} Gene Module {gene_module} {lateral_txt}', fontsize=2)
+        title_fontsize = 2 if grid else 7.5
+        ax.set_title(f'{set_name} Gene Module {gene_module} {lateral_txt}', fontsize=title_fontsize)
         if not grid:
             plt.show()
         #fig.savefig(f'{adata_workdir}/{set_name}_module_{gene_module}.png')
@@ -506,7 +520,8 @@ def analyze_related_genes(
     # define lateral gene list
     # Do we really want to exclude initially all genes that are related to a given module?
     lateral_gene_names = pl_var.filter(pl.col('related_genes_module').is_in(lateral_modules))['gene_name'].sort().to_list()
-
+    for i in manual_ban:
+        lateral_gene_names.append(i)
     if force_usual_suspects:
         for i in usual_suspects:
             rich.print(f":vampire:{i}")
@@ -526,12 +541,15 @@ def invoque_mc(adata,
                var_cpus_key,
                set_name,
                return_adatas=True,
+               max_parallel_piles:int|None=50,
                ):
-    max_parallel_piles = mc.pl.guess_max_parallel_piles(adata)
+    if max_parallel_piles is None:
+        max_parallel_piles = mc.pl.guess_max_parallel_piles(adata)
+    
     print(f"{max_parallel_piles=}")
 
     mc.pl.set_max_parallel_piles(max_parallel_piles)
-    
+
     mc.utilities.parallel.set_processors_count(cpus[mc_cpus_key])
     print(f"computing metacells with {cpus[mc_cpus_key]} CPUs")
 
@@ -559,8 +577,10 @@ def invoque_mc(adata,
 
     plt.rcParams.update(plt.rcParamsDefault)
     
+
     mc.utilities.parallel.set_processors_count(cpus[var_cpus_key])
     print(f"computing outliers with {cpus[var_cpus_key]} CPUs")
+    
 
     outliers = mc.pl.compute_for_mcview(
         adata=adata, 
@@ -780,4 +800,7 @@ def basure():
     plt.rcParams.update(plt.rcParamsDefault)
     print(f"conquered")
 
+
+def return_raw_gene_str():
+        return "AY036118 Acta1 Actb Actc1 Actg1 Afp Ahdc1 Aldh1a3 Arhgap28 Arl6ip1 Aspm Bhlhe40 Bmp2 Camk1d Car4 Cas9 Ccn2 Ccnd1 Ccnd2 Cdh11 Cdk8 Cdx2 Cdx4 Cenpf Chchd2 Cited2 Clcn3 Clu Cmss1 Cnn1 Col23a1 Cox6c Cox7c Cp Cped1 Crabp1 Cxcl14 Cyp26a1 Cyp51 D10Wsu102e Dbi Dcc Ddit4 Dkk1 Dlc1 Dlx1 Dlx2 Dmrt2 Dynlt1b Egfem1 Eno1 Erh Fam110b Fat4 Fau Fbn2 Fgf14 Fgf8 Flrt2 Fos Frem1 Fst Gapdh Gas1 Gm10076 Gm10260 Gm19951 Gm20628 Gm32061 Gm42418 Gm45889 Gm53 Gng5 Gpc3 Gphn Gpt2 H1f0 Hebp2 Hist1h1a Hist1h1b Hist1h1c Hist1h1d Hist1h1e Hist1h1t Hist1h2aa Hist1h2ab Hist1h2ac Hist1h2ad Hist1h2ae Hist1h2af Hist1h2ag Hist1h2ah Hist1h2ai Hist1h2ak Hist1h2an Hist1h2ao Hist1h2ap Hist1h2bb Hist1h2bc Hist1h2be Hist1h2bf Hist1h2bg Hist1h2bh Hist1h2bj Hist1h2bk Hist1h2bl Hist1h2bm Hist1h2bn Hist1h2bp Hist1h2bq Hist1h2br Hist1h3a Hist1h3b Hist1h3c Hist1h3d Hist1h3e Hist1h3f Hist1h3g Hist1h3h Hist1h3i Hist1h4a Hist1h4b Hist1h4c Hist1h4d Hist1h4f Hist1h4h Hist1h4i Hist1h4j Hist1h4k Hist1h4m Hist1h4n Hist2h2aa1 Hist2h2ab Hist2h2ac Hist2h2bb Hist2h2be Hist2h3b Hist2h3c1 Hist2h3c2 Hist2h4 Hist3h2a Hist3h2ba Hist4h4 Hmgcr Hmgcs1 Hoxa10 Hoxa11os Hoxa9 Hoxc10 Hsp90aa1 Hsp90ab1 Hsp90b1 Hspa12a Hspa12b Hspa13 Hspa14 Hspa1a Hspa1b Hspa1l Hspa2 Hspa4 Hspa4l Hspa5 Hspa8 Hspa9 Hspb1 Hspb11 Hspb2 Hspb3 Hspb6 Hspb7 Hspb8 Hspb9 Hspbap1 Hspbp1 Hspd1 Hspe1 Hspe1-rs1 Hspg2 Hsph1 Id1 Id3 Idi1 Ier3 Igfbp2 Il17rd Insig1 Jun Krt18 Krt7 Krt8 Lix1 Macf1 Mafb Mcm10 Mcm2 Mcm3 Mcm3ap Mcm4 Mcm5 Mcm6 Mcm7 Mcm8 Mcm9 Mcmbp Mcmdc2 Mest Mif Msgn1 Myl3 Myl4 Myl7 Nckap5 Ndnf Ndufa4 Nes Nkx2-5 Nkx3-1 Nlgn1 Nme2 Nnat Nppa Nrg3 P3h2 Pax1 Pcdh9 Pcna Pcsk5 Pdlim3 Perp Pf4 Pfkfb3 Phlda2 Pim1 Plod2 Polr2l Ppia Ptn Ptprn2 Qk Rbfox2 Rbms1 Rbp4 Reln Rgmb Rmst Rnaset2a Rnf128 Rpl10 Rpl10-ps3 Rpl10a Rpl10l Rpl11 Rpl12 Rpl13 Rpl13a Rpl14 Rpl15 Rpl17 Rpl18 Rpl18a Rpl19 Rpl21 Rpl22 Rpl22l1 Rpl23 Rpl23a Rpl24 Rpl26 Rpl27 Rpl27a Rpl28 Rpl29 Rpl3 Rpl30 Rpl31 Rpl32 Rpl34 Rpl35 Rpl35a Rpl36 Rpl36-ps4 Rpl36a Rpl36a-ps1 Rpl36al Rpl37 Rpl37a Rpl38 Rpl39 Rpl39l Rpl3l Rpl4 Rpl41 Rpl5 Rpl6 Rpl7 Rpl7a Rpl7l1 Rpl8 Rpl9 Rpl9-ps1 Rpl9-ps6 Rplp0 Rplp1 Rplp2 Rps10 Rps11 Rps12 Rps13 Rps14 Rps15 Rps15a Rps16 Rps17 Rps18 Rps19 Rps19bp1 Rps2 Rps20 Rps21 Rps23 Rps24 Rps25 Rps26 Rps27 Rps27a Rps27l Rps27rt Rps28 Rps29 Rps3 Rps3a1 Rps4x Rps5 Rps6 Rps6ka1 Rps6ka2 Rps6ka3 Rps6ka4 Rps6ka5 Rps6ka6 Rps6kb1 Rps6kb2 Rps6kc1 Rps6kl1 Rps7 Rps8 Rps9 Rpsa Rspo3 Sec61b Sec61g Serpinh1 Sfrp1 Sfrp5 Sh3bgr Slc2a1 Slc2a3 Smoc1 Snrpg Sox4 Sox9 Sp5 Srrm2 T Tbx6 Tcf15 Tead1 Tinagl1 Tmod1 Tmsb10 Tmsb4x Tnnc1 Tnni1 Tnni3 Tomm6 Top2a Trim30a Tuba1a Tuba1b Tuba1c Uba52 Ube2c Uncx Utrn Wfdc1 Wls Wnt6 Zfp36l1 Zfp36l2 rtTA shRNA"
 
