@@ -200,8 +200,11 @@ class Xp(db.Xp):
             self.raw_adata = self.load_10_mtx()
         #self.adata.obs['bath'] = self.sample_id
 
+    @wraps(db.run_bcl2fq)
+    def demux(self):
+        db.run_bcl2fq(self)
+        
     @wraps(shltr.sc.compute_clonal_composition)
-
     def score_clone(self, min_cell_size=0, *args, **kwargs):
         # when computing clonal composition directly merge this information to the ad_sc.obs 
         fn = shltr.sc.compute_clonal_composition
@@ -240,8 +243,8 @@ class Xp(db.Xp):
     def load_final_ad(self, sample_name):
         ''' Loads final version of mcs and scs adatas
         ''' 
-        mcs_fad_path = self.return_path('mcs_fad_path')
-        scs_fad_path = self.return_path('scs_fad_path')
+        mcs_fad_path = self.return_path('mcs_ad_path')
+        scs_fad_path = self.return_path('scs_ad_path')
         
         if os.path.exists(mcs_fad_path) and os.path.exists(scs_fad_path):
             self.print(f'loading final adatas:\n{mcs_fad_path}\n{scs_fad_path}', 'bold white')
@@ -257,8 +260,8 @@ class Xp(db.Xp):
     def save_final_ad(self, sample_name):
         '''
         '''
-        mcs_fad_path = self.return_path('mcs_fad_path')
-        scs_fad_path = self.return_path('scs_fad_path')
+        mcs_fad_path = self.return_path('mcs_ad_path')
+        scs_fad_path = self.return_path('scs_ad_path')
 
         self.print(f'saving final adatas:\n{mcs_fad_path}\n{scs_fad_path}', 'bold cyan')
 
@@ -319,34 +322,38 @@ class Xp(db.Xp):
                                     
         else:
             self.init_adata(force)
-            res = ut.sc.metacellize(set_name = sample_name,
-                              adata=self.raw_adata, 
-                              adata_workdir=self.wd_scrna,
-                              explore = explore,
-                              *args,
-                              **kwargs)
+            res = ut.sc.metacellize(
+                    set_name = sample_name,
+                    adata=self.raw_adata, 
+                    adata_workdir=self.wd_scrna,
+                    explore = explore,
+                    cpus={'full':full_cpus, 'moderate':16},  
+                    *args,
+                    **kwargs
+                )
+
             if not explore:
-                scs, mcs,  metadata = res
+                scs, mcs, metadata = res
             else:
                 self.explored = True
                 print(f'{explore=}')
-                return
+                return res
         # cluster metacells
-        mcs = ut.sc.scanpyfi(mcs.copy())
+        #mcs = ut.sc.scanpyfi(mcs.copy())
         # cluster single-cells
-        scs = ut.sc.scanpyfi(scs.copy())
+        #scs = ut.sc.scanpyfi(scs.copy())
 
         
         # propagate metacell results to single-cells
-        scsm = scs.obs.merge(
-                right=mcs.obs.reset_index(drop=True), 
-                left_on='metacell', 
-                right_index=True, 
-                how='outer', 
-                suffixes=['', '_mc'])
+        #scsm = scs.obs.merge(
+        #        right=mcs.obs.reset_index(drop=True), 
+        #        left_on='metacell', 
+        #        right_index=True, 
+        #        how='outer', 
+        #        suffixes=['', '_mc'])
 
         # rigth way to overwrite .obs ?
-        scs.obs = scsm.loc[scs.obs.index]
+        #scs.obs = scsm.loc[scs.obs.index]
         self.ad_sc = scs
         self.ad_mc = mcs
         self.metadata = metadata
