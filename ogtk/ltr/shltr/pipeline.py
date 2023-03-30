@@ -201,7 +201,9 @@ class Xp(db.Xp):
         #self.adata.obs['bath'] = self.sample_id
 
     @wraps(db.run_bcl2fq)
-    def demux(self):
+    def demux(self, *args, **kwargs):
+        ''' demultiplex
+        '''
         db.run_bcl2fq(self)
         
     @wraps(shltr.sc.compute_clonal_composition)
