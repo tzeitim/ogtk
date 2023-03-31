@@ -33,10 +33,8 @@ def metacellize(
     excluded_gene_patterns:Sequence=[], 
     excluded_gene_names: Sequence|None=None, 
     target_metacell_size=100,
-    suspect_gene_names=['shRNA', 'rtTA', 'Fun','Cas9', 'Hist1h2ap'], 
+    suspect_gene_names =['Pcna', 'Pclaf', 'Jun', 'Top2a', 'Txn', 'Hsp90ab1', 'Fos', 'Dnaj', 'Ube2c'],
     suspect_gene_patterns = ['mt-.*', 'Dnaj.*'],
-    usual_suspects=['Pcna', 'Pclaf', 'Jun', 'Top2a', 'Txn', 'Hsp90ab1', 'Fos', 'Dnaj', 'Ube2c'],
-    force_usual_suspects=True,
     manual_ban: Sequence | None=[],
     lateral_modules: Sequence | None=None,
     return_adatas=True, 
@@ -52,6 +50,7 @@ def metacellize(
     grid:bool=True,
                 ):
     '''
+
     '''
 
     print(f'mc2 v{mc.__version__}')
@@ -72,17 +71,18 @@ def metacellize(
     if lateral_modules is None:
         lateral_modules = []
 
-    clean_adata(adata, properly_sampled_min_cell_total=properly_sampled_min_cell_total, force=force)
+    clean_adata(adata, 
+                properly_sampled_min_cell_total=properly_sampled_min_cell_total,
+                properly_sampled_max_cell_total=properly_sampled_max_cell_total,
+                force=force)
     ##
-    adata = qc_masks(adata, 'test', '.', force=force).copy()
-    print(adata)
+    adata = qc_masks(adata, set_name, adata_workdir,  force=force).copy()
 
     pl_var = (
             analyze_related_genes(
                 adata,
                 adata_workdir=adata_workdir,
                 suspect_gene_names=suspect_gene_names,
-                usual_suspects=usual_suspects,
                 suspect_gene_patterns=suspect_gene_patterns, 
                 set_name=set_name, 
                 lateral_modules=lateral_modules,
@@ -289,7 +289,7 @@ def qc_masks(adata,
     fg.ax.set(xlabel='UMIs', ylabel='Density', yticks=[])
     fg.ax.axvline(x=properly_sampled_min_cell_total, color='darkgreen')
     fg.ax.axvline(x=properly_sampled_max_cell_total, color='crimson')
-    fg.ax.set_xlim((1, 1e5))
+    fg.ax.set_xlim((100, 1e5))
     fg.ax.set_xscale('log')
     fg.ax.set_title(f'{set_name}')
     fg.savefig(f'{adata_workdir}/{set_name}_umi_dplot.png')
@@ -311,23 +311,29 @@ def qc_masks(adata,
                 too_large_cells_percent,
                 properly_sampled_max_cell_total))
 
-    excluded_genes_data = mc.tl.filter_data(adata, var_masks=['excluded_gene'])[0]
-    excluded_umis_of_cells = mc.ut.get_o_numpy(excluded_genes_data, name='__x__', sum=True)
-    excluded_fraction_of_umis_of_cells = excluded_umis_of_cells / total_umis_of_cells
+    excluded_genes_data = mc.tl.filter_data(adata, var_masks=['excluded_gene'])
+    if excluded_genes_data is not None:
+        excluded_genes_data = excluded_genes_data[0]
+        excluded_umis_of_cells = mc.ut.get_o_numpy(excluded_genes_data, name='__x__', sum=True)
+        excluded_fraction_of_umis_of_cells = excluded_umis_of_cells / total_umis_of_cells
 
-    too_excluded_cells_count = sum(excluded_fraction_of_umis_of_cells > properly_sampled_max_excluded_genes_fraction)
-    too_excluded_cells_percent = 100.0 * too_excluded_cells_count / len(total_umis_of_cells)
-    
-    print(f"Will exclude %s (%.2f%%) cells with more than %.2f%% excluded gene UMIs"
-            % (too_excluded_cells_count,
-                too_excluded_cells_percent,
-                100.0 * properly_sampled_max_excluded_genes_fraction))
-    
-    fg = sns.displot(excluded_fraction_of_umis_of_cells, bins=200, aspect=3, element="step")
-    fg.ax.set(xlabel="Fraction of excluded gene UMIs", ylabel='Density', yticks=[])
-    fg.ax.axvline(x=properly_sampled_max_excluded_genes_fraction, color='crimson')
-    fg.ax.set_title(f'{set_name}')
-    fg.savefig(f'{adata_workdir}/{set_name}_fr_excluded.png')
+        too_excluded_cells_count = sum(excluded_fraction_of_umis_of_cells > properly_sampled_max_excluded_genes_fraction)
+        too_excluded_cells_percent = 100.0 * too_excluded_cells_count / len(total_umis_of_cells)
+        
+        print(f"Will exclude %s (%.2f%%) cells with more than %.2f%% excluded gene UMIs"
+                % (too_excluded_cells_count,
+                    too_excluded_cells_percent,
+                    100.0 * properly_sampled_max_excluded_genes_fraction))
+
+        fg = sns.displot(excluded_fraction_of_umis_of_cells, bins=200, aspect=3, element="step")
+        fg.ax.set(xlabel="Fraction of excluded gene UMIs", ylabel='Density', yticks=[])
+        fg.ax.axvline(x=properly_sampled_max_excluded_genes_fraction, color='crimson')
+        fg.ax.set_title(f'{set_name}')
+        print(f'{adata_workdir}/{set_name}_fr_excluded.png')
+        fg.savefig(f'{adata_workdir}/{set_name}_fr_excluded.png')
+    else:
+        excluded_fraction_of_umis_of_cells = 0
+    plt.show()
 
     adata.uns['mc_clean'] = True
     clean = mc.pl.extract_clean_data(adata)
@@ -339,9 +345,7 @@ def analyze_related_genes(
       adata, 
       adata_workdir,
       set_name,
-      usual_suspects,
       suspect_gene_names,
-      force_usual_suspects=True,
       explore=True,
       suspect_gene_patterns: None | Sequence = None,
       lateral_modules=[],
@@ -360,9 +364,6 @@ def analyze_related_genes(
     else:
         print('use the force')
     
-    for i in usual_suspects:
-        suspect_gene_names.append(i)
-
     if suspect_gene_patterns is None:
         suspect_gene_patterns = []
 
@@ -386,7 +387,7 @@ def analyze_related_genes(
                    )
     
     pl_var =  pl_var.with_columns((
-                        (pl.col("gene_name").is_in(usual_suspects)) |
+                        (pl.col("gene_name").is_in(suspect_gene_names)) |
                         (pl.col("gene_name").str.contains('|^'.join(suspect_gene_patterns)) )
                         ).alias('suspect_gene')
                     )
@@ -520,12 +521,10 @@ def analyze_related_genes(
     # define lateral gene list
     # Do we really want to exclude initially all genes that are related to a given module?
     lateral_gene_names = pl_var.filter(pl.col('related_genes_module').is_in(lateral_modules))['gene_name'].sort().to_list()
+
     for i in manual_ban:
+        rich.print(f":vampire:{i}")
         lateral_gene_names.append(i)
-    if force_usual_suspects:
-        for i in usual_suspects:
-            rich.print(f":vampire:{i}")
-            lateral_gene_names.append(i)
 
     print(f"{len(lateral_gene_names)=}")
     print(' '.join(lateral_gene_names))
