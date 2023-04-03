@@ -232,7 +232,7 @@ def clean_adata(
     lateral_modules = None,
     excluded_gene_patterns: Sequence | None= None,
     random_seed = 12345,
-    properly_sampled_max_excluded_genes_fraction=properly_sampled_max_excluded_genes_fraction,
+    properly_sampled_max_excluded_genes_fraction=0.03,
     properly_sampled_min_cell_total=500,
     properly_sampled_max_cell_total=20000,
                
