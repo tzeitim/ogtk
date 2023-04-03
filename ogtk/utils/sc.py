@@ -74,6 +74,7 @@ def metacellize(
     clean_adata(adata, 
                 properly_sampled_min_cell_total=properly_sampled_min_cell_total,
                 properly_sampled_max_cell_total=properly_sampled_max_cell_total,
+                properly_sampled_max_excluded_genes_fraction=properly_sampled_max_excluded_genes_fraction,
                 force=force)
     ##
     adata = qc_masks(adata, set_name, adata_workdir,  force=force).copy()
