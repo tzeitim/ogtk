@@ -236,8 +236,7 @@ def clean_adata(
     properly_sampled_max_excluded_genes_fraction=0.03,
     properly_sampled_min_cell_total=500,
     properly_sampled_max_cell_total=20000,
-               
-               ):
+   )-> None:
     ''' 
     '''
     if 'excluded_gene' in adata.var.columns and not force:
@@ -463,7 +462,7 @@ def analyze_related_genes(
         similarity_of_module.index = \
         similarity_of_module.columns = labels
 
-        lateral_txt ="(ignored)" if (gene_module in lateral_modules and not explore)  else " " 
+        lateral_txt ="**(ignored)**" if (gene_module in lateral_modules and not explore)  else " " 
 
         sns.set(font_scale=0.5)
         if grid:
@@ -579,10 +578,10 @@ def invoque_mc(adata,
     
 
     mc.utilities.parallel.set_processors_count(cpus[var_cpus_key])
-    print(f"computing outliers with {cpus[var_cpus_key]} CPUs")
+    print(f"computing metacell QCs  {cpus[var_cpus_key]} CPUs")
     
 
-    outliers = mc.pl.compute_for_mcview(
+    mc.pl.compute_for_mcview(
         adata=adata, 
         gdata=metacells, 
         random_seed=123456, 
@@ -629,6 +628,62 @@ def invoque_mc(adata,
     else:
         print("returning output file names")
         return([ofn_single_cells, ofn_meta_cells, ofn_metadata])
+
+def compute_metadata(adata, out_csv):
+    '''
+    '''
+    obs = (pl.DataFrame(adata.obs.reset_index()).rename(dict(index='cbc'))
+           .with_columns(pl.col('metacell').cast(pl.Int64))
+           .with_columns(pl.count().over("metacell_name").alias('mc_size'))
+          )
+    metadata = (obs.sort('metacell_name')
+                .groupby(['metacell_name', 'mc_size'], maintain_order=True)
+                .agg(
+                    [pl.col('total_umis').mean().prefix('mean_'), 
+                     pl.col('total_umis').median().prefix('median_'),
+                     ])
+    )
+   
+    (metadata
+            .join(
+                obs.pivot(
+                    index='metacell_name', 
+                    columns='batch',
+                    values='total_umis', 
+                    aggregate_function=pl.Expr.sum(pl.col('total_umis')).log10())
+                    .rename(dict([(batch,f'{batch}_umis') for batch in batches])),
+              left_on='metacell_name',
+              right_on='metacell_name',
+              how ='left')
+            
+            .join(
+                obs.pivot(
+                    index='metacell_name', 
+                    columns='batch',
+                    values='cbc', 
+                    aggregate_function=pl.Expr.count(pl.col('metacell_name')))
+                    .rename(dict([(batch,f'{batch}_cells') for batch in batches])),
+              left_on='metacell_name',
+              right_on='metacell_name',
+              how ='left')
+            
+            .join(
+                obs.pivot(
+                    index='metacell_name', 
+                    values='metacell_name', 
+                    columns='batch',
+                    aggregate_function=1/pl.Expr.count(pl.col('metacell_name')))
+                    .rename(dict([(batch,f'{batch}_pc') for batch in batches])),
+              left_on='metacell_name',
+              right_on='metacell_name',
+              how ='left')
+            
+         .filter(pl.col('metacell_name')!="Outliers")
+            .rename({'metacell_name':'metacell'})
+            .write_csv(out_csv, sep = '\t', has_header=True)
+    )
+    print('DONE') 
+
 
 def return_raw_gene_str():
         return "AY036118 Acta1 Actb Actc1 Actg1 Afp Ahdc1 Aldh1a3 Arhgap28 Arl6ip1 Aspm Bhlhe40 Bmp2 Camk1d Car4 Cas9 Ccn2 Ccnd1 Ccnd2 Cdh11 Cdk8 Cdx2 Cdx4 Cenpf Chchd2 Cited2 Clcn3 Clu Cmss1 Cnn1 Col23a1 Cox6c Cox7c Cp Cped1 Crabp1 Cxcl14 Cyp26a1 Cyp51 D10Wsu102e Dbi Dcc Ddit4 Dkk1 Dlc1 Dlx1 Dlx2 Dmrt2 Dynlt1b Egfem1 Eno1 Erh Fam110b Fat4 Fau Fbn2 Fgf14 Fgf8 Flrt2 Fos Frem1 Fst Gapdh Gas1 Gm10076 Gm10260 Gm19951 Gm20628 Gm32061 Gm42418 Gm45889 Gm53 Gng5 Gpc3 Gphn Gpt2 H1f0 Hebp2 Hist1h1a Hist1h1b Hist1h1c Hist1h1d Hist1h1e Hist1h1t Hist1h2aa Hist1h2ab Hist1h2ac Hist1h2ad Hist1h2ae Hist1h2af Hist1h2ag Hist1h2ah Hist1h2ai Hist1h2ak Hist1h2an Hist1h2ao Hist1h2ap Hist1h2bb Hist1h2bc Hist1h2be Hist1h2bf Hist1h2bg Hist1h2bh Hist1h2bj Hist1h2bk Hist1h2bl Hist1h2bm Hist1h2bn Hist1h2bp Hist1h2bq Hist1h2br Hist1h3a Hist1h3b Hist1h3c Hist1h3d Hist1h3e Hist1h3f Hist1h3g Hist1h3h Hist1h3i Hist1h4a Hist1h4b Hist1h4c Hist1h4d Hist1h4f Hist1h4h Hist1h4i Hist1h4j Hist1h4k Hist1h4m Hist1h4n Hist2h2aa1 Hist2h2ab Hist2h2ac Hist2h2bb Hist2h2be Hist2h3b Hist2h3c1 Hist2h3c2 Hist2h4 Hist3h2a Hist3h2ba Hist4h4 Hmgcr Hmgcs1 Hoxa10 Hoxa11os Hoxa9 Hoxc10 Hsp90aa1 Hsp90ab1 Hsp90b1 Hspa12a Hspa12b Hspa13 Hspa14 Hspa1a Hspa1b Hspa1l Hspa2 Hspa4 Hspa4l Hspa5 Hspa8 Hspa9 Hspb1 Hspb11 Hspb2 Hspb3 Hspb6 Hspb7 Hspb8 Hspb9 Hspbap1 Hspbp1 Hspd1 Hspe1 Hspe1-rs1 Hspg2 Hsph1 Id1 Id3 Idi1 Ier3 Igfbp2 Il17rd Insig1 Jun Krt18 Krt7 Krt8 Lix1 Macf1 Mafb Mcm10 Mcm2 Mcm3 Mcm3ap Mcm4 Mcm5 Mcm6 Mcm7 Mcm8 Mcm9 Mcmbp Mcmdc2 Mest Mif Msgn1 Myl3 Myl4 Myl7 Nckap5 Ndnf Ndufa4 Nes Nkx2-5 Nkx3-1 Nlgn1 Nme2 Nnat Nppa Nrg3 P3h2 Pax1 Pcdh9 Pcna Pcsk5 Pdlim3 Perp Pf4 Pfkfb3 Phlda2 Pim1 Plod2 Polr2l Ppia Ptn Ptprn2 Qk Rbfox2 Rbms1 Rbp4 Reln Rgmb Rmst Rnaset2a Rnf128 Rpl10 Rpl10-ps3 Rpl10a Rpl10l Rpl11 Rpl12 Rpl13 Rpl13a Rpl14 Rpl15 Rpl17 Rpl18 Rpl18a Rpl19 Rpl21 Rpl22 Rpl22l1 Rpl23 Rpl23a Rpl24 Rpl26 Rpl27 Rpl27a Rpl28 Rpl29 Rpl3 Rpl30 Rpl31 Rpl32 Rpl34 Rpl35 Rpl35a Rpl36 Rpl36-ps4 Rpl36a Rpl36a-ps1 Rpl36al Rpl37 Rpl37a Rpl38 Rpl39 Rpl39l Rpl3l Rpl4 Rpl41 Rpl5 Rpl6 Rpl7 Rpl7a Rpl7l1 Rpl8 Rpl9 Rpl9-ps1 Rpl9-ps6 Rplp0 Rplp1 Rplp2 Rps10 Rps11 Rps12 Rps13 Rps14 Rps15 Rps15a Rps16 Rps17 Rps18 Rps19 Rps19bp1 Rps2 Rps20 Rps21 Rps23 Rps24 Rps25 Rps26 Rps27 Rps27a Rps27l Rps27rt Rps28 Rps29 Rps3 Rps3a1 Rps4x Rps5 Rps6 Rps6ka1 Rps6ka2 Rps6ka3 Rps6ka4 Rps6ka5 Rps6ka6 Rps6kb1 Rps6kb2 Rps6kc1 Rps6kl1 Rps7 Rps8 Rps9 Rpsa Rspo3 Sec61b Sec61g Serpinh1 Sfrp1 Sfrp5 Sh3bgr Slc2a1 Slc2a3 Smoc1 Snrpg Sox4 Sox9 Sp5 Srrm2 T Tbx6 Tcf15 Tead1 Tinagl1 Tmod1 Tmsb10 Tmsb4x Tnnc1 Tnni1 Tnni3 Tomm6 Top2a Trim30a Tuba1a Tuba1b Tuba1c Uba52 Ube2c Uncx Utrn Wfdc1 Wls Wnt6 Zfp36l1 Zfp36l2 rtTA shRNA"
