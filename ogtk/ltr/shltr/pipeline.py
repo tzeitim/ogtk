@@ -4,7 +4,7 @@ import seaborn as sns
 import ogtk.utils as ut
 import ogtk.ltr.shltr as shltr
 import scanpy as sc
-from typing import Sequence,Optional
+from typing import Sequence,Optional,Iterable
 import polars as pl
 import anndata as ad
 import os
@@ -117,7 +117,7 @@ class Xp(db.Xp):
         if batch is None:
             batch = self.sample_id
 
-        adata.obs['batch'] = batch
+        adata.obs['sample_id'] = batch
         return(adata)
 
     def list_guide_tables(self,  suffix = 'shrna'):
@@ -133,11 +133,14 @@ class Xp(db.Xp):
             sample_id = None,
             suffix = 'shrna',
             index = 0,
+            min_reads = 2,
             valid_ibars = None,
             down_sample = None,
             use_cache = True,
             corr_dir_fn=None):
         ''' Returns data frame at the molecule level
+
+            Invokes ``shltr.sc.reads_to_molecules``
         '''
         if sample_id is None:
             sample_id = self.sample_id
@@ -153,7 +156,7 @@ class Xp(db.Xp):
             corr_dict_fn=corr_dir_fn,
             down_sample=down_sample,
             #min_cells_per_ibar=int(len(obs27['cbc']) * 0.2),
-            min_reads=2, 
+            min_reads=min_reads, 
             max_reads=1e6, 
             clone=clone)
         return(df)
@@ -165,7 +168,7 @@ class Xp(db.Xp):
                   min_cell_size: int = 0,
                   ):
         ''' Creates the .mols attribute
-            Annotates the ibars using a 'cluster' table
+            Annotates the ibars using a ibar 'cluster' table
             # TODO : improve the ibar annotation functionality
         '''
 
@@ -204,10 +207,27 @@ class Xp(db.Xp):
     def demux(self, *args, **kwargs):
         ''' demultiplex
         '''
-        db.run_bcl2fq(self)
+        db.run_bcl2fq(self, *args, **kwargs)
         
+    @wraps(db.run_cranger)
+    def cellranger(self, *args, **kwargs):
+        ''' cell ranger wrapper
+        '''
+        db.run_cranger(self, *args, **kwargs)
+
     @wraps(shltr.sc.compute_clonal_composition)
     def score_clone(self, min_cell_size=0, *args, **kwargs):
+        ''' Compute clonal composition 
+
+            1. Invoques ``shltr.sc.compute_clonal_composition`` applying the
+            ``min_cell_size`` argument which determines the size of a cell in
+            total umi counts from the targeted library and not the gene
+            expression.
+
+            2. Merges the clonal composition data frame into the single-cell anndata object. 
+
+        '''
+
         # when computing clonal composition directly merge this information to the ad_sc.obs 
         fn = shltr.sc.compute_clonal_composition
 
@@ -217,12 +237,13 @@ class Xp(db.Xp):
 
         cc = cc.with_columns((pl.col('cbc') + '-1')).rename({'cbc':'index'}).to_pandas().set_index('index')
 
-        self.ad_sc.obs = self.ad_sc.obs.merge(
-            right=cc,
-            left_index=True,
-            right_index=True,
-            how='left')
-
+        self.ad_sc.obs = (
+                self.ad_sc.obs.merge(
+                    right=cc,
+                    left_index=True,
+                    right_index=True,
+                    how='left')
+        )
 
     def init_object(self, sample_name: str| None= None):
         ''' Main function to load full experiment object
@@ -323,16 +344,18 @@ class Xp(db.Xp):
             metadata = None
                                     
         else:
+            if full_cpus is not None:
+                kwargs['cpus']={'full':full_cpus, 'moderate':16}
+
             self.init_adata(force)
             res = ut.sc.metacellize(
-                    set_name = sample_name,
+                    set_name=sample_name,
                     adata=self.raw_adata, 
                     adata_workdir=self.wd_scrna,
                     explore = explore,
-                    cpus={'full':full_cpus, 'moderate':16},  
                     *args,
                     **kwargs
-                )
+                  )
 
             if not explore:
                 scs, mcs, metadata = res
@@ -423,6 +446,19 @@ class Xp(db.Xp):
     def plot_cc(self, *args, **kwargs):
         _plot_cc(self, *args, **kwargs)
 
+    def ingest_xps(self, xps: Iterable):
+        '''
+
+        '''
+        adatas = [i.ad_sc for i in xps]
+        self.ad_sc = ad.AnnData.concatenate(*adatas,
+                                 join='outer', 
+                                 batch_key='batch_id')
+#
+        self.ad_sc = self.ad_sc[~self.ad_sc.obs['excluded_cell'], ].copy()
+        self.ad_sc.var = self.ad_sc.var.drop(self.ad_sc.var.columns[2:].to_list(), axis='columns')
+        #self.ad_sc.obs.groupby(['sample_id', 'batch_id']).head(1).reset_index().loc[:, ['sample_id', 'batch_id']]
+        
 
 
 
