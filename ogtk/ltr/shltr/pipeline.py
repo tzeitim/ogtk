@@ -33,7 +33,7 @@ def _plot_cc(exp,
     cd = clone_denominator
     a = pseudo_counts
     
-    data = (pl.DataFrame(exp.ad_sc.obs)
+    data = (pl.DataFrame(exp.scs.obs)
             .with_columns(pl.col('total_counts').fill_null(0))
             .with_columns(((a+pl.col(cn))/(a+pl.col(cd))).log10().alias('log_ratio'))
             )
@@ -228,7 +228,7 @@ class Xp(db.Xp):
 
         '''
 
-        # when computing clonal composition directly merge this information to the ad_sc.obs 
+        # when computing clonal composition directly merge this information to the scs.obs 
         fn = shltr.sc.compute_clonal_composition
 
         cc = fn(self.mols.filter(pl.col('umis_cell')>min_cell_size), *args, **kwargs)
@@ -237,8 +237,8 @@ class Xp(db.Xp):
 
         cc = cc.with_columns((pl.col('cbc') + '-1')).rename({'cbc':'index'}).to_pandas().set_index('index')
 
-        self.ad_sc.obs = (
-                self.ad_sc.obs.merge(
+        self.scs.obs = (
+                self.scs.obs.merge(
                     right=cc,
                     left_index=True,
                     right_index=True,
@@ -271,8 +271,8 @@ class Xp(db.Xp):
         
         if os.path.exists(mcs_fad_path) and os.path.exists(scs_fad_path):
             self.print(f'loading final adatas:\n{mcs_fad_path}\n{scs_fad_path}', 'bold white')
-            self.ad_mc = ad.read_h5ad(mcs_fad_path)
-            self.ad_sc = ad.read_h5ad(scs_fad_path)
+            self.mcs = ad.read_h5ad(mcs_fad_path)
+            self.scs = ad.read_h5ad(scs_fad_path)
             return 0
 
         else:
@@ -288,8 +288,8 @@ class Xp(db.Xp):
 
         self.print(f'saving final adatas:\n{mcs_fad_path}\n{scs_fad_path}', 'bold cyan')
 
-        self.ad_mc.write_h5ad(mcs_fad_path)
-        self.ad_sc.write_h5ad(scs_fad_path)
+        self.mcs.write_h5ad(mcs_fad_path)
+        self.scs.write_h5ad(scs_fad_path)
 
     def return_path(self, kind, sample_name:str|None=None):
         if sample_name is None:
@@ -320,15 +320,17 @@ class Xp(db.Xp):
     @wraps(ut.sc.metacellize)
     def do_mc(
         self,
-           sample_name:str|None= None,
-           lateral_mods:Sequence|None=None,
-           force:bool=False,
-           explore:bool=True,
-           full_cpus:int=8,
-           target_metacell_size:int=100,
-           *args,
-           **kwargs,
+        sample_name:str|None= None,
+        lateral_mods:Sequence|None=None,
+        force:bool=False,
+        explore:bool=True,
+        full_cpus:int=8,
+        target_metacell_size:int=100,
+        adata=None,
+        *args,
+        **kwargs,
            ):
+
         if sample_name is None:
             sample_name = self.sample_id
 
@@ -347,10 +349,12 @@ class Xp(db.Xp):
             if full_cpus is not None:
                 kwargs['cpus']={'full':full_cpus, 'moderate':16}
 
-            self.init_adata(force)
+            if adata is None:
+                self.init_adata(force)
+
             res = ut.sc.metacellize(
                     set_name=sample_name,
-                    adata=self.raw_adata, 
+                    adata=adata if adata is not None else self.raw_adata, 
                     adata_workdir=self.wd_scrna,
                     explore = explore,
                     *args,
@@ -379,8 +383,8 @@ class Xp(db.Xp):
 
         # rigth way to overwrite .obs ?
         #scs.obs = scsm.loc[scs.obs.index]
-        self.ad_sc = scs
-        self.ad_mc = mcs
+        self.scs = scs
+        self.mcs = mcs
         self.metadata = metadata
        
         self.save_final_ad(sample_name)
@@ -405,18 +409,21 @@ class Xp(db.Xp):
             self.alleles = shltr.sc.allele_calling(self.mols.filter(expr), *args, **kwargs)
         else:
             self.alleles = shltr.sc.allele_calling(self.mols, *args, **kwargs)
-
+        
+        # add mask for valid ibars
         self.alleles = (self.alleles
-                        .with_column(pl.col('raw_ibar').is_in(valid_ibars)
+                        .with_columns(pl.col('raw_ibar').is_in(valid_ibars)
                             .alias('valid_ibar'))
                         .sort(['cluster', 'raw_ibar'])
                         )
-
-        self.alleles = self.alleles.join(ut.sc.adobs_pd_to_df(self.ad_sc), 
+        # merge with scs.obs
+        strip_pattern = '(.+?)-(.)' if self.batch_map is not None else '(.+)'
+        self.alleles = self.alleles.join(ut.sc.adobs_pd_to_df(self.scs, strip_pattern), 
                                  left_on='cbc', 
                                  right_on='cbc', 
                                  how='left')
 
+        # since polars lacks a 'how=right' merging, it is needed to drop nulls
         self.alleles = self.alleles.filter(pl.col('umis_cell').is_not_null())
 
 
@@ -450,17 +457,24 @@ class Xp(db.Xp):
         '''
 
         '''
-        adatas = [i.ad_sc for i in xps]
-        self.ad_sc = ad.AnnData.concatenate(*adatas,
-                                 join='outer', 
-                                 batch_key='batch_id')
-#
-        self.ad_sc = self.ad_sc[~self.ad_sc.obs['excluded_cell'], ].copy()
-        self.ad_sc.var = self.ad_sc.var.drop(self.ad_sc.var.columns[2:].to_list(), axis='columns')
-        #self.ad_sc.obs.groupby(['sample_id', 'batch_id']).head(1).reset_index().loc[:, ['sample_id', 'batch_id']]
+        adatas = [i.scs for i in xps]
         
-
-
+        adata = ad.concat(adatas, join='outer', label='batch_id', index_unique="_")
+        adata = adata[~adata.obs['excluded_cell'], ].copy()
+        adata.var = adata.var.drop(adata.var.columns[2:].to_list(), axis='columns')
+        
+        batch_map = adata.obs.groupby(['batch', 'batch_id']).head(1).reset_index().loc[:, ['batch', 'batch_id']]
+        batch_map = dict(list(zip(batch_map.batch, batch_map.batch_id)))
+        assert len(batch_map) == len(adata.obs.batch.unique()), "It seems that one or more batches are duplicated"
+        
+        def pl_exp(xp):
+            return xp.mols.with_columns(pl.col('cbc')+"_"+batch_map[xp.mols['sample_id'].unique()[0]])
+        
+        self.mols = pl.concat(
+            [ pl_exp(xp) for xp in xps ]
+        )
+        self.raw_adata = adata
+        self.batch_map = batch_map
 
 
 

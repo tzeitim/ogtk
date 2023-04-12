@@ -105,18 +105,23 @@ def metacellize(
     return([mcs, scs, mdt])
 
 
-def adobs_pd_to_df(adata):
-    ''' Converts an adata.obs pd data frame to a pl data frame. It strips out the '-1' cell ranger suffix.
+def adobs_pd_to_df(adata, strip_pattern='(.+?)-(.)'):
+
+    ''' Converts an adata.obs pd data frame to a pl data frame. It strips
+    out the '-1' cell ranger suffix by default.   
+
+    ``strip_pattern`` is a string which determines the extracting pattern
     '''
+
     import polars as pl
     adata.obs.index.name = None
     df = adata.obs.reset_index()
     
+
     return(pl.DataFrame(df)
            .rename({'index':'cbc'})
-           .with_columns(pl.col('cbc').str.extract('(.+?)-(.)',1))
+           .with_columns(pl.col('cbc').str.extract(strip, 1))
            )
-
 
 def scanpyfi(
        adata,
@@ -594,33 +599,22 @@ def invoque_mc(adata,
 
     ofn_single_cells = f'{adata_workdir}/{set_name}.scells.h5ad'
     ofn_meta_cells = f'{adata_workdir}/{set_name}.mcells.h5ad'
+    ofn_outliers = f'{adata_workdir}/{set_name}.outliers.h5ad'
     ofn_metadata = f'{adata_workdir}/{set_name}_metadata.csv'
     
     print('writing h5ds')
-    print('\n'.join([set_name, ofn_single_cells, ofn_meta_cells, ofn_metadata]))
+    print('\n'.join([set_name, ofn_single_cells, ofn_meta_cells, ofn_metadata, ofn_outliers]))
 
     adata.write_h5ad(ofn_single_cells)
     metacells.write_h5ad(ofn_meta_cells)
 
-    metadata_df=None
+    metadata_df= return_metadata(adata).filter(pl.col('metacell_name')!="Outliers").rename({'metacell_name':'metacell'})
+    metadata_df.write_csv(ofn_metadata, sep = '\t', has_header=True)
 
-    if 'batch' in adata.obs.columns:
-        # TODO switch to pl
-        import pandas as pd
-        if len(adata.obs['batch'].unique())>1:
-            print('storing metadata')
+    outliers = adata[adata.obs['metacell_name'] == 'Outliers',:].copy()
+    outliers.layers['deviant_folds'] = outliers.layers['deviant_fold']
+    outliers.write_h5ad(ofn_outliers)
 
-            batch_counts = adata.obs.groupby('metacell').apply(lambda x: x.batch.value_counts(normalize=False)).unstack()
-
-            print(batch_counts.head())
-            batch_frac = batch_counts.apply(lambda x: x/sum(x), axis=1)
-            batch_frac.columns = [ f'{i}_frac' for i in batch_frac.columns]
-
-            batch_ln = batch_counts.apply(lambda x: np.log10(1+x), axis=1)
-            batch_ln.columns = [ f'{i}_ln' for i in batch_ln.columns]
-
-            metadata_df=pd.concat([batch_ln, batch_frac], axis=1, )
-            metadata_df.iloc[2:,:].to_csv(ofn_metadata)
     print('DONE') 
 
     if return_adatas:
@@ -629,13 +623,28 @@ def invoque_mc(adata,
         print("returning output file names")
         return([ofn_single_cells, ofn_meta_cells, ofn_metadata])
 
-def compute_metadata(adata, out_csv):
+def return_metadata(adata_scs: AnnData)-> pl.DataFrame:
+    ''' Computes basic statistics across metacells:
+        - total cells per metacell
+        - total umis per metacell
+        - contribution of individual batches to a metacell:
+            - log10(batch_umis) 
+            - log10(batch_cells) 
+            - batch_pc 
     '''
-    '''
-    obs = (pl.DataFrame(adata.obs.reset_index()).rename(dict(index='cbc'))
+    assert 'metacell_name' in adata_scs.obs.columns, "Seems that the adata provided has not yet been metacellized"
+    
+    adata_scs.obs['total_umis'] = mc.ut.get_o_series(adata_scs, name='__x__', sum=True)[adata_scs.obs_names]
+    
+    obs = (pl.DataFrame(adata_scs.obs.reset_index()).rename(dict(index='cbc'))
            .with_columns(pl.col('metacell').cast(pl.Int64))
            .with_columns(pl.count().over("metacell_name").alias('mc_size'))
+           .with_columns((pl.col('cbc').n_unique().over(['metacell', 'batch'])/pl.col('mc_size')).alias('batch_pc'))
           )
+
+
+    batches = obs['batch'].unique()
+
     metadata = (obs.sort('metacell_name')
                 .groupby(['metacell_name', 'mc_size'], maintain_order=True)
                 .agg(
@@ -644,14 +653,16 @@ def compute_metadata(adata, out_csv):
                      ])
     )
    
-    (metadata
+    metadata = (metadata.lazy()
             .join(
                 obs.pivot(
                     index='metacell_name', 
                     columns='batch',
                     values='total_umis', 
                     aggregate_function=pl.Expr.sum(pl.col('total_umis')).log10())
-                    .rename(dict([(batch,f'{batch}_umis') for batch in batches])),
+                    .rename(dict([(batch,f'{batch}_umis') for batch in batches]))
+                    .lazy(),
+
               left_on='metacell_name',
               right_on='metacell_name',
               how ='left')
@@ -662,7 +673,8 @@ def compute_metadata(adata, out_csv):
                     columns='batch',
                     values='cbc', 
                     aggregate_function=pl.Expr.count(pl.col('metacell_name')))
-                    .rename(dict([(batch,f'{batch}_cells') for batch in batches])),
+                    .rename(dict([(batch,f'{batch}_cells') for batch in batches]))
+                    .lazy(),
               left_on='metacell_name',
               right_on='metacell_name',
               how ='left')
@@ -670,19 +682,20 @@ def compute_metadata(adata, out_csv):
             .join(
                 obs.pivot(
                     index='metacell_name', 
-                    values='metacell_name', 
                     columns='batch',
-                    aggregate_function=1/pl.Expr.count(pl.col('metacell_name')))
-                    .rename(dict([(batch,f'{batch}_pc') for batch in batches])),
+                    values='batch_pc', 
+                    aggregate_function='first')
+                    .rename(dict([(batch,f'{batch}_pc') for batch in batches]))
+                    .lazy(),
               left_on='metacell_name',
               right_on='metacell_name',
               how ='left')
-            
-         .filter(pl.col('metacell_name')!="Outliers")
-            .rename({'metacell_name':'metacell'})
-            .write_csv(out_csv, sep = '\t', has_header=True)
+     .sort('metacell_name')
+        .fill_null(0)
+                .collect()
     )
-    print('DONE') 
+
+    return metadata
 
 
 def return_raw_gene_str():
