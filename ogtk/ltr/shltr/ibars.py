@@ -671,8 +671,8 @@ def load_mol_ibarspl(sample_id, min_reads_umi=2, min_dom_cov=2):
             .filter(pl.col('sample_id')==sample_id)
             .filter(pl.col('umi_reads')>=min_reads_umi)
             .filter(pl.col('umi_dom_reads')>=min_dom_cov)
-            .with_column(pl.col('seq').str.extract("(G{1,2}T)(.+)(GGGTTAGA.+)", 2).str.replace("^", "GGT").alias('cseq'))
-            .with_column(pl.col("cseq").str.replace("GGGTTAGA", "").is_in(wl.spacer.to_list()).alias("wt"))
+            .with_columns(pl.col('seq').str.extract("(G{1,2}T)(.+)(GGGTTAGA.+)", 2).str.replace("^", "GGT").alias('cseq'))
+            .with_columns(pl.col("cseq").str.replace("GGGTTAGA", "").is_in(wl.spacer.to_list()).alias("wt"))
             .collect()
             )
     # calleles = corrected alleles
@@ -763,9 +763,9 @@ def compute_ibar_table_from_tabix_zombie(tbx_ifn, valid_cells):
     valid_ibars = guess_ibars_df(dff)
     data = (
         dff
-        .with_column(pl.when(pl.col('ibar').is_in(valid_ibars)).then(pl.col('ibar')).otherwise('no_ibar'))
-        .with_column(pl.col('seq').str.extract(f"(G+T)(.+?)({fuzzy_canspa})", 2).str.replace('^',"GGT").alias('can_spacer'))
-        .with_column(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias('wt'))
+        .with_columns(pl.when(pl.col('ibar').is_in(valid_ibars)).then(pl.col('ibar')).otherwise('no_ibar'))
+        .with_columns(pl.col('seq').str.extract(f"(G+T)(.+?)({fuzzy_canspa})", 2).str.replace('^',"GGT").alias('can_spacer'))
+        .with_columns(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias('wt'))
     )
 
     al = (
@@ -861,10 +861,10 @@ def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1, ib
             .filter(pl.col('sample_id')==sample_id)
             .filter(pl.col('umi_reads')>=min_umi_reads)
             .filter(pl.col('umi_dom_reads')>=min_dom_cov)
-            .with_column(pl.col('seq').str.extract("(G{1,2}T)(.+)(GGGTTAGA.+)", 2).str.replace("^", "GGT").alias('cseq'))
-            .with_column(pl.col("cseq").str.replace("GGGTTAGA", "").alias('can_spacer'))
-            .with_column(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias("wt"))
-            .with_column((pl.col('cell') + pl.col('umi')).alias('cbcumi'))
+            .with_columns(pl.col('seq').str.extract("(G{1,2}T)(.+)(GGGTTAGA.+)", 2).str.replace("^", "GGT").alias('cseq'))
+            .with_columns(pl.col("cseq").str.replace("GGGTTAGA", "").alias('can_spacer'))
+            .with_columns(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias("wt"))
+            .with_columns((pl.col('cell') + pl.col('umi')).alias('cbcumi'))
             .collect()
                 )
     print(f'{mol_ibars.shape[0]=}')
@@ -882,7 +882,7 @@ def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1, ib
             .filter((pl.col("sample_id")==sample_id))
             .filter(pl.col('umi_reads')>=min_umi_reads)
             .filter(pl.col('umi_dom_reads')>=min_dom_cov)
-            .with_column(pl.col('seq').str.contains(fuzzy_tso).alias('tso'))
+            .with_columns(pl.col('seq').str.contains(fuzzy_tso).alias('tso'))
             .filter(pl.col('tso'))
             .with_columns([
                     pl.col("seq").str.contains(ibar_str).alias("resc"),
@@ -890,19 +890,19 @@ def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1, ib
                     pl.col("seq").str.extract(ibar_str, 3).str.slice(1,6).alias("ibar")
                 ])
             #.filter(pl.col('resc'))
-            .with_column(pl.col('cseq').str.extract("(G{1,2}T)(.+)", 2).str.replace("^", "GGT")) # correct for TSS
-            .with_column(pl.col('cseq').str.extract("(.+)(GAGC.+)", 1).str.replace("GGGTTA", "").alias('can_spacer'))
-            .with_column(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias('wt'))
-            .with_column((pl.col('cell') + pl.col('umi')).alias('cbcumi'))
-            .with_column(pl.col('cbcumi').is_in(gg).alias('seen'))
+            .with_columns(pl.col('cseq').str.extract("(G{1,2}T)(.+)", 2).str.replace("^", "GGT")) # correct for TSS
+            .with_columns(pl.col('cseq').str.extract("(.+)(GAGC.+)", 1).str.replace("GGGTTA", "").alias('can_spacer'))
+            .with_columns(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias('wt'))
+            .with_columns((pl.col('cell') + pl.col('umi')).alias('cbcumi'))
+            .with_columns(pl.col('cbcumi').is_in(gg).alias('seen'))
             .collect()
                 )
     ggg=mol_noibars.cbcumi.unique().is_in(gg).mean()
 
     print(f'fraction of ibar+ cbc:umi  in ibar- {ggg}')
 
-    mol_ibars = mol_ibars.with_column(pl.lit(True).alias('clear'))
-    mol_noibars = mol_noibars.with_column(pl.lit(False).alias('clear'))
+    mol_ibars = mol_ibars.with_columns(pl.lit(True).alias('clear'))
+    mol_noibars = mol_noibars.with_columns(pl.lit(False).alias('clear'))
     print(f'{mol_noibars.shape[0]=}')
 
     return((mol_ibars, mol_noibars))#.filter(pl.col('can_spacer').is_null()))
@@ -932,7 +932,7 @@ def export_ibar_mols_to_matlin(rin, sample_id ='h1e11'):
     print(out_fn) 
     #tt = (rin.filter((pl.col("sample_id")==sample_id) & (pl.col('n_calleles')==1))
     tt = (rin.filter((pl.col('n_calleles')==1)& (pl.col('batch')==sample_id))
-        .with_column(pl.when(~pl.col('wt'))
+        .with_columns(pl.when(~pl.col('wt'))
                     .then(pl.col('seq'))
                     .otherwise("..").alias('seq'))
         .sort(['nspeed','kalhor_id'])
@@ -981,7 +981,7 @@ def return_pibar(imols, ext_pattern = '(.{3})(.{4})(.+)', position=2, min_molecu
     data = (
         imols
         .filter(pl.col('wt'))    # and uncut
-        .with_column(pl.col('raw_ibar')+ "." + pl.col('can_spacer').str.extract(ext_pattern, position)) # perform the actual encoding of ibar+ext
+        .with_columns(pl.col('raw_ibar')+ "." + pl.col('can_spacer').str.extract(ext_pattern, position)) # perform the actual encoding of ibar+ext
         .groupby(['raw_ibar', 'can_spacer'])
             .agg(pl.col('can_spacer').count().alias('molecules'))
         .sort('molecules', reverse=True)
@@ -991,7 +991,7 @@ def return_pibar(imols, ext_pattern = '(.{3})(.{4})(.+)', position=2, min_molecu
     #sns.displot(data['molecules'].to_pandas(), kind='kde', aspect=3, log_scale=10)
     hvalids = (
             data.filter(pl.col('molecules')>min_molecules)
-            .with_column(pl.col('raw_ibar')+ "." + pl.col('can_spacer').str.extract(ext_pattern, position))
+            .with_columns(pl.col('raw_ibar')+ "." + pl.col('can_spacer').str.extract(ext_pattern, position))
             .select('raw_ibar').to_series()
                 .apply(lambda x: ogtk.UM.compare_umi_to_pool((x, (0, valid)))).to_list()
     )
@@ -1029,7 +1029,7 @@ def pl_fastq_to_df(fastq_ifn, rc=False, end = None, export = False):
     df = pl.read_csv(fastq_ifn, has_header=False, n_rows = end, sep='\n')
     fastq_fields = ['rid', 'seq', 'plus', 'qual']
     df = (
-            df.with_column(
+            df.with_columns(
             (pl.arange(0, pl.count()) // step).alias("step")
             ).groupby("step", maintain_order=True)
         .agg([
@@ -1037,7 +1037,7 @@ def pl_fastq_to_df(fastq_ifn, rc=False, end = None, export = False):
         ])
         .drop(['step', 'plus'])
         )
-    df = df.lazy().with_column(pl.col('rid').str.replace("^@", "")).collect()
+    df = df.lazy().with_columns(pl.col('rid').str.replace("^@", "")).collect()
     if rc:
         df = (df
                 .lazy()
@@ -1085,7 +1085,7 @@ def pl_10xfastq_to_df(fastq_ifn, end = None, sample=None, export = False):
     read1 = pl_fastq_to_df(fastq_ifn, end=end, export = False)
     read2 = pl_fastq_to_df(fastq_ifn.replace('_R1_', '_R2_'), rc=True, end=end, export = False)
 
-    #read1 = read1.join(read2.with_column(pl.col('rid').str.replace(" 2:N:", " 1:N:")), left_on='rid', right_on='rid')
+    #read1 = read1.join(read2.with_columns(pl.col('rid').str.replace(" 2:N:", " 1:N:")), left_on='rid', right_on='rid')
     read1 = pl.concat([read1, read2])
     #read1 = read1.rename({'seq':'r1_seq', "qual":"r1_qual", "seq_right":"r2_seq", "qual_right":"r2_qual"})
 
@@ -1160,23 +1160,23 @@ def extract_read_grammar_new(
     df = (
         df
         .lazy()
-        .with_column(pl.col('seq').alias('oseq'))
-        .with_column(pl.col('seq').str.extract(f'({wts})', 1).alias('spacer'))
-        .with_column(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
-        .with_column(pl.col('seq').str.replace_all(f'.*?({fuzzy_tso})', '[···TSO···]'))
-        .with_column(pl.col('seq').str.replace_all(f'.*({fuzzy_u6})', '[···U6···]'))
-        .with_column(pl.col('seq').str.replace_all(f'.*({fuzzy_bu6})', '[···bU6···]'))
-        .with_column(pl.col('seq').str.extract(f'CTAGA(.{"{6}"})({fuzzy_dsibar})', 1).alias('raw_ibar'))
-        .with_column(pl.col('seq').str.replace_all(f'({fuzzy_dsibar})', '[···SCF1···]'))
-        .with_column(pl.col('seq').str.replace_all(f'({fuzzy_scaff2})', '[···SCF2···]'))
-        .with_column(pl.col('seq').str.replace_all(f'({canscaf})', f'[···CNSCFL···]'))
-        .with_column(pl.col('seq').str.replace_all(f'({fuzzy_primer})', f'[···LIB···]'))
-        .with_column(pl.col('seq').str.replace_all(f'\[···SCF2···\].+\[···LIB···\]', f'[···SCF2···][···LIB···]'))
-        #.with_column(pl.col('seq').str.extract(f'([A-Z]{"{6}"})\[···SCF1···\]',1).alias('raw_ibar'))
-        #i######.with_column(pl.col('seq').str.replace_all(f'(\]{"CTAGA"})', '][···SCF0···]'))
-        .with_column(pl.col('seq').str.replace_all(f'\[···SCF2···\]\[···LIB···\].+', '[END]'))
-        .with_column(pl.col('seq').str.replace_all(f'{fuzzy_stammering}', '[XXX]'))
-        .with_column(pl.col('seq').str.replace_all(f'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
+        .with_columns(pl.col('seq').alias('oseq'))
+        .with_columns(pl.col('seq').str.extract(f'({wts})', 1).alias('spacer'))
+        .with_columns(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
+        .with_columns(pl.col('seq').str.replace_all(f'.*?({fuzzy_tso})', '[···TSO···]'))
+        .with_columns(pl.col('seq').str.replace_all(f'.*({fuzzy_u6})', '[···U6···]'))
+        .with_columns(pl.col('seq').str.replace_all(f'.*({fuzzy_bu6})', '[···bU6···]'))
+        .with_columns(pl.col('seq').str.extract(f'CTAGA(.{"{6}"})({fuzzy_dsibar})', 1).alias('raw_ibar'))
+        .with_columns(pl.col('seq').str.replace_all(f'({fuzzy_dsibar})', '[···SCF1···]'))
+        .with_columns(pl.col('seq').str.replace_all(f'({fuzzy_scaff2})', '[···SCF2···]'))
+        .with_columns(pl.col('seq').str.replace_all(f'({canscaf})', f'[···CNSCFL···]'))
+        .with_columns(pl.col('seq').str.replace_all(f'({fuzzy_primer})', f'[···LIB···]'))
+        .with_columns(pl.col('seq').str.replace_all(f'\[···SCF2···\].+\[···LIB···\]', f'[···SCF2···][···LIB···]'))
+        #.with_columns(pl.col('seq').str.extract(f'([A-Z]{"{6}"})\[···SCF1···\]',1).alias('raw_ibar'))
+        #i######.with_columns(pl.col('seq').str.replace_all(f'(\]{"CTAGA"})', '][···SCF0···]'))
+        .with_columns(pl.col('seq').str.replace_all(f'\[···SCF2···\]\[···LIB···\].+', '[END]'))
+        .with_columns(pl.col('seq').str.replace_all(f'{fuzzy_stammering}', '[XXX]'))
+        .with_columns(pl.col('seq').str.replace_all(f'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
         .drop([i for i in ['qual',  'readid', 'start', 'end'] if i in df.columns])
   #      .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
     ).collect()
@@ -1308,7 +1308,12 @@ def noise_spectrum(batch: str,
     df = count_essential_patterns(df)
     #index =['u6s', 'sts', 'dss', 'can'] 
     #columns = 'wts'
-    xxx = df.pivot(index=index, columns=columns, values='umi', aggregate_fn='count', sort_columns=True).sort(index)
+    xxx = df.pivot(index=index, 
+                   columns=columns, 
+                   values='umi', 
+                   aggregate_function='count', 
+                   sort_columns=True).sort(index)
+
     rename_d =dict([(str(i), f'{columns}_{i}') for i in range(xxx.shape[1]-len(index))]) 
 
     xxxp = (
@@ -1377,12 +1382,11 @@ def filter_ibars(
     else:
         # they are provided:
         print('using provided valid ibars')
-
     
     print(f'{len(valid_ibars)=}')
 
 
-    df = df.with_column(pl.col('raw_ibar').is_in(valid_ibars).alias('valid_ibar'))
+    df = df.with_columns(pl.col('raw_ibar').is_in(valid_ibars).alias('valid_ibar'))
     return(df)
 
 def mask_wt(df: pl.DataFrame) -> pl.DataFrame:
@@ -1390,7 +1394,7 @@ def mask_wt(df: pl.DataFrame) -> pl.DataFrame:
     '''
     wt_str = '\[···WT···\]\[···CNSCFL···\]'
     df= (df
-         .with_column(( (pl.col('seq').str.count_match('WT')==1) 
+         .with_columns(( (pl.col('seq').str.count_match('WT')==1) 
                        & (pl.col('seq').str.contains(wt_str)))
     .alias('wt'))
      )
