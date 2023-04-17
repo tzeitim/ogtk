@@ -340,8 +340,26 @@ def tabulate_xp(xp, force=False):
             for found in r1:
                 xp.print(f"tabbing {found}")
                 outdir = f'{xp.wd_samplewd}/{suffix}'
-                ut.tabulate_paired_umified_fastqs(r1=found, force=force, rev_comp_r2=rev_comp_r2, export_parquet=True, outdir=outdir)
+                ut.tabulate_paired_umified_fastqs(r1=found, 
+                                                  force=force, 
+                                                  rev_comp_r2=rev_comp_r2, 
+                                                  export_parquet=True, 
+                                                  outdir=outdir)
 
     else:
         raise ValueError('No "tabulate" attribute in xp. When specified, add an additional prefix field bound to a boolean variable that will determine the reverse-complementarity of read2. yaml example:\ntabulate:\n  shrna: true\n  zshrna: false\n')
+
+def print_template(conf_fn: str = '/home/polivar/src/artnilet/conf/xps/template.yaml'):
+    ''' pretty-print experiment template to ease manual completion
+    '''
+    conf_dict = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
+    rich.print(conf_dict)
+
+def ingest_dict(conf_dict):
+    ''' Manual initialization of xp attributes
+    '''
+    for k,v in conf_dict():
+
+
+
 
