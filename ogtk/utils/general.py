@@ -621,7 +621,7 @@ def split_bam_by_tag(bam_ifn, tab, prefix, tag = 'CB', header = None):
     import subprocess
     print(subprocess.getoutput('date'))
 
-    df = pd.read_csv(tab, sep='\t', header=header)
+    df = pd.read_csv(tab, separator='\t', header=header)
     df.columns = [tag, 'ann']
     bam = pysam.AlignmentFile(bam_ifn, 'rb')
     # map tag->ann
@@ -682,7 +682,7 @@ def export_tabix_parquet(tbxifn, parfn)->None:
 
     print(subprocess.getoutput('date'))
 
-    df = pl.read_csv(tbxifn, sep='\t', has_header=False)
+    df = pl.read_csv(tbxifn, separator='\t', has_header=False)
     df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
     df.write_parquet(parfn)
 
