@@ -666,7 +666,7 @@ def load_mol_ibarspl(sample_id, min_reads_umi=2, min_dom_cov=2):
     wl = load_wl()
     print(f'loading {sample_id}')
     mol_ibars = (
-            pl.scan_csv('/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv', sep='\t')
+            pl.scan_csv('/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv', separator='\t')
             .filter(pl.col('ibar')!='no_ibar')
             .filter(pl.col('sample_id')==sample_id)
             .filter(pl.col('umi_reads')>=min_reads_umi)
