@@ -28,7 +28,7 @@ def shgrna(sample_id: str,
         Off-targets are defined by reads without an ibar pattern match.
         UMIs are filtered based on the number of reads
     '''
-    df = pl.read_csv(tbxifn, sep='\t', has_header=False)
+    df = pl.read_csv(tbxifn, separator='\t', has_header=False)
     df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
     
     rdf = ib.extract_read_grammar_new(sample_id, df=df.drop('cbc'))
