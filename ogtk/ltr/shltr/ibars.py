@@ -652,6 +652,7 @@ def return_corrected_spacer(x, spacer_corrector, correction_pad='GGT'):
 def load_wl(as_pl: bool=False, turn_to_cat: bool= False):
     ''' load Kalhor table
     '''
+
     wl = pd.read_csv('/local/users/polivar/src/artnilet/conf/protospacers_singlecell.csv')
     wl.index = wl['kalhor_id']
     #cat_type = CategoricalDtype(categories=["b", "c", "d"], ordered=True)
@@ -1097,12 +1098,12 @@ def pl_10xfastq_to_df(fastq_ifn, end = None, sample=None, export = False):
         return(read1)
 
 def extract_read_grammar_new(
-    batch: str,
-    parquet_ifn: str| None = None,
-    df: pl.DataFrame | None = None,
-    zombie = False,
-    sample = None,
-    ) -> pl.DataFrame:
+            batch: str,
+            parquet_ifn: str| None = None,
+            df: pl.DataFrame | None = None,
+            zombie = False,
+            sample = None,
+            ) -> pl.DataFrame:
     ''' Encodes raw reads based on regular expressions. It doesn't aggregate results
     '''
     import rich 
@@ -1134,17 +1135,31 @@ def extract_read_grammar_new(
     else:
         fuzzy_canspa=  fuzzy_match_str(canscaf, wildcard="") # ?? used to be a wildcard='.'
 
-
     ####
     if all(i is None for i in [df, parquet_ifn]):
         raise ValueError("you need to provide parquet_ifn or a pl")
 
 
+    def pfn(path:str):
+        ''' Parse file name
+        '''
+        return path.split('/')[-1]
+            
+
+    # TODO change name of parquet_ifn
+    # depending on whether `parquet_ifn` is a list or not, read the files accordingly
+    use_pyarrow=True
+
     if df is None:
+        if isinstance([parquet_ifn], list):
+            if sample is not None:
+                df = pl.concat((pl.read_parquet(i, use_pyarrow=use_pyarrow).sample(sample).drop(['readid', 'qual' , 'start', 'end']).with_columns(pl.lit(pfn(i)).alias('ifn')) for i in parquet_ifn))
+            else:
+                df = pl.concat((pl.read_parquet(i, use_pyarrow=use_pyarrow).drop(['readid', 'qual' , 'start', 'end']).with_columns(pl.lit(pfn(i)).alias('ifn'))for i in parquet_ifn))
         if sample is not None:
-            df =pl.read_parquet(parquet_ifn).sample(sample).drop(['readid', 'qual' , 'start', 'end'])
+            df=pl.read_parquet(parquet_ifn, use_pyarrow=use_pyarrow).sample(sample).drop(['readid', 'qual' , 'start', 'end'])
         else:
-            df = pl.read_parquet(parquet_ifn).drop(['readid', 'qual' , 'start', 'end'])
+            df=pl.read_parquet(parquet_ifn, use_pyarrow=use_pyarrow).drop(['readid', 'qual' , 'start', 'end'])
 
     print(f'total_reads={df.shape[0]}')
     if "cbc" in df.columns:
