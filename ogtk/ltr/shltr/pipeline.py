@@ -10,7 +10,6 @@ import anndata as ad
 import os
 from functools import wraps
 
-
 def _plot_cc(exp, 
     max_cell_size = 1.22e4,
     tmax_cell_size = 1000,
@@ -98,10 +97,25 @@ def _plot_cc(exp,
                 vmax=50)
 
 class Xp(db.Xp):
-    def __init__(self, conf_fn):
-        super().__init__(conf_fn)
-        self.raw_adata = None
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.conf_keys = [i for i in vars(self)]
         self.explored = False
+        
+        self.raw_adata = None
+        self.batch_map = None
+        self.attr_d= {'shrna':'mols', 'zshrna':'zmols'}
+        self.is_chimera = 'is_chimera' in vars(self).keys()
+
+
+    def init_wd(self):
+        '''
+            Generally useful for pooled Xps, e.g. three 10x lanes from the sample original sample.
+            It iterates through defined ``wd_*`` attributes and creates the corresponding directories
+        '''
+        for i in [getattr(self, i) for i in vars(self).keys() if i.startswith('wd_')]:
+            self.print(f"creating {i}")
+            os.system(f'mkdir -p {i}')
 
     def load_10_mtx(self, cache = True, batch = None):
         ''' Loads the corresponding 10x matrix for a given experiment
@@ -141,45 +155,58 @@ class Xp(db.Xp):
         ''' Returns data frame at the molecule level
 
             Invokes ``shltr.sc.reads_to_molecules``
+            
+            When more than one parquet file is found by the function, all of them are loaded into a single data frame 
         '''
         if sample_id is None:
             sample_id = self.sample_id
 
-        files = self.list_guide_tables(suffix)
-        parquet_ifn = files[index]
+        # looks for tabulated parquet files
+        parquet_ifn = self.list_guide_tables(suffix)
+        #parquet_ifn = files[index]
+        self.print('Reading molecule parquets')
+        self.print(parquet_ifn)
 
         df = shltr.sc.reads_to_molecules(
-            sample_id=sample_id,
-            parquet_ifn=parquet_ifn,
-            valid_ibars = valid_ibars, 
-            use_cache=use_cache,
-            corr_dict_fn=corr_dir_fn,
-            down_sample=down_sample,
-            #min_cells_per_ibar=int(len(obs27['cbc']) * 0.2),
-            min_reads=min_reads, 
-            max_reads=1e6, 
-            clone=clone)
+                        sample_id=sample_id,
+                        parquet_ifn=parquet_ifn,
+                        valid_ibars=valid_ibars, 
+                        use_cache=use_cache,
+                        cache_dir=self.return_cache_path('mols', suffix),
+                        corr_dict_fn=corr_dir_fn,
+                        down_sample=down_sample,
+                        #min_cells_per_ibar=int(len(obs27['cbc']) * 0.2),
+                        min_reads=min_reads, 
+                        max_reads=1e6, 
+                        clone=clone)
         return(df)
 
     def init_mols(self,
                   valid_ibars: Sequence,
                   clone: str, 
-                  ibar_ann: str = '/local/users/polivar/src/artnilet/workdir/scv2/all_parquetino_clusters',
-                  min_cell_size: int = 0,
+                  suffix: str='shrna',
+                  ibar_ann: str='/local/users/polivar/src/artnilet/workdir/scv2/all_parquetino_clusters',
+                  min_cell_size: int=0,
                   ):
         ''' Creates the .mols attribute
             Annotates the ibars using a ibar 'cluster' table
             # TODO : improve the ibar annotation functionality
         '''
 
-        self.mols = self.load_guide_molecules(valid_ibars = valid_ibars, clone = clone)
-        self.mols = self.annotate_ibars(ibar_ann=ibar_ann)
-        self.score_clone(min_cell_size=min_cell_size)
-        
+        mols = self.load_guide_molecules(valid_ibars = valid_ibars, clone = clone, suffix=suffix)
 
-    def annotate_ibars(self, 
-                  ibar_ann: str = '/local/users/polivar/src/artnilet/workdir/scv2/all_parquetino_clusters',
-       ):
+
+        setattr(self, self.attr_d[suffix], mols)
+        self.annotate_ibars(ibar_ann=ibar_ann, suffix=suffix)
+
+        if self.is_chimera:
+            self.score_clone(min_cell_size=min_cell_size)
+
+    def annotate_ibars(
+            self, 
+            ibar_ann: str='/local/users/polivar/src/artnilet/workdir/scv2/all_parquetino_clusters',
+            suffix: str='shrna',
+            ):
 
         dfc = (pl.scan_parquet(ibar_ann)
                .drop('sample_id').unique()
@@ -188,9 +215,11 @@ class Xp(db.Xp):
                 .collect()
             )
 
-        dfc = (self.mols.join(
+        mols = getattr(self, self.attr_d[suffix])
+
+        dfc = (mols.join(
                     dfc, 
-                    left_on =['raw_ibar'], 
+                    left_on=['raw_ibar'], 
                     right_on=['raw_ibar'], 
                     how='left')
                     )
@@ -245,20 +274,22 @@ class Xp(db.Xp):
                     how='left')
         )
 
-    def init_object(self, sample_name: str| None= None):
+    def init_object(self, sample_name: str| None= None, uiport=7777):
         ''' Main function to load full experiment object
         '''
         if sample_name is None:
             sample_name = self.sample_id
 
         self.init_workdir()
-        db.run_cranger(self, localcores=75, uiport=7777)
+
+        if 'pp' in vars(self):
+            db.run_cranger(self, localcores=75, uiport=uiport)
 
         res = self.load_final_ad(sample_name=sample_name)
-        if res >0:
-            return
 
-        db.tabulate_xp(self)
+        if self.tabulate is not None:
+            db.tabulate_xp(self)
+
 
         self.init_mols(valid_ibars = self.default_ibars(), clone=self.clone)
         #self.init_adata()
@@ -291,7 +322,7 @@ class Xp(db.Xp):
         self.mcs.write_h5ad(mcs_fad_path)
         self.scs.write_h5ad(scs_fad_path)
 
-    def return_path(self, kind, sample_name:str|None=None):
+    def return_path(self, kind, sample_name:str|None=None, suffix=None):
         if sample_name is None:
             sample_name = self.sample_id
         #_f for final
@@ -303,6 +334,10 @@ class Xp(db.Xp):
         
         otl_ad_path = mcs_ad_path.replace('mcells', 'outliers')
         
+        if suffix is not None:
+            mols = self.return_cache_path('mols', suffix=suffix)
+            mols = f'{mols}/{sample_name}_r2mols.parquet'
+
         return locals()[kind]
     
     def clear_mc(self, 
@@ -357,6 +392,7 @@ class Xp(db.Xp):
                     adata=adata if adata is not None else self.raw_adata, 
                     adata_workdir=self.wd_scrna,
                     explore = explore,
+                    force = force,
                     *args,
                     **kwargs
                   )
@@ -391,9 +427,10 @@ class Xp(db.Xp):
 
     @wraps(shltr.sc.allele_calling)
     def init_alleles(self, 
-                     expr: None | pl.Expr=None,
-                     valid_ibars: Sequence| None= None,
-               *args, **kwargs):
+                     expr:None|pl.Expr=None,
+                     valid_ibars:Sequence|None=None,
+                     *args,
+                     **kwargs):
         ''' 
         '''
         if valid_ibars is None:
@@ -417,11 +454,14 @@ class Xp(db.Xp):
                         .sort(['cluster', 'raw_ibar'])
                         )
         # merge with scs.obs
-        strip_pattern = '(.+?)-(.)' if self.batch_map is not None else '(.+)'
-        self.alleles = self.alleles.join(ut.sc.adobs_pd_to_df(self.scs, strip_pattern), 
-                                 left_on='cbc', 
-                                 right_on='cbc', 
-                                 how='left')
+        strip_pattern = '(.+?)-(.)' if self.batch_map is None else '(.+)'
+        print(f'{strip_pattern=}')
+
+        self.alleles = self.alleles.join(
+                ut.sc.adobs_pd_to_df(self.scs, strip_pattern), 
+                left_on='cbc', 
+                right_on='cbc', 
+                how='outer')
 
         # since polars lacks a 'how=right' merging, it is needed to drop nulls
         self.alleles = self.alleles.filter(pl.col('umis_cell').is_not_null())
@@ -453,10 +493,14 @@ class Xp(db.Xp):
     def plot_cc(self, *args, **kwargs):
         _plot_cc(self, *args, **kwargs)
 
-    def ingest_xps(self, xps: Iterable):
+    def ingest_xps(self, xps: Iterable, suffix='shrna', force=False):
+        ''' Merge compatible experiments and integrate them into an invidiual one.
+            a ``batch_map`` keeps track of an appended identifier to single-cell barcodes
         '''
+        if self.mols is not None and self.raw_adata is not None:
+            self.print('This experiment seems to be have ingested others. No need to ingest unless force=True')
+            return None
 
-        '''
         adatas = [i.scs for i in xps]
         
         adata = ad.concat(adatas, join='outer', label='batch_id', index_unique="_")
@@ -473,8 +517,25 @@ class Xp(db.Xp):
         self.mols = pl.concat(
             [ pl_exp(xp) for xp in xps ]
         )
+
+        # save parquet file
+        self.print(f"saving molecules to {self.return_path('mols', suffix=suffix)}")
+        self.mols.write_parquet(self.return_path('mols', suffix=suffix))
+
         self.raw_adata = adata
         self.batch_map = batch_map
+        self.conf_keys.append('batch_map')
+
+        self.export_xpconf(xp_conf_keys = set(self.conf_keys))
+
+    def return_cache_path(self, key, suffix=None):
+        '''
+        '''
+        if key =='mols':
+            assert suffix is not None, "A suffix for the type of molecule is needed, e.g., 'shrna', 'zhrna'"
+            return f'{self.wd_samplewd}/{suffix}/'
 
 
-
+@wraps(db.print_template)
+def print_template(*args, **kwargs):
+    db.print_template(*args, **kwargs)
