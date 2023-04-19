@@ -1,5 +1,5 @@
 import setuptools
-from setuptools_rust import Binding, RustExtension
+#from setuptools_rust import Binding, RustExtensioni
 
 with open("README.md", "r") as fh:
     long_description = fh.read()
@@ -34,12 +34,16 @@ setuptools.setup(
         'matplotlib',
         'pandas',
         'polars',
+        'pyarrow',
         'pyaml', 
         'pysam', 
         'pyfaidx', 
         'pyfasta', 
         'regex', 
+        'rich',
         'scipy',
+#        'metacells',
+#        'scanpy',
         'seaborn',
         'setuptools_rust',
         'tables'

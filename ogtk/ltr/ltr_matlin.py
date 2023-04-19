@@ -345,7 +345,7 @@ class matlin():
         df = df.sort(subset)
                 
         df =(df
-            .with_column(pl.when(~pl.col('wt'))
+            .with_columns(pl.when(~pl.col('wt'))
                 .then(pl.col('seq'))
                 .otherwise("..").alias('seq'))
             .pivot(columns='raw_ibar', index='cbc', values='seq')
