@@ -139,6 +139,8 @@ class Xp(db.Xp):
         '''
         path = f'{self.wd_samplewd}/{suffix}'
         files = ut.sfind(path=path, pattern='*.parquet')
+        if not isinstance(files, list):
+            files=[files]
         return(files)
 
     def load_guide_molecules(
@@ -146,10 +148,10 @@ class Xp(db.Xp):
             clone,
             sample_id = None,
             suffix = 'shrna',
-            index = 0,
+            pattern: str|None=None,
             min_reads = 2,
             valid_ibars = None,
-            down_sample = None,
+            downsample = None,
             use_cache = True,
             corr_dir_fn=None):
         ''' Returns data frame at the molecule level
@@ -163,7 +165,10 @@ class Xp(db.Xp):
 
         # looks for tabulated parquet files
         parquet_ifn = self.list_guide_tables(suffix)
-        #parquet_ifn = files[index]
+
+        if pattern is not None:
+            parquet_ifn = [i for i in parquet_ifn if pattern in i]
+
         self.print('Reading molecule parquets')
         self.print(parquet_ifn)
 
@@ -174,7 +179,7 @@ class Xp(db.Xp):
                         use_cache=use_cache,
                         cache_dir=self.return_cache_path('mols', suffix),
                         corr_dict_fn=corr_dir_fn,
-                        down_sample=down_sample,
+                        downsample=downsample,
                         #min_cells_per_ibar=int(len(obs27['cbc']) * 0.2),
                         min_reads=min_reads, 
                         max_reads=1e6, 
@@ -187,25 +192,41 @@ class Xp(db.Xp):
                   suffix: str='shrna',
                   ibar_ann: str='/local/users/polivar/src/artnilet/workdir/scv2/all_parquetino_clusters',
                   min_cell_size: int=0,
+                  downsample: str|None=None,
+                  pattern: str|None=None,
+                  sample_id: str|None=None,
                   ):
         ''' Creates the .mols attribute
             Annotates the ibars using a ibar 'cluster' table
             # TODO : improve the ibar annotation functionality
         '''
 
-        mols = self.load_guide_molecules(valid_ibars = valid_ibars, clone = clone, suffix=suffix)
+        if sample_id is None:
+            sample_id = self.sample_id
 
+        if downsample is not None:
+            self.print(f'Downsampling to {downsample} reads', style='bold #ff0000')
+            downsample = int(downsample)
 
+        mols = self.load_guide_molecules(valid_ibars=valid_ibars, 
+                                         clone=clone, 
+                                         suffix=suffix, 
+                                         downsample=downsample, 
+                                         pattern=pattern)
+
+        # annotate .mols
+        mols = self.annotate_ibars(mols=mols, ibar_ann=ibar_ann)
+
+        # store .mols
         setattr(self, self.attr_d[suffix], mols)
-        self.annotate_ibars(ibar_ann=ibar_ann, suffix=suffix)
 
         if self.is_chimera:
             self.score_clone(min_cell_size=min_cell_size)
 
     def annotate_ibars(
             self, 
+            mols,
             ibar_ann: str='/local/users/polivar/src/artnilet/workdir/scv2/all_parquetino_clusters',
-            suffix: str='shrna',
             ):
 
         dfc = (pl.scan_parquet(ibar_ann)
@@ -214,8 +235,6 @@ class Xp(db.Xp):
                 #.filter(pl.col('cluster')!=0)
                 .collect()
             )
-
-        mols = getattr(self, self.attr_d[suffix])
 
         dfc = (mols.join(
                     dfc, 
@@ -307,7 +326,7 @@ class Xp(db.Xp):
             return 0
 
         else:
-            self.print(f'No final adatas found, compute them manually using .do_mc(explore=True), select best parameters and re-run .do_mc(explore=False)', 'bold red', force = True)
+            self.print(f'No final adatas found, compute them manually using .do_mc(explore=True), select best parameters and re-run .do_mc(explore=False)', 'bold #ff0000', force = True)
             return 1
             raise ValueError 
 
@@ -427,6 +446,7 @@ class Xp(db.Xp):
 
     @wraps(shltr.sc.allele_calling)
     def init_alleles(self, 
+                     suffix='shrna',
                      expr:None|pl.Expr=None,
                      valid_ibars:Sequence|None=None,
                      *args,
@@ -436,35 +456,38 @@ class Xp(db.Xp):
         if valid_ibars is None:
             valid_ibars = self.default_ibars()
 
-        #ax = sns.histplot(self.mols['db_norm_umis_allele'].log10(),
-        #                  element='step', fill=False)
+        mols = getattr(self, self.attr_d[suffix] )
+
         if expr is not None:
-            plt.figure()
-         #   ars = sns.histplot(self.mols.filter(expr)['db_norm_umis_allele'].log10(), 
-         #                      ax = ax, color='orange', fill=True,
-         #                     element='step')
-            self.alleles = shltr.sc.allele_calling(self.mols.filter(expr), *args, **kwargs)
+            alleles = shltr.sc.allele_calling(mols.filter(expr), *args, **kwargs)
         else:
-            self.alleles = shltr.sc.allele_calling(self.mols, *args, **kwargs)
+            alleles = shltr.sc.allele_calling(mols, *args, **kwargs)
         
         # add mask for valid ibars
-        self.alleles = (self.alleles
+        alleles = (alleles
                         .with_columns(pl.col('raw_ibar').is_in(valid_ibars)
                             .alias('valid_ibar'))
                         .sort(['cluster', 'raw_ibar'])
                         )
-        # merge with scs.obs
-        strip_pattern = '(.+?)-(.)' if self.batch_map is None else '(.+)'
-        print(f'{strip_pattern=}')
 
-        self.alleles = self.alleles.join(
+        # merge with scs.obs
+        # TODO a bug lurches here
+        strip_pattern = '(.+?)-(.)' if self.batch_map is not None else '(.+)'
+        self.print(f'{strip_pattern=}', style='bold #00ff00')
+
+        # the majority of the raw cell barcodes do not belong to any real cell so we constrain the merge to the scs
+        # how='outer'
+        alleles = alleles.join(
                 ut.sc.adobs_pd_to_df(self.scs, strip_pattern), 
                 left_on='cbc', 
                 right_on='cbc', 
-                how='outer')
+                how='inner') 
 
         # since polars lacks a 'how=right' merging, it is needed to drop nulls
-        self.alleles = self.alleles.filter(pl.col('umis_cell').is_not_null())
+        # in a field that is meaningful for the alleles, such as 'umis_cell'
+        #alleles = alleles.filter(pl.col('umis_cell').is_not_null())
+
+        setattr(self, suffix[0]+'alleles', alleles)
 
 
     @wraps(shltr.sc.to_matlin)
@@ -485,7 +508,7 @@ class Xp(db.Xp):
             '''
                 Loads pre-determined list of valid ibars
             '''
-            self.print(':red_square: :red_square: Loading pre-computed valid ibars :red_square: :red_square:', 'bold red')
+            self.print(':red_square: :red_square: Loading pre-computed valid ibars :red_square: :red_square:', 'bold #ff0000')
             valid_ibars = pl.read_csv('/local/users/polivar/src/artnilet/conf/valid_ibars.csv')['valid_ibars'].to_list()      
             return(valid_ibars)
 
