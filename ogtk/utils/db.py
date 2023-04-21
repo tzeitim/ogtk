@@ -11,7 +11,7 @@ class Xp():
     def __init__(self, conf_fn=None, conf_dict=None, quiet=True):
         self.conf_fn = conf_fn
         self.consolidated = False
-        self.console = Console(width=500)
+        self.console = Console(width=800)
         self.quiet = quiet
 
         if conf_fn is not None:
@@ -23,14 +23,14 @@ class Xp():
 
         if "xp_template" in vars(self):
             self.consolidate_conf()
-
+    
     def __str__(self):
         return '\n'.join([f'{i}:\t{ii}' for i,ii in self.__rich_repr__()])
 
     def __rich_repr__(self):
         for k,v in vars(self).items():
             yield k,v
-    
+        
     def to_pl(self): 
         ''' Manually sanitize the vars() dictionary for direct coversion to a polars object
         '''
@@ -91,15 +91,15 @@ class Xp():
         print(cmd)
         os.system(cmd)
 
-    def print(self, text, style="bold magenta", force=False):
+    def print(self, text, style="bold magenta", force=False, *args, **kwargs):
         '''
         '''
         #text = Text(text)
         #text.stylize(style)
         if not self.quiet or force:
-            self.console.print(text, style=style)
+            self.console.print(text, style=style, *args, **kwargs)
 
-    def export_xpconf(self, out_fn = None, out_dir=None):
+    def export_xpconf(self, xp_conf_keys = None, out_fn = None, out_dir=None):
         ''' Saves current instance of an experiment to the sample_wd directory as default
         '''
         if out_fn is None:
@@ -110,11 +110,16 @@ class Xp():
         out_fn = f'{out_dir}/{out_fn}'
         self.print(f'Saving xp conf to {out_fn}')
 
-        xp_dic = vars(self).copy()
-        del xp_dic['console']
+        if xp_conf_keys is None:
+            xp_conf_keys = vars(self).keys()
+
+        ignored_keys = ['console']
+        
+        conf_dict = dict([(i, vars(self)[i]) for i in xp_conf_keys if i not in ignored_keys])
     
         with open(out_fn, 'w') as outfile:
-            yaml.dump(xp_dic, outfile)
+            yaml.dump(conf_dict, outfile)
+
 
 
 def return_file_name(sample_id, field):
@@ -125,7 +130,7 @@ def return_file_name(sample_id, field):
     import pandas as pd
 
     xps = (
-        pl.read_csv('/local/users/polivar/src/artnilet/conf/xpdb_datain.txt', sep='\t')
+        pl.read_csv('/local/users/polivar/src/artnilet/conf/xpdb_datain.txt', separator='\t')
         .filter(pl.col('sample_id')==sample_id)
     )
 
@@ -302,7 +307,7 @@ def run_bcl2fq(xp, force=False, dry=False, **args):
 
         return(p1)
     else:
-        return(0)
+       return(0)
     
 def tabulate_xp(xp, force=False):
     ''' 
@@ -322,8 +327,10 @@ def tabulate_xp(xp, force=False):
     if 'tabulate' in vars(xp):
         for suffix in xp.tabulate.keys():
             xp.print(f"{suffix}", 'bold red')
+
             path_to_reads = f'{xp.wd_fastq}/{suffix}'
             rev_comp_r2 = xp.tabulate[suffix]
+
             xp.print("path to reads:")
             xp.print(path_to_reads, 'bold white')
 
@@ -333,10 +340,13 @@ def tabulate_xp(xp, force=False):
 
             r1 = ut.sfind(path_to_reads, pattern=pattern)
             print(r1)
+
             if len(r1)==0:
                 raise ValueError(f'No files found under the pattern {pattern}')
+
             if not isinstance(r1, list):
                 r1 = [r1]
+
             for found in r1:
                 xp.print(f"tabbing {found}")
                 outdir = f'{xp.wd_samplewd}/{suffix}'
@@ -355,10 +365,6 @@ def print_template(conf_fn: str = '/home/polivar/src/artnilet/conf/xps/template.
     conf_dict = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
     rich.print(conf_dict)
 
-def ingest_dict(conf_dict):
-    ''' Manual initialization of xp attributes
-    '''
-    for k,v in conf_dict():
 
 
 
