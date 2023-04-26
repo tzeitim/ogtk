@@ -1147,7 +1147,8 @@ def split_fastq_by_intid_pl(
     ifn,
     anchor1,
     anchor2,
-    min_cov = 0.1
+    min_cov = 0.1,
+    dont_filter = False,
     ):
     '''
 
@@ -1159,6 +1160,7 @@ def split_fastq_by_intid_pl(
 
     fq_fields = return_fq_fields()
     fields_r2 = {k:k+'2' for k in fq_fields}
+    del fields_r2['plus']
 
     res = (pl.concat(
             [
@@ -1169,13 +1171,19 @@ def split_fastq_by_intid_pl(
                 rechunk=True,
             )
             .with_columns(
-                [pl.col('seq').str.extract(f"{anchor1}(.......)",1).alias('intid1'),
-                 pl.col('seq2').str.extract(f"{anchor2}(.......)",1).alias('intid2')
+                [pl.col('seq').str.extract(f"{anchor1}",1).alias('intid1'),
+                 pl.col('seq2').str.extract(f"{anchor2}",1).alias('intid2')
                 ]
             )
             .with_columns(pl.count().over(['intid1', 'intid2']).alias('counts'))
-            .with_columns(pl.col('counts')/pl.col('counts').max())
-            .filter(pl.col('counts')>=min_cov)
+            .with_columns((pl.col('counts')/pl.col('counts').max()).alias('ncounts'))
+           )
+
+    if dont_filter:
+        return res
+
+    res = (res
+            .filter(pl.col('ncounts')>=min_cov)
     )
 
     valid_groups = res.select(['intid1', 'intid2']).unique()
