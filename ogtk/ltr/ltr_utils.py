@@ -11,6 +11,7 @@ import regex
 import numpy as np
 import pandas as pd
 import pdb
+import polars as pl
 import os
 import glob
 import pandas as pd
@@ -1120,4 +1121,78 @@ def create_workdir(outdir, config_card_dir):
     if not os.path.isdir(config_card_dir):
         os.makedirs(config_card_dir, exist_ok=True)
         print("Created {}".format(config_card_dir))
- 
+        
+def return_fq_fields():
+   return ['readid', 'seq', 'plus', 'qual']
+
+def load_fastq_to_polars(ifn):
+    ''' Helper function to load an uncompressed fastq file and tabulates into polars
+    Not lazy
+    '''
+    fq_fields = return_fq_fields()
+    return (
+         pl.scan_csv(ifn, separator='.', has_header=False)
+        .with_columns((pl.arange(0, pl.count()) // 4)
+        .alias("step"))
+        .groupby("step", maintain_order=True)
+        .agg([  pl.col("column_1").take(i).alias(name) for i, name in enumerate(fq_fields) ])
+        .drop('step')
+        .drop('plus')
+        .collect(streaming=True)
+    )
+
+
+def split_fastq_by_intid_pl(
+    outdir, 
+    ifn,
+    anchor1,
+    anchor2,
+    min_cov = 0.1
+    ):
+    '''
+
+    For Nora's line these are the recommended values for the anchors
+    anchor1 = 'GTGGCAGG'
+    anchor2 = 'TCCTGTAG'
+    '''
+    ifn2 = ifn.replace('R1', 'R2')
+
+    fq_fields = return_fq_fields()
+    fields_r2 = {k:k+'2' for k in fq_fields}
+
+    res = (pl.concat(
+            [
+                load_fastq_to_polars(ifn),
+                load_fastq_to_polars(ifn2).rename(fields_r2)
+             ],
+                how="horizontal",
+                rechunk=True,
+            )
+            .with_columns(
+                [pl.col('seq').str.extract(f"{anchor1}(.......)",1).alias('intid1'),
+                 pl.col('seq2').str.extract(f"{anchor2}(.......)",1).alias('intid2')
+                ]
+            )
+            .with_columns(pl.count().over(['intid1', 'intid2']).alias('counts'))
+            .with_columns(pl.col('counts')/pl.col('counts').max())
+            .filter(pl.col('counts')>=min_cov)
+    )
+
+    valid_groups = res.select(['intid1', 'intid2']).unique()
+
+    for g1,g2 in zip(valid_groups['intid1'], valid_groups['intid2']):
+        print(f'{g1}, {g2}')
+        (res
+            .filter((pl.col('intid1')==g1) & (pl.col('intid2')==g2))
+            .with_columns(pl.lit('+').alias('plus'))
+            .select(['readid', 'seq', 'plus', 'qual'])
+            .write_csv(f'{outdir}/{g1}-{g2}_R1.fastq', separator='\n', has_header=False)
+         )
+
+        (res
+        .filter((pl.col('intid1')==g1) & (pl.col('intid2')==g2))
+        .with_columns(pl.lit('+').alias('plus'))
+        .select(['readid2', 'seq2', 'plus', 'qual2'])
+        .write_csv(f'{outdir}/{g1}-{g2}_R2.fastq', separator='\n', has_header=False)
+     )
+
