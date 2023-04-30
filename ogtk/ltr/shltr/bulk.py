@@ -17,21 +17,30 @@ def lalla():
     return    ib.load_wl()
 
 def shgrna(sample_id: str,
-           tbxifn: str, 
            valid_ibars: Sequence, 
-           min_reads: int=1, 
-           max_reads: int=1e6,
+           parquet_ifn: str|None=None, 
+           tbxifn: str|None=None, 
+           min_reads: int=int(1), 
+           max_reads: int=int(1e6),
            clone: str | None=None,
+           downsample: None=None,
            ) -> pl.DataFrame:
     ''' Analytical routine to process UMIfied shRNA from bulk assays.
         If `clone` is not provided it assumes that can be found as the first element of a dash-splitted `sample_id` string. 
         Off-targets are defined by reads without an ibar pattern match.
         UMIs are filtered based on the number of reads
     '''
-    df = pl.read_csv(tbxifn, separator='\t', has_header=False)
-    df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
-    
-    rdf = ib.extract_read_grammar_new(sample_id, df=df.drop('cbc'))
+    assert not ((tbxifn is None) and (parquet_ifn is None) ), "You must provide a tabix or parquet input filename"
+    assert not ((tbxifn is not None) and (parquet_ifn is not None) ), "You must provide either a tabix or parquet input filename, not both"
+
+    if parquet_ifn is not None:
+        rdf = ib.extract_read_grammar_new(parquet_ifn = parquet_ifn, batch = sample_id, sample = downsample)
+
+    if tbxifn is not None:
+        df = pl.read_csv(tbxifn, separator='\t', has_header=False)
+        df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
+        rdf = ib.extract_read_grammar_new(batch = sample_id, df=df.drop('cbc'), sample= downsample)
+
     tot_reads = rdf.shape[0]
     rdf = ib.ibar_reads_to_molecules(rdf, modality='single-molecule')
     rdf = ib.count_essential_patterns(rdf)
@@ -50,6 +59,8 @@ def shgrna(sample_id: str,
     print(f'{tot_umis=}')
     print(f'{tot_reads=}')
 
+    print(f'umis per 10k reads {10000*tot_umis/tot_reads}')
+
     return(rdf
            .filter(pl.col('raw_ibar').is_not_null())
            .filter(pl.col('raw_ibar').is_in(valid_ibars))
@@ -60,8 +71,9 @@ def shgrna(sample_id: str,
            .with_columns(pl.lit(offtarget).alias('qc_pc_offt'))
            .with_columns(pl.lit(tot_umis).alias('qc_tot_umis'))
            .with_columns(pl.lit(tot_reads).alias('qc_tot_reads'))
+           .with_columns(pl.col(pl.Int32).cast(pl.Int64))
            .with_columns((10000*pl.col('qc_tot_umis')/pl.col('qc_tot_reads')).alias('qc_umis_per_10kreads'))
-
+        
           )
 
 def qc_ibars_per_sample(df: pl.DataFrame)-> pl.DataFrame:
@@ -69,10 +81,11 @@ def qc_ibars_per_sample(df: pl.DataFrame)-> pl.DataFrame:
         compute molecule stats at the level of samples and integration
             - total reads per ibar (`ibar_reads`)
             - total umis per ibar (`ibar_umis`)
-            - -log10 total reads per ibar (`ibar_reads_log10`)
-            - -log10 total umis per ibar (`ibar_umis_log10`)
-            - quantile conversion total reads per ibar (`ibar_reads_q`)
-            - quantile conversion total umis per ibar (`ibar_umis_q`)
+            - log10 total reads per ibar (`ibar_reads_log10`)
+            - log10 total umis per ibar (`ibar_umis_log10`)
+        Computes at the whole df level the quantiled counts
+            - -log10 quantile conversion total reads per ibar (`ibar_reads_q`)
+            - -log10 quantile conversion total umis per ibar (`ibar_umis_q`)
     '''
     groups = ['sample_id', 'raw_ibar']
     df = (df
