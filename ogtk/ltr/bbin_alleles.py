@@ -40,6 +40,7 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
     trimming_pattern = None, 
     alg_gapopen = 20, 
     alg_gapextend =1,
+    process_unmerged = True,
     use_cache = True):
     '''Once bulk fastq files (R1 and R2) have been split (RPI>rev_id>intid) process them into a table of barcodes 
     for downstream analysis.
@@ -175,6 +176,7 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
         conf,
         level = 'mols',
         umi_len = umi_len,
+        process_unmerged = process_unmerged,
         counts =  f'{out_prefix}_umi_counts.txt',
         cov_pck = f'{out_prefix}_umi_cov.pickle'
         )
@@ -218,6 +220,7 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
     # from kwargs
     threads = kwargs['threads']
     use_cache =kwargs['use_cache'] 
+    process_unmerged = kwargs['process_unmerged']
 
     if end != None:
         print("Warning: end is not None; You are not processing all the data", end)
@@ -315,8 +318,11 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
 
     print("whitelist:", len(umi_whitelist))
 
-    if len(umi_whitelist)>0:
+    if len(umi_whitelist)>0 and process_unmerged:
         unmerged_tab_out = conf['lineage']['paired_tab'] 
+
+        print(f'exploring {fa_corrected1}')
+        print(f'exploring {fa_corrected2}')
 
         mlt_compute_barcode_matrix_paired(fa_ifn = fa_corrected1, 
                                            fa_ifn2 = fa_corrected2, 

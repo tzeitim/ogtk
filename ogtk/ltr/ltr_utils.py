@@ -1138,7 +1138,7 @@ def load_fastq_to_polars(ifn):
         .agg([  pl.col("column_1").take(i).alias(name) for i, name in enumerate(fq_fields) ])
         .drop('step')
         .drop('plus')
-        .collect(streaming=True)
+        #.collect(streaming=True)
     )
 
 
