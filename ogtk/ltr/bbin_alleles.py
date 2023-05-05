@@ -176,7 +176,6 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
         conf,
         level = 'mols',
         umi_len = umi_len,
-        process_unmerged = process_unmerged,
         counts =  f'{out_prefix}_umi_counts.txt',
         cov_pck = f'{out_prefix}_umi_cov.pickle'
         )
@@ -189,7 +188,7 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
         fout.write(pp.stdout)
         fout.write(pp.stderr)
     
-    _bulk_bin_alleles(conf_fn, conf, use_cache = use_cache, threads = threads)
+    _bulk_bin_alleles(conf_fn, conf, use_cache = use_cache, threads = threads, process_unmerged = process_unmerged)
     return(conf_fn)
 
 def _bulk_bin_alleles(conf_fn, conf, **kwargs):
