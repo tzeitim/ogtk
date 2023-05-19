@@ -40,9 +40,10 @@ def metacellize(
     return_adatas=True, 
     log_debug=False, 
     explore=True, 
-    cpus = {'full':56, 'moderate':16},
+    cpus = {'full':56, 'moderate':8},
     mc_cpus_key='moderate',
     var_cpus_key='moderate',
+    dpi=90,
     properly_sampled_max_excluded_genes_fraction=0.03,
     properly_sampled_min_cell_total=500,
     properly_sampled_max_cell_total=20000,
@@ -60,7 +61,7 @@ def metacellize(
         mc.ut.setup_logger(level=logging.DEBUG)
         print(np.show_config())
 
-    plt.rcParams['figure.dpi'] = 180
+    plt.rcParams['figure.dpi'] = dpi
 
     # sanitize andata
     utt.sum_duplicates(adata.X)
@@ -71,16 +72,18 @@ def metacellize(
     if lateral_modules is None:
         lateral_modules = []
 
+
     clean_adata(adata, 
                 properly_sampled_min_cell_total=properly_sampled_min_cell_total,
                 properly_sampled_max_cell_total=properly_sampled_max_cell_total,
                 properly_sampled_max_excluded_genes_fraction=properly_sampled_max_excluded_genes_fraction,
                 force=force)
     ##
+
     adata = qc_masks(adata, set_name, adata_workdir,  force=force).copy()
 
     pl_var = (
-            analyze_related_genes(
+            analyze_related_genes_new(
                 adata,
                 adata_workdir=adata_workdir,
                 suspect_gene_names=suspect_gene_names,
@@ -89,8 +92,10 @@ def metacellize(
                 lateral_modules=lateral_modules,
                 manual_ban=manual_ban,
                 grid=grid,
+                dpi=dpi,
                 explore = explore)
             )
+
     if explore:
         return(pl_var)
 
@@ -240,7 +245,7 @@ def clean_adata(
     properly_sampled_max_excluded_genes_fraction=0.03,
     properly_sampled_min_cell_total=500,
     properly_sampled_max_cell_total=20000,
-   )-> None:
+   )-> AnnData:
     ''' 
     '''
     if 'excluded_gene' in adata.var.columns and not force:
@@ -275,7 +280,7 @@ def qc_masks(adata,
              set_name, 
              adata_workdir,
              force:bool=False,
-            ):
+            )-> AnnData:
     ''' wraps mc.pl.extract_clean_data(adata) together with histograms for cell, gene and gene module exclusion.
     '''
     total_umis_of_cells = mc.ut.get_o_numpy(adata, name='__x__', sum=True)
@@ -315,7 +320,8 @@ def qc_masks(adata,
                 too_large_cells_percent,
                 properly_sampled_max_cell_total))
 
-    excluded_genes_data = mc.tl.filter_data(adata, var_masks=['excluded_gene'])
+    excluded_genes_data = mc.tl.filter_data(adata, var_masks=[f'&excluded_gene'])
+
     if excluded_genes_data is not None:
         excluded_genes_data = excluded_genes_data[0]
         excluded_umis_of_cells = mc.ut.get_o_numpy(excluded_genes_data, name='__x__', sum=True)
@@ -364,7 +370,7 @@ def analyze_related_genes(
      ):
     
     if 'related_genes_similarity' not in adata.varp or force:
-        mc.pl.relate_genes(adata, random_seed=123456)
+        mc.pl.relate_to_lateral_genes(adata, random_seed=123456, max_genes_of_modules=36)
     else:
         print('use the force')
     
@@ -438,6 +444,7 @@ def analyze_related_genes(
     rows =(row_factor//columns) + (row_factor % columns >0 )
  
     # plotting
+    # TODO dpi seems to be overriden somewhere else
     if grid:
         plt.rcParams.update(plt.rcParamsDefault)
         fig, axes = plt.subplots(rows, columns, dpi=dpi, figsize=(unit, aspect_f*unit * rows ))
@@ -450,6 +457,8 @@ def analyze_related_genes(
         modg = x['gene_name'].unique().to_list()
 
         similarity_of_module = similarity_of_genes.loc[modg, modg]
+
+        print(similarity_of_module)
 
         if cluster:
             from scipy.cluster import hierarchy 
@@ -520,17 +529,215 @@ def analyze_related_genes(
     if explore:
         print(f"exiting {explore=}")
         return
-        raise ValueError("Run again with explore=False")
 
     # define lateral gene list
     # Do we really want to exclude initially all genes that are related to a given module?
     lateral_gene_names = pl_var.filter(pl.col('related_genes_module').is_in(lateral_modules))['gene_name'].sort().to_list()
 
-    for i in manual_ban:
-        rich.print(f":vampire:{i}")
+    rich.print(':pinching_hand::pinching_hand:pinching_hand::Manually banned genes::pinching_hand::pinching_hand::pinching_hand:')
+    for i in sorted(manual_ban):
+        rich.print(f"{i}", end='')
         lateral_gene_names.append(i)
 
-    print(f"{len(lateral_gene_names)=}")
+    rich.print(f":right_arrow_curving_down::right_arrow_curving_down::right_arrow_curving_down:Lateral Gene Names {len(lateral_gene_names)=}:right_arrow_curving_down::right_arrow_curving_down::right_arrow_curving_down:")
+    print(' '.join(lateral_gene_names))
+    
+    ## TODO any other genes to mark?
+    mc.pl.mark.mark_lateral_genes(adata, lateral_gene_names=lateral_gene_names)
+
+def analyze_related_genes_new(
+      adata, 
+      adata_workdir,
+      set_name,
+      suspect_gene_names,
+      explore=True,
+      suspect_gene_patterns: None | Sequence = None,
+      lateral_modules=[],
+      force:bool=False,
+      grid=False,
+      dpi=900,
+      columns=4,
+      unit=6,
+      aspect_f=0.75,
+      cluster = True,
+      manual_ban:Sequence=[],
+     ):
+    
+    adata.var['lateral_gene'] = adata.var_names.isin(suspect_gene_names)
+
+    if 'lateral_genes_similarity' not in adata.varp or force:
+        mc.pl.relate_to_lateral_genes(adata, random_seed=123456, max_genes_of_modules=36)
+    else:
+        print('use force=True to regenerate "lateral_genes_similarity" adata.varp entry')
+    
+    if suspect_gene_patterns is None:
+        suspect_gene_patterns = []
+
+    for i in ['Rpl', 'Mrpl', 'Rps', 'Mcm', 'Hsp', 'Hist', 'mt-']:
+        suspect_gene_patterns.append(i)
+    print(f'{suspect_gene_patterns=}')
+
+    suspect_genes_mask = mc.tl.find_named_genes(
+                                adata,
+                                names=suspect_gene_names,
+                                patterns=suspect_gene_patterns)
+
+    suspect_gene_names = sorted(adata.var_names[suspect_genes_mask])
+    
+    ###
+    pl_var = pl.DataFrame({"gene_name":adata.var_names.tolist()})
+    pl_var = (pl_var.join(
+                    pl.DataFrame(adata.var.reset_index()), 
+                    left_on='gene_name', 
+                    right_on='index')
+                   )
+    
+    pl_var =  pl_var.with_columns((
+                        (pl.col("gene_name").is_in(suspect_gene_names)) |
+                        (pl.col("gene_name").str.contains('|^'.join(suspect_gene_patterns)) )
+                        ).alias('suspect_gene')
+                    )
+    pl_var =(pl_var
+             .with_columns(pl.col('suspect_gene')
+                           .any().over('lateral_genes_module')
+             .alias('suspect_module'))
+            )
+    
+    suspect_gene_names_pl = (
+            pl_var.filter(pl.col('suspect_gene')
+                          )['gene_name'].sort().to_list()
+            )
+    suspect_gene_modules_pl = (
+            pl_var.filter(
+                        (pl.col('suspect_gene')) & (pl.col('lateral_genes_module')>=0)
+            )['lateral_genes_module'].unique()                                        
+             )
+
+    module_of_genes = adata.var['lateral_genes_module']
+    suspect_gene_modules = np.unique(module_of_genes[suspect_genes_mask])
+    suspect_gene_modules = suspect_gene_modules[suspect_gene_modules >= 0]
+
+    #for i in sorted(suspect_gene_modules):
+    #    soc = module_of_genes[module_of_genes == i]
+        #print(f'm{i}::{len(soc)}::\t{"  ".join(sorted(soc.index.to_list()))}') 
+    
+    suspect_gene_modules_pl = (
+            pl_var
+            .filter(pl.col('suspect_module'))
+            .groupby(['lateral_genes_module'])
+            .agg(pl.col('gene_name'))
+            .with_columns(pl.col('gene_name').arr.join(", "))
+            .sort('lateral_genes_module')
+          )
+    
+    all_modules = [i for i in np.unique(module_of_genes) if int(i) >0]
+    all_modules_pl = pl_var.filter(pl.col('lateral_genes_module')>=0)['lateral_genes_module']
+    
+    ###
+    similarity_of_genes = mc.ut.get_vv_frame(adata, 'lateral_genes_similarity')
+
+    row_factor = len(suspect_gene_modules_pl)
+    rows =(row_factor//columns) + (row_factor % columns >0 )
+ 
+    # plotting
+    if grid:
+        plt.rcParams.update(plt.rcParamsDefault)
+        fig, axes = plt.subplots(rows, columns, dpi=dpi, figsize=(unit, aspect_f*unit * rows ))
+        iaxes = iter(axes.flat)
+
+    def heatmap_mod(x, cmap='RdYlBu_r'):
+        ''' polars-based module plotting
+        ''' 
+        gene_module = x['lateral_genes_module'].unique()[0]
+        modg = x['gene_name'].unique().to_list()
+
+        if len(modg)<=1:
+            print(f'lonely module {modg}')
+            return pl.DataFrame()
+
+        similarity_of_module = similarity_of_genes.loc[modg, modg]
+
+        if cluster:
+            from scipy.cluster import hierarchy 
+            Z = hierarchy.linkage(similarity_of_module, 'ward')
+            zl = hierarchy.leaves_list(Z)
+            similarity_of_module = similarity_of_module.iloc[zl, zl]
+
+        labels = (x.with_columns(
+                    pl.when(pl.col('gene_name').is_in(suspect_gene_names))
+                    .then(pl.col('gene_name').str.replace('^', '(*)'))
+                    .otherwise(pl.col('gene_name'))
+                    ))['gene_name']
+
+        similarity_of_module.index = \
+        similarity_of_module.columns = labels
+
+        lateral_txt ="**(ignored)**" if (gene_module in lateral_modules and not explore)  else " " 
+
+        sns.set(font_scale=0.5)
+        if grid:
+            ax = next(iaxes)
+            ax.tick_params(labelsize=2, width=0, pad=-2, axis='both', which='major')
+            ars = sns.heatmap(similarity_of_module,
+                              xticklabels=1,
+                              vmin=0,
+                              vmax=1,
+                              cmap=cmap,
+                              linewidths=0.01,
+                              square=True,
+                              ax = ax,
+                              cbar=False)
+
+        else:
+            ax = sns.heatmap(similarity_of_module,
+                              xticklabels=1,
+                              vmin=0,
+                              vmax=1,
+                              cmap=cmap,
+                              linewidths=0.01,
+                              square=True,
+                              cbar=False)
+
+        title_fontsize = 2 if grid else 7.5
+        ax.set_title(f'{set_name} Gene Module {gene_module} {lateral_txt}', fontsize=title_fontsize)
+        if not grid:
+            plt.show()
+        #fig.savefig(f'{adata_workdir}/{set_name}_module_{gene_module}.png')
+        sns.set(font_scale=1)
+
+        return pl.DataFrame()
+
+    # apply heatmap plotting function
+    ret = (pl_var
+           .filter(
+                (pl.col('suspect_module')) &
+                (pl.col('lateral_genes_module')>=0))
+           .sort('lateral_genes_module')
+           .groupby('lateral_genes_module', maintain_order=True).apply(lambda x: heatmap_mod(x))
+     )
+
+    if grid:
+        for ax in iaxes:
+            ars = sns.heatmap(np.array([[0,0],[0,0]]), cbar=False, cmap='Greys', vmax=1, vmin=0, square = True, ax=ax)
+            ax.tick_params(labelsize=0, width=0, pad=-2, axis='both', which='major')
+
+    plt.tight_layout(pad=-0.125)
+    
+    if explore:
+        print(f"exiting {explore=}")
+        return
+        raise ValueError("Run again with explore=False")
+
+    # define lateral gene list
+    # Do we really want to exclude initially all genes that are related to a given module?
+    lateral_gene_names = pl_var.filter(pl.col('lateral_genes_module').is_in(lateral_modules))['gene_name'].sort().to_list()
+
+    rich.print(':pinching_hand::pinching_hand:pinching_hand::Manually banned genes::pinching_hand::pinching_hand::pinching_hand:')
+    for i in sorted(manual_ban):
+        rich.print(f"{i}", end='')
+        lateral_gene_names.append(i)
+
+    rich.print(f":right_arrow_curving_down::right_arrow_curving_down::right_arrow_curving_down:Lateral Gene Names {len(lateral_gene_names)=}:right_arrow_curving_down::right_arrow_curving_down::right_arrow_curving_down:")
     print(' '.join(lateral_gene_names))
     
     ## TODO any other genes to mark?
@@ -701,21 +908,23 @@ def mm_genes(xp):
     genes =pl.Series(adata.var_names.to_list())
 
     histones = genes.filter(genes.str.contains("^Hist.h.*"))
-    ribog = genes.filter(genes.str.contains("^Rpl.*|^Rps.*"))
+    ribog = genes.filter(genes.str.contains("^Rpl.*|^Rps.*|^Mrpl.*|^Mrps.*"))
+    # Mrplt - mitochondrial ribosomal protein e.g. L12
 
     sphase = ['Mcm2', 'Mcm4', 'Mcm5', 'Mcm6', 'Mcm7', 'Orc6', 'Pclaf', 'Pcna',
            'Rrm2', 'Tipin', 'Uhrf1', 'Ung']
               
+    proteasome = genes.filter(genes.str.contains("^Psma.*"))
     mitosis = ['Ankrd11', 'Arl6ip1', 'Aurka', 'Bub1b', 'Ccna2', 'Ccnb1', 'Cdca2',
            'Cdk1', 'Cenpa', 'Cenpe', 'Cenpf', 'Hmmr', 'Incenp', 'Kif11',
            'Kif20a', 'Kif23', 'Kif2c', 'Kif4', 'Mki67', 'Sgol2', 'Smc2',
            'Smc4', 'Top2a', 'Tpx2', 'Tubb4b', 'Ube2c']
               
-    others = ['Hsp90ab1', 'Hsp90b1', 'Immp2l', 'Pnpo', 'Rims2']
+    others = ['Hsp90ab1', 'Hsp90b1', 'Immp2l',  'Rims2']
     heatshock = ['Hsp90ab1', 'Hsp90b1' ]
-    mito = ['Immp2l']
-    manual_ban = np.hstack([sphase, mitosis, others, histones, ribog, heatshock, mito])
-    return manual_ban
+    mitoch = ['Immp2l']
+    manual_ban = np.hstack([sphase, mitosis, others, histones, ribog, heatshock, mitoch, proteasome])
+    return sorted(manual_ban)
 
 def return_raw_gene_str():
         return "AY036118 Acta1 Actb Actc1 Actg1 Afp Ahdc1 Aldh1a3 Arhgap28 Arl6ip1 Aspm Bhlhe40 Bmp2 Camk1d Car4 Cas9 Ccn2 Ccnd1 Ccnd2 Cdh11 Cdk8 Cdx2 Cdx4 Cenpf Chchd2 Cited2 Clcn3 Clu Cmss1 Cnn1 Col23a1 Cox6c Cox7c Cp Cped1 Crabp1 Cxcl14 Cyp26a1 Cyp51 D10Wsu102e Dbi Dcc Ddit4 Dkk1 Dlc1 Dlx1 Dlx2 Dmrt2 Dynlt1b Egfem1 Eno1 Erh Fam110b Fat4 Fau Fbn2 Fgf14 Fgf8 Flrt2 Fos Frem1 Fst Gapdh Gas1 Gm10076 Gm10260 Gm19951 Gm20628 Gm32061 Gm42418 Gm45889 Gm53 Gng5 Gpc3 Gphn Gpt2 H1f0 Hebp2 Hist1h1a Hist1h1b Hist1h1c Hist1h1d Hist1h1e Hist1h1t Hist1h2aa Hist1h2ab Hist1h2ac Hist1h2ad Hist1h2ae Hist1h2af Hist1h2ag Hist1h2ah Hist1h2ai Hist1h2ak Hist1h2an Hist1h2ao Hist1h2ap Hist1h2bb Hist1h2bc Hist1h2be Hist1h2bf Hist1h2bg Hist1h2bh Hist1h2bj Hist1h2bk Hist1h2bl Hist1h2bm Hist1h2bn Hist1h2bp Hist1h2bq Hist1h2br Hist1h3a Hist1h3b Hist1h3c Hist1h3d Hist1h3e Hist1h3f Hist1h3g Hist1h3h Hist1h3i Hist1h4a Hist1h4b Hist1h4c Hist1h4d Hist1h4f Hist1h4h Hist1h4i Hist1h4j Hist1h4k Hist1h4m Hist1h4n Hist2h2aa1 Hist2h2ab Hist2h2ac Hist2h2bb Hist2h2be Hist2h3b Hist2h3c1 Hist2h3c2 Hist2h4 Hist3h2a Hist3h2ba Hist4h4 Hmgcr Hmgcs1 Hoxa10 Hoxa11os Hoxa9 Hoxc10 Hsp90aa1 Hsp90ab1 Hsp90b1 Hspa12a Hspa12b Hspa13 Hspa14 Hspa1a Hspa1b Hspa1l Hspa2 Hspa4 Hspa4l Hspa5 Hspa8 Hspa9 Hspb1 Hspb11 Hspb2 Hspb3 Hspb6 Hspb7 Hspb8 Hspb9 Hspbap1 Hspbp1 Hspd1 Hspe1 Hspe1-rs1 Hspg2 Hsph1 Id1 Id3 Idi1 Ier3 Igfbp2 Il17rd Insig1 Jun Krt18 Krt7 Krt8 Lix1 Macf1 Mafb Mcm10 Mcm2 Mcm3 Mcm3ap Mcm4 Mcm5 Mcm6 Mcm7 Mcm8 Mcm9 Mcmbp Mcmdc2 Mest Mif Msgn1 Myl3 Myl4 Myl7 Nckap5 Ndnf Ndufa4 Nes Nkx2-5 Nkx3-1 Nlgn1 Nme2 Nnat Nppa Nrg3 P3h2 Pax1 Pcdh9 Pcna Pcsk5 Pdlim3 Perp Pf4 Pfkfb3 Phlda2 Pim1 Plod2 Polr2l Ppia Ptn Ptprn2 Qk Rbfox2 Rbms1 Rbp4 Reln Rgmb Rmst Rnaset2a Rnf128 Rpl10 Rpl10-ps3 Rpl10a Rpl10l Rpl11 Rpl12 Rpl13 Rpl13a Rpl14 Rpl15 Rpl17 Rpl18 Rpl18a Rpl19 Rpl21 Rpl22 Rpl22l1 Rpl23 Rpl23a Rpl24 Rpl26 Rpl27 Rpl27a Rpl28 Rpl29 Rpl3 Rpl30 Rpl31 Rpl32 Rpl34 Rpl35 Rpl35a Rpl36 Rpl36-ps4 Rpl36a Rpl36a-ps1 Rpl36al Rpl37 Rpl37a Rpl38 Rpl39 Rpl39l Rpl3l Rpl4 Rpl41 Rpl5 Rpl6 Rpl7 Rpl7a Rpl7l1 Rpl8 Rpl9 Rpl9-ps1 Rpl9-ps6 Rplp0 Rplp1 Rplp2 Rps10 Rps11 Rps12 Rps13 Rps14 Rps15 Rps15a Rps16 Rps17 Rps18 Rps19 Rps19bp1 Rps2 Rps20 Rps21 Rps23 Rps24 Rps25 Rps26 Rps27 Rps27a Rps27l Rps27rt Rps28 Rps29 Rps3 Rps3a1 Rps4x Rps5 Rps6 Rps6ka1 Rps6ka2 Rps6ka3 Rps6ka4 Rps6ka5 Rps6ka6 Rps6kb1 Rps6kb2 Rps6kc1 Rps6kl1 Rps7 Rps8 Rps9 Rpsa Rspo3 Sec61b Sec61g Serpinh1 Sfrp1 Sfrp5 Sh3bgr Slc2a1 Slc2a3 Smoc1 Snrpg Sox4 Sox9 Sp5 Srrm2 T Tbx6 Tcf15 Tead1 Tinagl1 Tmod1 Tmsb10 Tmsb4x Tnnc1 Tnni1 Tnni3 Tomm6 Top2a Trim30a Tuba1a Tuba1b Tuba1c Uba52 Ube2c Uncx Utrn Wfdc1 Wls Wnt6 Zfp36l1 Zfp36l2 rtTA shRNA"
