@@ -315,6 +315,7 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     '''
     import gzip
     import bgzip
+    import os # why?
 
     r2 = r1.replace("R1", "R2")
     rc = 'rc_' if rev_comp_r2 else ''

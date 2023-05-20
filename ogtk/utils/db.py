@@ -326,7 +326,7 @@ def tabulate_xp(xp, force=False):
 
     if 'tabulate' in vars(xp):
         for suffix in xp.tabulate.keys():
-            xp.print(f"{suffix}", 'bold red')
+            xp.print(f"{suffix}", 'bold #ff0000')
 
             path_to_reads = f'{xp.wd_fastq}/{suffix}'
             rev_comp_r2 = xp.tabulate[suffix]

@@ -1107,7 +1107,7 @@ def extract_read_grammar_new(
     ''' Encodes raw reads based on regular expressions. It doesn't aggregate results
     '''
     import rich 
-    rich.print(f'[red]{batch}')
+    rich.print(f'[bold #ff0000]{batch}')
 
     wl = load_wl(True)
     wts = "|".join(wl['spacer'])
@@ -1147,21 +1147,40 @@ def extract_read_grammar_new(
             
 
     # TODO change name of parquet_ifn
+    # TODO warning: current downsampling only `.head()`
     # depending on whether `parquet_ifn` is a list or not, read the files accordingly
     use_pyarrow=True
+    
+    drop = ['readid', 'qual' , 'start', 'end']
+
+    def return_parquets_scan(parquet_ifns, sample=False):
+        '''
+        '''
+        if not isinstance(parquet_ifns, list):
+            parquet_ifns = [parquet_ifns]
+
+        if sample:
+            return (pl.scan_parquet(i).head(sample).drop(drop).with_columns(pl.lit(pfn(i)).alias('ifn')).collect()  for i in parquet_ifns)
+        else:
+            return (pl.scan_parquet(i).drop(drop).with_columns(pl.lit(pfn(i)).alias('ifn')).collect() for i in parquet_ifns)
+
+    def return_parquets_read(parquet_ifns, sample=False, use_pyarrow=True):
+        '''
+        '''
+        if not isinstance(parquet_ifns, list):
+            parquet_ifns = [parquet_ifns]
+        if sample:
+            return (pl.read_parquet(i, use_pyarrow=use_pyarrow).head(sample).drop(drop).with_columns(pl.lit(pfn(i)).alias('ifn'))  for i in parquet_ifns)
+        else:
+            return (pl.read_parquet(i, use_pyarrow=use_pyarrow).drop(drop).with_columns(pl.lit(pfn(i)).alias('ifn')) for i in parquet_ifns)
 
     if df is None:
-        if isinstance([parquet_ifn], list):
-            if sample is not None:
-                df = pl.concat((pl.read_parquet(i, use_pyarrow=use_pyarrow).sample(sample).drop(['readid', 'qual' , 'start', 'end']).with_columns(pl.lit(pfn(i)).alias('ifn')) for i in parquet_ifn))
-            else:
-                df = pl.concat((pl.read_parquet(i, use_pyarrow=use_pyarrow).drop(['readid', 'qual' , 'start', 'end']).with_columns(pl.lit(pfn(i)).alias('ifn'))for i in parquet_ifn))
-        if sample is not None:
-            df=pl.read_parquet(parquet_ifn, use_pyarrow=use_pyarrow).sample(sample).drop(['readid', 'qual' , 'start', 'end'])
-        else:
-            df=pl.read_parquet(parquet_ifn, use_pyarrow=use_pyarrow).drop(['readid', 'qual' , 'start', 'end'])
+            fs = return_parquets_read(parquet_ifn, sample, use_pyarrow)
+            df = pl.concat(fs)
 
     print(f'total_reads={df.shape[0]}')
+    
+
     if "cbc" in df.columns:
         total_cells =df["cbc"].n_unique() 
         #print(f'{total_cells=}')

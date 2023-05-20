@@ -72,7 +72,7 @@ def shgrna(sample_id: str,
            .with_columns(pl.lit(tot_umis).alias('qc_tot_umis'))
            .with_columns(pl.lit(tot_reads).alias('qc_tot_reads'))
            .with_columns(pl.col(pl.Int32).cast(pl.Int64))
-           .with_columns((10000*pl.col('qc_tot_umis')/pl.col('qc_tot_reads')).alias('qc_umis_per_10kreads'))
+           .with_columns((10000.0*pl.col('qc_tot_umis')/pl.col('qc_tot_reads')).alias('qc_umis_per_10kreads'))
         
           )
 

@@ -22,7 +22,7 @@ def reads_to_molecules(sample_id: str,
            valid_ibars: Sequence | None=None, 
            min_reads: int=1, 
            max_reads: int=int(1e6),
-           down_sample: int | None=None,
+           downsample: int | None=None,
            min_cells_per_ibar: int | None=1000,
            clone: str | None=None,
            columns_ns: str | Sequence='tsos',
@@ -41,13 +41,16 @@ def reads_to_molecules(sample_id: str,
     import os
 
     if not use_cache or not os.path.exists(cache_out):
-        rdf = ib.extract_read_grammar_new(parquet_ifn = parquet_ifn, batch = sample_id, sample = down_sample)
+        rdf = ib.extract_read_grammar_new(parquet_ifn = parquet_ifn, batch = sample_id, sample = downsample)
         tot_reads = rdf.shape[0]
+
+        rdf = rdf.with_columns(pl.col('cbc')+"-1")
 
         # correct cbc if path to dictionary is provided
         if corr_dict_fn is not None:
             print('correcting with dic')
             rdf = ogtk.utils.cd.correct_cbc_pl(rdf, ogtk.utils.cd.load_corr_dict(corr_dict_fn))
+
         # CPU-intensive
         # TODO add thread control
         rdf = ib.ibar_reads_to_molecules(rdf, modality='single-cell')
@@ -101,22 +104,31 @@ def reads_to_molecules(sample_id: str,
 def allele_calling(
         mols: pl.DataFrame, 
         min_umis_allele: int=2,
+        by='umis_allele',
+        descending=True,
         )-> pl.DataFrame:
     ''' Given a mol-level data frame, returns the top allele for individual ibar-cell data points
     umis_allele is computed going over ['cbc', 'raw_ibar', 'seq', 'wt']  from `reads_to_molecules()`
+
+    The top allele is determined by ``by``, 'umis_allele' by default but could also be:
+        - 'cs_norm_umis_allele'
+        - 'ib_norm_umis_allele'
+        - 'db_norm_umis_allele'  
     '''
     # major collapse event where the top ranking sequence as the final allele is selected.
 
     df = (
         mols
         #.filter(pl.col('wt').is_not())
-        .sort('umis_allele', descending=True) # we give priority to non-wt
+        .sort(by, descending=descending) # we give priority to non-wt
         #.sort('db_norm_umis_allele', descending=False) # we give priority to non-wt
         #.sort(['umis_allele', 'wt'], [True, False]) # we give priority to non-wt
         #.filter(pl.col('umis_allele')>=2)
         .groupby(['cbc', 'raw_ibar'], maintain_order=True)
         .head(1) # <- this is it!
-        .select(['cbc', 'raw_ibar', 'seq', 'wt','umis_allele', 'cluster'])
+        .select(['cbc', 'raw_ibar', 'seq', 'wt', 'umi_reads',\
+                'umis_allele', 'umis_cell', 'cs_norm_umis_allele', 'ib_norm_umis_allele', 'db_norm_umis_allele',\
+                'cluster', 'sample_id', 'valid_ibar'])
         .with_columns(pl.col('raw_ibar').n_unique().over('cbc').alias('cov'))
     )
 
@@ -357,7 +369,7 @@ def compute_clonal_composition(
        normalize_cluster_size=False,
        )->pl.DataFrame:
     ''' Provided a chimera data set (cells from two cell lines), assign
-        (per-cell) the normalized|total molecule counts mapping to cell-line specific
+        (per-cell) the normalized|total molecule counts mapping to cell line-specific
         integrations. 
         df is a mol-level data frame
         the normalization corresponds to the size of the ibar cluster
