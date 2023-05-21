@@ -1213,7 +1213,7 @@ def extract_read_grammar(
         .with_columns(pl.col('seq').str.replace_all(f'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
         .with_columns(pl.col('seq').str.extract('(\[···TSO···\])(.+?)(\[···CNSCFL···\])',2).str.n_chars().alias('spacer_len'))
         .with_columns(pl.col('seq').str.extract('(\[···TSO···\])(.+?)(\[···CNSCFL···\])',2).str.count_match('TG').alias('tg_cmp'))
-        .with_columns((pl.col('low_cmp')*2/pl.col('spacer_len')).alias('low_cmp'))
+        .with_columns((pl.col('tg_cmp')*2/pl.col('spacer_len')).alias('tg_cmp'))
         .drop([i for i in ['qual',  'readid', 'start', 'end'] if i in df.columns])
   #      .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
     ).collect()
