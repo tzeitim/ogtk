@@ -107,6 +107,8 @@ def metacellize(
         mc_cpus_key=mc_cpus_key,
         var_cpus_key=var_cpus_key,
     )
+
+
     return([mcs, scs, mdt])
 
 
@@ -136,6 +138,7 @@ def scanpyfi(
        max_pct_counts_mt = None,
        blacklisted_genes:Sequence|None=None,
        n_pcs=40,
+       control_set: Sequence|None=None,
        s=10,
       qc = False):
     '''Run vanilla scanpy clustering 
@@ -144,6 +147,7 @@ def scanpyfi(
     import polars as pl
     import numpy as np
     import matplotlib.pyplot as plt
+
 
     print(adata)
     adata.var['mt'] = adata.var_names.str.startswith('mt-')  # annotate the group of mitochondrial genes as 'mt'
@@ -217,11 +221,21 @@ def scanpyfi(
     blood= [ i for i in adata.var_names if i.startswith('Hb')]
     sox= [ i for i in adata.var_names if i.startswith('Sox')]
     hox= [ i for i in adata.var_names if i.startswith('Hox')]
+    gonad_limb = ['Meis2', 'Dazl', 'Cyp17a1', 'Amh', 
+                         'Hbb-y', 
+                         'Shox2', 
+                         'Sox9', 
+                         'Msx1', 
+                         'Fst',
+                         'Tbx4', 'Grk5',
+                         'Hoxd13']
 
+    if control_set is None:
+        control_set = blood
     with plt.rc_context({'figure.dpi':100}):
         sc.pl.umap(adata, color=['total_counts', 'leiden'], s=s, ncols=2, )
         plt.figure()
-        sc.pl.umap(adata, color=blood, s=s, ncols=2)
+        sc.pl.umap(adata, color=control_set, s=s, ncols=2)
         plt.figure()
         sc.pl.umap(adata, color=['shRNA', 'Cas9'], s=s, ncols=2)
         plt.figure()
@@ -374,7 +388,9 @@ def analyze_related_genes(
     adata.var['lateral_gene'] = adata.var_names.isin(suspect_gene_names)
 
     if 'lateral_genes_similarity' not in adata.varp or force:
-        mc.pl.relate_to_lateral_genes(adata, random_seed=123456, max_genes_of_modules=36)
+        mc.pl.relate_to_lateral_genes(adata, random_seed=123456,
+                                      max_genes_of_modules=36)
+
     else:
         print('use force=True to regenerate "lateral_genes_similarity" adata.varp entry')
     
@@ -466,6 +482,7 @@ def analyze_related_genes(
             print(f'lonely module {modg}')
             return pl.DataFrame()
 
+        print("module = ['"+"','".join(modg)+ "']")
         similarity_of_module = similarity_of_genes.loc[modg, modg]
 
         if cluster:
@@ -474,12 +491,16 @@ def analyze_related_genes(
             zl = hierarchy.leaves_list(Z)
             similarity_of_module = similarity_of_module.iloc[zl, zl]
 
+        print("module = ['"+"','".join(np.array(modg)[zl])+ "']")
+
         labels = (x.with_columns(
                     pl.when(pl.col('gene_name').is_in(suspect_gene_names))
                     .then(pl.col('gene_name').str.replace('^', '(*)'))
                     .otherwise(pl.col('gene_name'))
                     ))['gene_name']
 
+        # TODO is there a bug here in terms of labels?
+        # why when labels comes from x and  zl ordered the similarity_of_module?
         similarity_of_module.index = \
         similarity_of_module.columns = labels
 
@@ -545,8 +566,8 @@ def analyze_related_genes(
 
     rich.print(':pinching_hand::pinching_hand::pinching_hand: Manually banned genes :pinching_hand::pinching_hand::pinching_hand:')
     for i in sorted(manual_ban):
-        rich.print(f"{i}", end='')
         lateral_gene_names.append(i)
+    print(' '.join(manual_ban))
 
     rich.print(f":right_arrow_curving_down::right_arrow_curving_down::right_arrow_curving_down:Lateral Gene Names ({len(lateral_gene_names)}):right_arrow_curving_down::right_arrow_curving_down::right_arrow_curving_down:")
     print(' '.join(lateral_gene_names))
@@ -619,6 +640,21 @@ def invoque_mc(adata,
     ofn_outliers = f'{adata_workdir}/{set_name}.outliers.h5ad'
     ofn_metadata = f'{adata_workdir}/{set_name}_metadata.csv'
     
+    # set embedding coords
+    metacells.obsm['X_mcumap'] =  np.array(list(zip(metacells.obs.x, metacells.obs.y)))
+
+    # extract some noise from the inner folds
+    # in order to inherit to the single-cell mc_umap coordinate
+    mc.ut.set_o_data(metacells, 'inner_stdev_log', mc.ut.get_o_series(metacells, name='inner_stdev_log', sum=True)/len(metacells.var))
+    # transfer mc data to single-cells
+    adata.obs = adata.obs.merge(right=metacells.obs.drop(columns='rare_metacell'), how='left', left_on='metacell_name', right_index=True)
+    print(adata.obs)
+
+    adata.obsm['X_mcumap'] =  np.array(list(zip(
+                        adata.obs['x'] + np.random.normal(loc=0.0, scale=adata.obs.inner_stdev_log), 
+                        adata.obs['y'] + np.random.normal(loc=0.0, scale=adata.obs.inner_stdev_log)
+                        )))
+
     print('writing h5ds')
     print('\n'.join([set_name, ofn_single_cells, ofn_meta_cells, ofn_metadata, ofn_outliers]))
 
