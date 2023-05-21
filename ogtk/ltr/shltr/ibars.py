@@ -1097,7 +1097,7 @@ def pl_10xfastq_to_df(fastq_ifn, end = None, sample=None, export = False):
     else:
         return(read1)
 
-def extract_read_grammar_new(
+def extract_read_grammar(
             batch: str,
             parquet_ifn: str| None = None,
             df: pl.DataFrame | None = None,
@@ -1211,6 +1211,9 @@ def extract_read_grammar_new(
         .with_columns(pl.col('seq').str.replace_all(f'\[···SCF2···\]\[···LIB···\].+', '[END]'))
         .with_columns(pl.col('seq').str.replace_all(f'{fuzzy_stammering}', '[XXX]'))
         .with_columns(pl.col('seq').str.replace_all(f'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
+        .with_columns(pl.col('seq').str.extract('(\[···TSO···\])(.+?)(\[···CNSCFL···\])',2).str.n_chars().alias('spacer_len'))
+        .with_columns(pl.col('seq').str.extract('(\[···TSO···\])(.+?)(\[···CNSCFL···\])',2).str.count_match('TG').alias('tg_cmp'))
+        .with_columns((pl.col('low_cmp')*2/pl.col('spacer_len')).alias('low_cmp'))
         .drop([i for i in ['qual',  'readid', 'start', 'end'] if i in df.columns])
   #      .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
     ).collect()
