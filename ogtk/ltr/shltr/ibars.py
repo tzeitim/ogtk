@@ -1211,9 +1211,6 @@ def extract_read_grammar(
         .with_columns(pl.col('seq').str.replace_all(f'\[···SCF2···\]\[···LIB···\].+', '[END]'))
         .with_columns(pl.col('seq').str.replace_all(f'{fuzzy_stammering}', '[XXX]'))
         .with_columns(pl.col('seq').str.replace_all(f'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
-        .with_columns(pl.col('seq').str.extract('(\[···TSO···\])(.+?)(\[···CNSCFL···\])',2).str.n_chars().alias('spacer_len'))
-        .with_columns(pl.col('seq').str.extract('(\[···TSO···\])(.+?)(\[···CNSCFL···\])',2).str.count_match('TG').alias('tg_cmp'))
-        .with_columns((pl.col('tg_cmp')*2/pl.col('spacer_len')).alias('tg_cmp'))
         .drop([i for i in ['qual',  'readid', 'start', 'end'] if i in df.columns])
   #      .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
     ).collect()
@@ -1265,6 +1262,24 @@ def count_essential_patterns(df: pl.DataFrame, seq_col: str = 'seq') -> pl.DataF
         .collect()
      )
     return(df)
+
+def noise_properties(df: pl.DataFrame) -> pl.DataFrame:
+    ''' Extract some metrics of systematic errors e.g. low complexity or length of spacer
+    '''
+    df = (
+        df
+        .lazy()
+        .with_columns(pl.col('seq').str.extract('(\[···TSO···\])(.+?)(\[···CNSCFL···\])',2).str.n_chars().alias('spacer_len'))
+        .with_columns(pl.col('seq').str.extract('(\[···TSO···\])(.+?)(\[···CNSCFL···\])',2).str.count_match('TG').alias('tg_cmp'))
+        .with_columns((pl.col('tg_cmp')*2/pl.col('spacer_len')).alias('tg_cmp'))
+        .with_columns(pl.when(pl.col('spacer').is_null()).then(pl.col('spacer_len')).otherwise(pl.col('spacer').str.n_chars()).alias('spacer_len'))
+        .collect()
+    )
+    return df
+
+def plot_noise_properties(df):
+    from matplotlib.colors import LogNorm
+    sns.displot(df, x='tg_cmp', y='spacer_len', cmap='plasma', bins=(10,30),  cbar=True, cbar_kws=dict(norm=LogNorm()))
 
 def ibar_reads_to_molecules(
         df: pl.DataFrame,

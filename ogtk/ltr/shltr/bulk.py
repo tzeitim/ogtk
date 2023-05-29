@@ -34,23 +34,26 @@ def shgrna(sample_id: str,
     assert not ((tbxifn is not None) and (parquet_ifn is not None) ), "You must provide either a tabix or parquet input filename, not both"
 
     if parquet_ifn is not None:
-        rdf = ib.extract_read_grammar_new(parquet_ifn = parquet_ifn, batch = sample_id, sample = downsample)
+        rdf = ib.extract_read_grammar(parquet_ifn = parquet_ifn, batch = sample_id, sample = downsample)
 
     if tbxifn is not None:
         df = pl.read_csv(tbxifn, separator='\t', has_header=False)
         df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
-        rdf = ib.extract_read_grammar_new(batch = sample_id, df=df.drop('cbc'), sample= downsample)
+        rdf = ib.extract_read_grammar(batch = sample_id, df=df.drop('cbc'), sample= downsample)
 
     tot_reads = rdf.shape[0]
     rdf = ib.ibar_reads_to_molecules(rdf, modality='single-molecule')
     rdf = ib.count_essential_patterns(rdf)
+    rdf = ib.noise_properties(rdf)
 
     # guess from the first field of the sample_id the clone of origin
     # if `clone` is not specified
     if clone is None:
         clone = sample_id.split('_')[0]
 
+    # QC plots
     ib.noise_spectrum(sample_id, rdf, index = ['dss'], columns='tsos')    
+    ib.plot_noise_properties(rdf)
 
     offtarget = rdf.filter(pl.col("raw_ibar").is_null()).shape[0]/rdf.shape[0]
     tot_umis = rdf.select('umi').n_unique()

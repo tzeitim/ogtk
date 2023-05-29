@@ -41,7 +41,7 @@ def reads_to_molecules(sample_id: str,
     import os
 
     if not use_cache or not os.path.exists(cache_out):
-        rdf = ib.extract_read_grammar_new(parquet_ifn = parquet_ifn, batch = sample_id, sample = downsample)
+        rdf = ib.extract_read_grammar(parquet_ifn = parquet_ifn, batch = sample_id, sample = downsample)
         tot_reads = rdf.shape[0]
 
         rdf = rdf.with_columns(pl.col('cbc')+"-1")
