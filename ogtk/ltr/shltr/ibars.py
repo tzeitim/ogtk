@@ -1451,3 +1451,58 @@ def mask_wt(df: pl.DataFrame) -> pl.DataFrame:
     .alias('wt'))
      )
     return df
+
+def generate_rects(data, rects):
+    import matplotlib.patches as patches
+
+    for ii,i in enumerate(data.iter_rows(named=True)):
+        ii = ii * 0
+        xy =  (ii+i['x'], i['y'])
+        width = 0.5 
+        height = i['freq']
+        facecolor = i['color'] if i['wts']<1 else '#dddddd'
+        rect = patches.Rectangle(xy=xy, width=width, height=height, facecolor=facecolor)
+        rects.append(rect)
+    return rects
+    
+def stack_indels(rects, title, sample_ids):
+    fig, ax = plt.subplots(figsize=(len(sample_ids), 5))
+    for rect in rects:
+        ax.add_patch(rect)
+        
+    ax.set_xlim((0, len(sample_ids)))
+    ax.set_title(title)
+    ax.set_xticks(range(len(sample_ids))) 
+    ax.set_xticklabels(sample_ids, rotation=90)
+
+def stack_df(df, ibar, sample_id, n_top, x=0.5):
+    from colorhash import ColorHash
+
+    data= (
+        df
+        .filter(pl.col('raw_ibar')==ibar)
+        .filter(pl.col('sample_id')==sample_id)
+        .groupby(['raw_ibar', 'seq','spacer', 'wts']).count()
+        .sort(['count', 'seq'], descending=True)
+        .head(n_top)
+    )
+    
+    
+    data = (
+        data
+        .with_columns(pl.col('seq').apply(lambda x: ColorHash(x).hex, skip_nulls=True ).alias('color'))
+        .with_columns((pl.col('count')/pl.col('count').sum()).alias('freq'))
+        .with_columns(pl.col('freq').shift(1).fill_null(0).alias('y'))
+        .with_columns(pl.col('y').cumsum())
+        .with_columns(pl.lit(x).alias('x'))
+        
+    )
+    return data
+    
+def peri(ibar, df, sample_ids, n_top=10):
+    rects = []
+    for idx, sample_id in enumerate(sample_ids):
+        data = stack_df(df, ibar, sample_id, n_top, x = idx)
+        rects = generate_rects(data, rects)
+    stack_indels(rects, title=ibar, sample_ids=sample_ids)
+
