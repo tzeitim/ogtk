@@ -1,5 +1,5 @@
 from logging import warning
-from typing import Sequence,Optional
+from typing import Sequence,Optional, List, Any
 from sys import prefix
 import pysam
 import regex
@@ -1452,32 +1452,62 @@ def mask_wt(df: pl.DataFrame) -> pl.DataFrame:
      )
     return df
 
-def generate_rects(data, rects):
-    import matplotlib.patches as patches
 
-    for ii,i in enumerate(data.iter_rows(named=True)):
-        ii = ii * 0
-        xy =  (ii+i['x'], i['y'])
-        width = 0.5 
+def generate_rects(data: pl.DataFrame, rects: List[patches.Rectangle], x_delta: float = 0.0) -> List[patches.Rectangle]:
+    """
+    Generate rectangle patches to be used in a matplotlib plot.
+    
+    Args:
+        data (pl.DataFrame): DataFrame containing the information needed to create the rectangles.
+        rects (List[patches.Rectangle]): List of existing rectangle patches.
+        x_delta (float, optional): Offset for the x position of the rectangle. Defaults to 0.0.
+        
+    Returns:
+        List[patches.Rectangle]: List of rectangle patches including the newly created ones.
+    """
+    for ii, i in enumerate(data.iter_rows(named=True)):
+        ii = ii * x_delta
+        width = 0.75 
+        xy =  (ii+i['x'] - width/2, i['y'])  # adjust x to be centered on x-tick
         height = i['freq']
         facecolor = i['color'] if i['wts']<1 else '#dddddd'
         rect = patches.Rectangle(xy=xy, width=width, height=height, facecolor=facecolor)
         rects.append(rect)
     return rects
+
+def stack_indels(rects: List[patches.Rectangle], title: str, sample_ids: List[str]) -> None:
+    """
+    Generate a plot of stacked rectangles.
     
-def stack_indels(rects, title, sample_ids):
+    Args:
+        rects (List[patches.Rectangle]): List of rectangle patches to plot.
+        title (str): Title of the plot.
+        sample_ids (List[str]): List of sample IDs to use as x-axis labels.
+    """
     fig, ax = plt.subplots(figsize=(len(sample_ids), 5))
     for rect in rects:
         ax.add_patch(rect)
         
-    ax.set_xlim((0, len(sample_ids)))
+    ax.set_xlim((-0.5, len(sample_ids) - 0.5))  # set x limit to ensure all rectangles are displayed
     ax.set_title(title)
     ax.set_xticks(range(len(sample_ids))) 
     ax.set_xticklabels(sample_ids, rotation=90)
 
-def stack_df(df, ibar, sample_id, n_top, x=0.5):
-    from colorhash import ColorHash
 
+def stack_df(df: pl.DataFrame, ibar: str, sample_id: str, n_top: int, x: float =0.5) -> pl.DataFrame:
+    """
+    Process the data to be used in generating rectangles.
+    
+    Args:
+        df (pl.DataFrame): Original DataFrame to process.
+        ibar (str): Specific ibar to filter.
+        sample_id (str): Specific sample_id to filter.
+        n_top (int): Number of rows to select after sorting.
+        x (float, optional): X value to assign to each row. Defaults to 0.5.
+        
+    Returns:
+        pl.DataFrame: Processed DataFrame.
+    """
     data= (
         df
         .filter(pl.col('raw_ibar')==ibar)
@@ -1487,19 +1517,26 @@ def stack_df(df, ibar, sample_id, n_top, x=0.5):
         .head(n_top)
     )
     
-    
     data = (
         data
         .with_columns(pl.col('seq').apply(lambda x: ColorHash(x).hex, skip_nulls=True ).alias('color'))
         .with_columns((pl.col('count')/pl.col('count').sum()).alias('freq'))
         .with_columns(pl.col('freq').shift(1).fill_null(0).alias('y'))
         .with_columns(pl.col('y').cumsum())
-        .with_columns(pl.lit(x).alias('x'))
-        
+        .with_columns(pl.lit(x).alias('x'))        
     )
     return data
+
+def peri(ibar: str, df: pl.DataFrame, sample_ids: List[str], n_top: int =10) -> None:
+    """
+    Generate a plot of stacked rectangles for multiple sample IDs.
     
-def peri(ibar, df, sample_ids, n_top=10):
+    Args:
+        ibar (str): Specific ibar to filter.
+        df (pl.DataFrame): Original DataFrame to process.
+        sample_ids (List[str]): List of sample IDs to use.
+        n_top (int, optional): Number of rows to select after sorting. Defaults to 10.
+    """
     rects = []
     for idx, sample_id in enumerate(sample_ids):
         data = stack_df(df, ibar, sample_id, n_top, x = idx)
