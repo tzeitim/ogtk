@@ -1,14 +1,18 @@
 from logging import warning
-from typing import Sequence,Optional, List, Any
 from sys import prefix
-import pysam
-import regex
-import ogtk 
+from typing import Sequence, Optional, List, Any
+
+from colorhash import ColorHash
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 import polars as pl
+import pysam
+import regex
+import seaborn as sns
+
+import ogtk
 from . import plot
 
 def error_string(string, errors=0, error_type='e'):
@@ -410,7 +414,6 @@ def genotype_ibar_clone(
 
 def generate_qc_plots(ibars_df, unit,  min_cov, sample_id, png_prefix=None):
     import colorhash   
-    from colorhash import ColorHash
 
     #df = pd.DataFrame({'wl':True, 'mols':mol_ibar})
     #df = pd.concat([df, pd.DataFrame({'wl':False, 'mols':omol_ibar})])
@@ -1196,22 +1199,35 @@ def extract_read_grammar(
         .lazy()
         .with_columns(pl.col('seq').alias('oseq'))
         .with_columns(pl.col('seq').str.extract(f'({wts})', 1).alias('spacer'))
-        .with_columns(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
+        .with_columns(pl.when(pl.col('spacer').is_null()).then(False).otherwise(True).alias('WT'))
+        #.with_columns(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
         .with_columns(pl.col('seq').str.replace_all(f'.*?({fuzzy_tso})', '[···TSO···]'))
         .with_columns(pl.col('seq').str.replace_all(f'.*({fuzzy_u6})', '[···U6···]'))
         .with_columns(pl.col('seq').str.replace_all(f'.*({fuzzy_bu6})', '[···bU6···]'))
         .with_columns(pl.col('seq').str.extract(f'CTAGA(.{"{6}"})({fuzzy_dsibar})', 1).alias('raw_ibar'))
         .with_columns(pl.col('seq').str.replace_all(f'({fuzzy_dsibar})', '[···SCF1···]'))
         .with_columns(pl.col('seq').str.replace_all(f'({fuzzy_scaff2})', '[···SCF2···]'))
-        .with_columns(pl.col('seq').str.replace_all(f'({canscaf})', f'[···CNSCFL···]'))
-        .with_columns(pl.col('seq').str.replace_all(f'({fuzzy_primer})', f'[···LIB···]'))
-        .with_columns(pl.col('seq').str.replace_all(f'\[···SCF2···\].+\[···LIB···\]', f'[···SCF2···][···LIB···]'))
+        .with_columns(pl.col('seq').str.replace_all(f'({canscaf})', '[···CNSCFL···]'))
+        .with_columns(pl.col('seq').str.replace_all(f'({fuzzy_primer})', '[···LIB···]'))
+        .with_columns(pl.col('seq').str.replace_all(r'\[···SCF2···\].+\[···LIB···\]', '[···SCF2···][···LIB···]'))
         #.with_columns(pl.col('seq').str.extract(f'([A-Z]{"{6}"})\[···SCF1···\]',1).alias('raw_ibar'))
-        #i######.with_columns(pl.col('seq').str.replace_all(f'(\]{"CTAGA"})', '][···SCF0···]'))
-        .with_columns(pl.col('seq').str.replace_all(f'\[···SCF2···\]\[···LIB···\].+', '[END]'))
+
+        #######.with_columns(pl.col('seq').str.replace_all(f'(\]{"CTAGA"})', '][···SCF0···]'))
+        .with_columns(pl.col('seq').str.replace_all(r'\[···SCF2···\]\[···LIB···\].+$', '[END]'))
         .with_columns(pl.col('seq').str.replace_all(f'{fuzzy_stammering}', '[XXX]'))
-        .with_columns(pl.col('seq').str.replace_all(f'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
-        .drop([i for i in ['qual',  'readid', 'start', 'end'] if i in df.columns])
+        .with_columns(pl.col('seq').str.replace_all(r'\[···U6···\]', '[···TSO···]'))
+        .with_columns(pl.col('seq').str.replace_all(r'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
+
+        #purify spacer sequence    
+        .with_columns(pl.col('seq').str.replace(r'CTAGA.+?$', '').alias('xspacer'))
+        .with_columns(pl.col('xspacer').str.replace(r'\[···TSO···\]', ''))
+        .with_columns(pl.col('xspacer').str.replace(r'\[···CNSCFL···\]', ''))
+        .with_columns(pl.col('xspacer').str.replace(r'\[···bU6···\]', ''))
+
+        .with_columns(pl.when(pl.col('spacer').is_null()).then(pl.col('xspacer')).otherwise(pl.col('spacer')).alias('spacer'))
+        .with_columns(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
+
+        .drop([i for i in ['qual',  'readid', 'start', 'end', 'xspacer'] if i in df.columns])
   #      .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
     ).collect()
     rich.print(f'[green]done')
@@ -1292,7 +1308,7 @@ def ibar_reads_to_molecules(
     # top_n should always be == 1
     top_n = 1
     print('collapse into molecules')
-    groups =['cbc', 'umi', 'raw_ibar', 'spacer'] 
+    groups =['cbc', 'umi', 'raw_ibar', 'spacer', 'WT'] 
 
     if modality =='single-molecule':
         groups = groups[1:]
@@ -1452,18 +1468,17 @@ def mask_wt(df: pl.DataFrame) -> pl.DataFrame:
      )
     return df
 
-
-def generate_rects(data: pl.DataFrame, rects: List[patches.Rectangle], x_delta: float = 0.0) -> List[patches.Rectangle]:
+def create_rectangle_patches(data: pl.DataFrame, rects: List[patches.Rectangle], x_delta: float = 0.0) -> List[patches.Rectangle]:
     """
-    Generate rectangle patches to be used in a matplotlib plot.
+    Create rectangle patches to be plotted based on the input DataFrame.
     
     Args:
-        data (pl.DataFrame): DataFrame containing the information needed to create the rectangles.
+        data (pl.DataFrame): Input DataFrame containing the necessary information to create rectangles.
         rects (List[patches.Rectangle]): List of existing rectangle patches.
-        x_delta (float, optional): Offset for the x position of the rectangle. Defaults to 0.0.
-        
+        x_delta (float, optional): Shift in x-coordinate for the rectangles. Defaults to 0.0.
+
     Returns:
-        List[patches.Rectangle]: List of rectangle patches including the newly created ones.
+        List[patches.Rectangle]: List of rectangle patches to be plotted.
     """
     for ii, i in enumerate(data.iter_rows(named=True)):
         ii = ii * x_delta
@@ -1475,51 +1490,63 @@ def generate_rects(data: pl.DataFrame, rects: List[patches.Rectangle], x_delta: 
         rects.append(rect)
     return rects
 
-def stack_indels(rects: List[patches.Rectangle], title: str, sample_ids: List[str]) -> None:
+def plot_stacked_rectangles(rects: List[patches.Rectangle], title: str, groups: List[str]) -> None:
     """
-    Generate a plot of stacked rectangles.
+    Plot stacked rectangles on a plot.
     
     Args:
-        rects (List[patches.Rectangle]): List of rectangle patches to plot.
+        rects (List[patches.Rectangle]): List of rectangle patches to be plotted.
         title (str): Title of the plot.
-        sample_ids (List[str]): List of sample IDs to use as x-axis labels.
+        groups (List[str]): List of group names for the x-ticks.
     """
-    fig, ax = plt.subplots(figsize=(len(sample_ids), 5))
+    fig, ax = plt.subplots(figsize=(len(groups), 5))
     for rect in rects:
         ax.add_patch(rect)
         
-    ax.set_xlim((-0.5, len(sample_ids) - 0.5))  # set x limit to ensure all rectangles are displayed
+    ax.set_xlim((-0.5, len(groups) - 0.5))  # set x limit to ensure all rectangles are displayed
     ax.set_title(title)
-    ax.set_xticks(range(len(sample_ids))) 
-    ax.set_xticklabels(sample_ids, rotation=90)
+    ax.set_xticks(range(len(groups))) 
+    ax.set_xticklabels(groups, rotation=90)
+    plt.show()
 
-
-def stack_df(df: pl.DataFrame, ibar: str, sample_id: str, n_top: int, x: float =0.5) -> pl.DataFrame:
+def prepare_stacked_df(df: pl.DataFrame, element: str, grouping_field: str, grouping_value: str, n_top: int, element_field: str='raw_ibar', x: float =0.5, bc='seq') -> pl.DataFrame:
     """
-    Process the data to be used in generating rectangles.
+    Prepare a DataFrame to be plotted as stacked rectangles.
     
     Args:
-        df (pl.DataFrame): Original DataFrame to process.
-        ibar (str): Specific ibar to filter.
-        sample_id (str): Specific sample_id to filter.
-        n_top (int): Number of rows to select after sorting.
-        x (float, optional): X value to assign to each row. Defaults to 0.5.
+        df (pl.DataFrame): Input DataFrame.
+        element (str): Element value to filter on.
+        grouping_field (str): Field to group the DataFrame by.
+        grouping_value (str): Value to filter the DataFrame on based on the grouping field.
+        n_top (int): Number of top rows to select after sorting.
+        element_field (str, optional): Field to filter based on element. Defaults to 'raw_ibar'.
+        x (float, optional): Value to assign to the 'x' column of the DataFrame. Defaults to 0.5.
+        bc (str, optional): either 'seq' or 'spacer', represents the source of the barcode. Defaults to 'seq'.
         
     Returns:
-        pl.DataFrame: Processed DataFrame.
+        pl.DataFrame: DataFrame ready to be plotted.
+    
+    Raises:
+        AssertionError: If bc is not 'seq' or 'spacer'
     """
+
+    assert bc in ['seq', 'spacer'], "bc must be equal to 'seq' or 'spacer' as it represents the source of the barcode"
+    group_by = [] 
     data= (
         df
-        .filter(pl.col('raw_ibar')==ibar)
-        .filter(pl.col('sample_id')==sample_id)
-        .groupby(['raw_ibar', 'seq','spacer', 'wts']).count()
-        .sort(['count', 'seq'], descending=True)
+        .filter(pl.col(element_field)==element)
+        .filter(pl.col(grouping_field)==grouping_value)
+        .groupby([element_field, bc, 'wts']).count()
+        .sort(['count', bc], descending=True)
         .head(n_top)
     )
-    
+
+    if data.shape[0] == 0:
+        return(pl.DataFrame({'x':x, 'y':1, 'freq':1, 'wts':1 }))
+
     data = (
         data
-        .with_columns(pl.col('seq').apply(lambda x: ColorHash(x).hex, skip_nulls=True ).alias('color'))
+        .with_columns(pl.col(bc).apply(lambda x: ColorHash(x).hex, skip_nulls=True).alias('color'))
         .with_columns((pl.col('count')/pl.col('count').sum()).alias('freq'))
         .with_columns(pl.col('freq').shift(1).fill_null(0).alias('y'))
         .with_columns(pl.col('y').cumsum())
@@ -1527,19 +1554,22 @@ def stack_df(df: pl.DataFrame, ibar: str, sample_id: str, n_top: int, x: float =
     )
     return data
 
-def peri(ibar: str, df: pl.DataFrame, sample_ids: List[str], n_top: int =10) -> None:
+def plot_indel_stacked_fractions(element: str, df: pl.DataFrame, groups: List[str], element_field: str='raw_ibar', grouping_field: str ='sample_id', n_top: int =10, bc: str='seq') -> None:
     """
-    Generate a plot of stacked rectangles for multiple sample IDs.
+    Plot indel stacked fractions based on the input DataFrame and groups.
     
     Args:
-        ibar (str): Specific ibar to filter.
-        df (pl.DataFrame): Original DataFrame to process.
-        sample_ids (List[str]): List of sample IDs to use.
-        n_top (int, optional): Number of rows to select after sorting. Defaults to 10.
+        element (str): Element value to filter on.
+        df (pl.DataFrame): Input DataFrame.
+        groups (List[str]): List of groups to be plotted.
+        element_field (str, optional): Field to filter based on element. Defaults to 'raw_ibar'.
+        grouping_field (str, optional): Field to group the DataFrame by. Defaults to 'sample_id'.
+        n_top (int, optional): Number of top rows to select after sorting. Defaults to 10.
     """
     rects = []
-    for idx, sample_id in enumerate(sample_ids):
-        data = stack_df(df, ibar, sample_id, n_top, x = idx)
-        rects = generate_rects(data, rects)
-    stack_indels(rects, title=ibar, sample_ids=sample_ids)
+    for idx, grouping_value in enumerate(groups):
+        data = prepare_stacked_df(df, element, element_field=element_field, grouping_field = grouping_field, grouping_value=grouping_value, n_top=n_top, x = idx, bc=bc)
+        rects = create_rectangle_patches(data, rects)
+
+    plot_stacked_rectangles(rects, title=element, groups=groups)
 
