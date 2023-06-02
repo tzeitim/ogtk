@@ -32,7 +32,7 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
     fq2, 
     bint_db_ifn, 
     min_reads_per_umi = 4, 
-    threads = 100, 
+    threads = 8, 
     end = 5000, 
     ranked_min_cov = 5, 
     umi_len = 17, 
@@ -93,6 +93,7 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
         fastq_umerged2 = f'{out_prefix}_unmerged_R2.fastq.gz',
         ihist =f'{out_prefix}_ihist.txt',
         k = 60,
+        threads=threads,
         Xmx = '2g',
         modality = 'ecct', # error-correct with Tadpole.sh
         log = f'{out_prefix}_merge_stats.txt',
@@ -102,6 +103,7 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
         outu={conf['bbmerge']['fastq_umerged1']} \
         outu2={conf['bbmerge']['fastq_umerged2']} \
         ihist={conf['bbmerge']['ihist']} \
+        t={conf['bbmerge']['threads']} \
         {conf['bbmerge']['modality']} \
         extend2=20 iterations=5 interleaved=false -Xmx{conf['bbmerge']['Xmx']}"
  
