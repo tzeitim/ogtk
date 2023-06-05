@@ -3,17 +3,9 @@ import ogtk
 import pickle
 import subprocess
 import pyaml
-import itertools
-import pyfaidx
 import os
-import multiprocessing
 import itertools
-import regex
-import numpy as np
-import pandas as pd
-import pdb
 import os
-import glob
 import pandas as pd
 import numpy as np
 import regex
@@ -26,23 +18,24 @@ import gzip
 from .ltr_utils import *
 
 def bulk_bin_alleles(name, intid, intid2_R2_strand, 
-    config_card_dir, 
-    outdir, 
-    fq1, 
-    fq2, 
-    bint_db_ifn, 
-    min_reads_per_umi = 4, 
-    threads = 100, 
-    bbthreads = 8, 
-    end = 5000, 
-    ranked_min_cov = 5, 
-    umi_len = 17, 
-    umi_errors = 1,
-    trimming_pattern = None, 
-    alg_gapopen = 20, 
-    alg_gapextend =1,
-    process_unmerged = True,
-    use_cache = True):
+                     config_card_dir, 
+                     outdir, 
+                     fq1, 
+                     fq2, 
+                     bint_db_ifn, 
+                     min_reads_per_umi = 4, 
+                     threads = 100, 
+                     bbthreads = 8, 
+                     end = 5000, 
+                     ranked_min_cov = 5, 
+                     umi_len = 17, 
+                     umi_errors = 1,
+                     trimming_pattern = None, 
+                     alg_gapopen = 20, 
+                     alg_gapextend =1,
+                     process_unmerged = True,
+                     verbose = False,
+                     use_cache = True):
     '''Once bulk fastq files (R1 and R2) have been split (RPI>rev_id>intid) process them into a table of barcodes 
     for downstream analysis.
     Two modalities to choose for a representative allelle: ranked (consensus = False) 
@@ -142,6 +135,7 @@ def bulk_bin_alleles(name, intid, intid2_R2_strand,
         alg_gapextend = alg_gapextend,
         ref_path  = ref_path,
         ref_seq  = ref_seq,
+        verbose = verbose,
         bint_db_ifn = bint_db_ifn,
         rcref_path = rcref_path,
         ref_name = ref_name,
@@ -292,22 +286,26 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
     fa_correctedm = conf['alignment']['fa_correctedm']
     fa_corrected1 = conf['alignment']['fa_corrected1']
     fa_corrected2 = conf['alignment']['fa_corrected2']
+    alg_verbose = conf['alignment']['verbose'] 
     bint_db_ifn = conf['alignment']['bint_db_ifn']
 
     mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"m", 
                             fa_ofn = fa_correctedm, 
                             rs = rsm, ref_path = ref_path, 
+                             verbose = alg_verbose,
                             ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
                             gapextend = alg_gapextend)
 
     mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"1", 
                             fa_ofn = fa_corrected1, 
                             rs = rs1, ref_path = ref_path, 
+                             verbose = alg_verbose,
                             ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
                             gapextend = alg_gapextend)
 
     mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"2", fa_ofn = fa_corrected2, 
                             rs = rs2, ref_path = rcref_path, 
+                             verbose = alg_verbose,
                             ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
                             gapextend = alg_gapextend)
 
