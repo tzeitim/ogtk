@@ -703,7 +703,7 @@ def fastq_collapse_UMI(fastq_ifn, name = None, umi_start=0, umi_len=12, min_read
 
     raw_rs_size = len(readset.umis)
     badly_covered = [umi.umi for umi in readset.umis.values() if len(umi.seqs) < min_reads_per_umi ]
-    readset.delete(badly_covered)
+    readset.umis.delete(badly_covered)
 
     print(f'A total of {len(badly_covered)}::{100*len(badly_covered)/raw_rs_size:.2f}% umis were removed due to poor coverage')
 

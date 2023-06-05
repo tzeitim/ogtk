@@ -289,27 +289,31 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
     alg_verbose = conf['alignment']['verbose'] 
     bint_db_ifn = conf['alignment']['bint_db_ifn']
 
-    mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"m", 
-                            fa_ofn = fa_correctedm, 
-                            rs = rsm, ref_path = ref_path, 
-                             verbose = alg_verbose,
-                            ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
-                            gapextend = alg_gapextend)
+    # badly covered umis have been internally removed from the readsets
+    if len(rsm.umis)!=0:
+        mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"m", 
+                                 fa_ofn = fa_correctedm, 
+                                 rs = rsm, ref_path = ref_path, 
+                                 verbose = alg_verbose,
+                                 ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
+                                 gapextend = alg_gapextend)
 
-    mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"1", 
-                            fa_ofn = fa_corrected1, 
-                            rs = rs1, ref_path = ref_path, 
-                             verbose = alg_verbose,
-                            ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
-                            gapextend = alg_gapextend)
+    if len(rs1.umis)!=0:
+        mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"1", 
+                                 fa_ofn = fa_corrected1, 
+                                 rs = rs1, ref_path = ref_path, 
+                                 verbose = alg_verbose,
+                                 ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
+                                 gapextend = alg_gapextend)
 
-    mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"2", fa_ofn = fa_corrected2, 
-                            rs = rs2, ref_path = rcref_path, 
-                             verbose = alg_verbose,
-                            ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
-                            gapextend = alg_gapextend)
+    if len(rs2.umis)!=0:
+        mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"2", fa_ofn = fa_corrected2, 
+                                 rs = rs2, ref_path = rcref_path, 
+                                 verbose = alg_verbose,
+                                 ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
+                                 gapextend = alg_gapextend)
 
-    
+
     compute_barcode_matrix_merged(fa_ifn = fa_correctedm, tab_out= merged_tab_out, bint_db_ifn = bint_db_ifn, do_rc=False)
 # TODO PO verify if we need a list of corrected umis of whether they had been deleted 
     rs1c = list(rs1.umis.keys())
