@@ -297,6 +297,7 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
                                  verbose = alg_verbose,
                                  ref_name = ref_name, mode=alg_mode, gapopen = alg_gapopen, 
                                  gapextend = alg_gapextend)
+        compute_barcode_matrix_merged(fa_ifn = fa_correctedm, tab_out= merged_tab_out, bint_db_ifn = bint_db_ifn, do_rc=False)
 
     if len(rs1.umis)!=0:
         mltbc_align_reads_to_ref(name = outdir + "/"+name+"_"+"1", 
@@ -314,7 +315,6 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
                                  gapextend = alg_gapextend)
 
 
-    compute_barcode_matrix_merged(fa_ifn = fa_correctedm, tab_out= merged_tab_out, bint_db_ifn = bint_db_ifn, do_rc=False)
 # TODO PO verify if we need a list of corrected umis of whether they had been deleted 
     rs1c = list(rs1.umis.keys())
     rs2c = list(rs2.umis.keys())
@@ -322,7 +322,7 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
 
     print("whitelist:", len(umi_whitelist))
 
-    if len(umi_whitelist)>0 and process_unmerged:
+    if len(umi_whitelist)>0 and process_unmerged and (len(rs1.umis)!=0 and len(rs2.umis)!=0):
         unmerged_tab_out = conf['lineage']['paired_tab'] 
 
         print(f'exploring {fa_corrected1}')
