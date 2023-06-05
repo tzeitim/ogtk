@@ -525,7 +525,7 @@ def mltbc_align_reads_to_ref(name, fa_ofn, rs, ref_path,
         oo= subprocess.run(cmd_needleman.split(), stdout=subprocess.PIPE, stderr= subprocess.PIPE)
         if verbose: print(oo.stdout, oo.stderr)
 
-        with open(f"{pwalg_out}_fasta.olog", 'w') as logo, open(f"{pwalg_out}_fasta.elog", 'w') as loge:
+        with open(f"{pwalg_out}_fasta.olog", 'wb') as logo, open(f"{pwalg_out}_fasta.elog", 'wb') as loge:
             logo.write(oo.stdout)
             loge.write(oo.stderr)
 
@@ -534,7 +534,7 @@ def mltbc_align_reads_to_ref(name, fa_ofn, rs, ref_path,
         oo= subprocess.run(cmd_needleman.split(), stdout=subprocess.PIPE, stderr= subprocess.PIPE)
         if verbose: print(oo.stdout, oo.stderr)
 
-        with open(f"{pwalg_out}_score.olog", 'w') as logo, open(f"{pwalg_out}_score.elog", 'w') as loge:
+        with open(f"{pwalg_out}_score.olog", 'wb') as logo, open(f"{pwalg_out}_score.elog", 'wb') as loge:
             logo.write(oo.stdout)
             loge.write(oo.stderr)
 
@@ -547,7 +547,7 @@ def mltbc_align_reads_to_ref(name, fa_ofn, rs, ref_path,
         oo= subprocess.run(cmd_needleman.split(), stdout=subprocess.PIPE, stderr= subprocess.PIPE)
         if verbose: print(oo.stdout, oo.stderr)
 
-        with open(f"{pwalg_out}_simple.olog", 'w') as logo, open(f"{pwalg_out}_simple.elog", 'w') as loge:
+        with open(f"{pwalg_out}_simple.olog", 'wb') as logo, open(f"{pwalg_out}_simple.elog", 'wb') as loge:
             logo.write(oo.stdout)
             loge.write(oo.stderr)
         
