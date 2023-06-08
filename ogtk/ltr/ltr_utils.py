@@ -476,8 +476,29 @@ def mlt_create_fasta_ref(ref_name, ref_seq, ref_path):
     fout.close()
 
 def mltbc_make_unique_fa_ref_entries(fa_ifn, fa_ofn, ref_name = 'hspdrv7_scgstl'):
-    '''Small helper function that relabels reference entries on a pair-wise sequence alignments.
-        It appends the UMI to the ref name'''
+    '''
+    Relabels reference entries in a FASTA file to create unique identifiers by appending the UMI (Unique Molecular Identifier).
+
+    This function is designed to work on pair-wise sequence alignments in FASTA format. The function iterates over the input 
+    FASTA file line by line, identifying header lines (starting with '>'). If a header line is identified, it modifies the 
+    line by appending the UMI to create a unique reference name, before writing the line to the output FASTA file. 
+
+    Parameters:
+    fa_ifn: str
+        Path to the input FASTA file. The file should contain pair-wise sequence alignments.
+
+    fa_ofn: str
+        Path where the output FASTA file will be saved. The output file will be a copy of the input file, but with modified 
+        header lines for reference entries.
+
+    ref_name: str, optional
+        A string present in the header line of reference sequences. If a header line contains this string, the UMI will be 
+        appended to the line. The default value is 'hspdrv7_scgstl'.
+
+    Returns:
+    None. The function writes to an output file and does not return any value.
+    '''
+
     FF = open(fa_ifn)
     entries = []
     whole_fa = []
@@ -502,16 +523,61 @@ def mltbc_make_unique_fa_ref_entries(fa_ifn, fa_ofn, ref_name = 'hspdrv7_scgstl'
     ofa.close()
    
 
-def mltbc_align_reads_to_ref(name, fa_ofn, rs, ref_path, 
+def mltbc_align_reads_to_ref(name, fa_ofn,  ref_path, 
     ref_name = 'hspdrv7_scgstl', 
     mode='needleman', 
     gapopen = 20, 
     gapextend = 1, 
+    rs=None,
     verbose = False):
+    '''
+    Performs pair-wise alignment of reads against a reference, and relabels reference entries to make them unique.
+
+    Parameters:
+    name: str
+        The base name for input and output files.
+
+    fa_ofn: str
+        Path where the output FASTA file with unique reference names will be saved.
+
+    ref_path: str
+        Path to the reference sequence in FASTA format.
+
+    ref_name: str, optional
+        A string present in the header line of reference sequences to be relabeled. Default is 'hspdrv7_scgstl'.
+
+    mode: str, optional
+        The alignment mode to be used. Options are 'needleman' and 'waterman'. Default is 'needleman'.
+
+    gapopen: int, optional
+        Penalty for opening a gap. Default is 20.
+
+    gapextend: int, optional
+        Penalty for extending a gap. Default is 1.
+
+    rs: readset, optional
+        A readset to writes out the consensus sequences as a FASTA file.
+        Default is None.
+
+    verbose: bool, optional
+        If True, the function will print detailed messages during execution. Default is False.
+
+    Returns:
+    None. The function writes results to output files and does not return any value.
+
+    The function first performs pair-wise alignment of reads against a reference using the 'needleall' or 'water' algorithm
+    of the EMBOSS suite, depending on the 'mode' argument. The alignment is executed with subprocess.run, and the stdout and
+    stderr outputs are captured and written to separate log files for each alignment format.
+
+    The function then relabels the reference entries in the resulting alignment file by appending a unique identifier,
+    using the helper function mltbc_make_unique_fa_ref_entries. The relabeled alignment is saved to the output FASTA file.
+    '''
+
     pwalg_in = '{}_in_pair_algn.fa'.format(name)
     pwalg_out = '{}_out_pair_algn.fa'.format(name)
 
-    rs.write_consensuses_fasta(pwalg_in)
+    if rs is not None:
+        rs.write_consensuses_fasta(pwalg_in)
 
     if verbose:
         print('Running pair-wise alignment')
@@ -550,8 +616,6 @@ def mltbc_align_reads_to_ref(name, fa_ofn, rs, ref_path,
         with open(f"{pwalg_out}_simple.olog", 'wb') as logo, open(f"{pwalg_out}_simple.elog", 'wb') as loge:
             logo.write(oo.stdout)
             loge.write(oo.stderr)
-        
-
     
     mltbc_make_unique_fa_ref_entries(fa_ifn = pwalg_out, fa_ofn = fa_ofn, ref_name = ref_name)
 
