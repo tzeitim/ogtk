@@ -1,14 +1,10 @@
-from logging import warning
-from sys import prefix
-from typing import Sequence, Optional, List, Any
-
+from typing import Sequence, List
 from colorhash import ColorHash
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
-import pysam
 import regex
 import seaborn as sns
 
@@ -1100,6 +1096,22 @@ def pl_10xfastq_to_df(fastq_ifn, end = None, sample=None, export = False):
     else:
         return(read1)
 
+def return_feature_string(key: str):
+    ''' For a provided key return the default string  
+    ''' 
+    features_dict = {
+    'u6mx':   'GACGAAACACC', # 'GACGAAACACC'
+    'tso':    'TTTCTTATATGGG',
+    'u6bk':   'GGAAAGAAACACCG', # broken u6
+    'usibar': 'GCTAGA', # upstream ibar
+    'dsibar': 'AATAGCAA', # downstream ibar
+    'canscaf':'GGGTTAGAG',
+    'primer': 'GGCTAGTCCGTTATCAACTTG',
+    'scaf2':  'GTTAACCTAA'
+    }
+    assert key in features_dict, f"{key} is not a valid feature. Look at {features_dict.keys()}"
+    return(features_dict[key])
+
 def extract_read_grammar(
             batch: str,
             parquet_ifn: str| None = None,
@@ -1115,16 +1127,16 @@ def extract_read_grammar(
     wl = load_wl(True)
     wts = "|".join(wl['spacer'])
 
-    u6mx = 'GACGAAACACC' # 'GACGAAACACC'
-    tso = 'TTTCTTATATGGG'
-    u6bk = "GGAAAGAAACACCG" # broken u6
-    usibar=  'GCTAGA' # upstream ibar
-    dsibar=  'AATAGCAA' # downstream ibar
-    canscaf ='GGGTTAGAG'
-    primer = 'GGCTAGTCCGTTATCAACTTG'
-    scaf2 = 'GTTAACCTAA'
+    u6mx =     return_feature_string('u6mx')
+    tso =      return_feature_string('tso')
+    u6bk =     return_feature_string('u6bk')
+    usibar=    return_feature_string('usibar')
+    dsibar=    return_feature_string('dsibar')
+    canscaf =  return_feature_string('canscaf')
+    primer =   return_feature_string('primer')
+    scaf2 =    return_feature_string('scaf2')
 
-    fuzzy_bu6 =     fuzzy_match_str(u6bk, '.{0,1}')
+    fuzzy_bu6 =    fuzzy_match_str(u6bk, '.{0,1}')
     fuzzy_u6 =     fuzzy_match_str(u6mx, '.{0,1}')
     fuzzy_usibar = fuzzy_match_str(usibar, wildcard=".{0,1}")
     fuzzy_dsibar = fuzzy_match_str(dsibar, wildcard=".{0,1}")
@@ -1531,7 +1543,6 @@ def prepare_stacked_df(df: pl.DataFrame, element: str, grouping_field: str, grou
     """
 
     assert bc in ['seq', 'spacer'], "bc must be equal to 'seq' or 'spacer' as it represents the source of the barcode"
-    group_by = [] 
     data= (
         df
         .filter(pl.col(element_field)==element)
@@ -1565,11 +1576,83 @@ def plot_indel_stacked_fractions(element: str, df: pl.DataFrame, groups: List[st
         element_field (str, optional): Field to filter based on element. Defaults to 'raw_ibar'.
         grouping_field (str, optional): Field to group the DataFrame by. Defaults to 'sample_id'.
         n_top (int, optional): Number of top rows to select after sorting. Defaults to 10.
+        bc (str, optional): either 'seq' or 'spacer', represents the source of the barcode. Defaults to 'seq'.
     """
     rects = []
     for idx, grouping_value in enumerate(groups):
         data = prepare_stacked_df(df, element, element_field=element_field, grouping_field = grouping_field, grouping_value=grouping_value, n_top=n_top, x = idx, bc=bc)
         rects = create_rectangle_patches(data, rects)
 
-    plot_stacked_rectangles(rects, title=element, groups=groups)
+    plot_stacked_rectangles(rects, title=f'{element_field} {element} {bc}', groups=groups)
 
+def poly(df, foc_ibar):
+    '''
+    Assumes a data frame that:
+    - belongs to a single ibar
+    - belongs to a single sample
+    - is annotated with a 'kalhor_id' 
+    '''
+    ref_str = "TTTCTTATATGGGGGT[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAACCTAAGGCTAGTCCGTTATCAACTTGGTACT"
+
+    assert df['sample_id'].n_unique() == 1, "Please provide a data frame pre-filtered with a single sample"
+    foc_sample = df['sample_id'][0]
+
+    raw_fasta_entries = (
+            df
+            .with_columns(pl.col('oseq').str.replace(f'.+?{return_feature_string("tso")}', return_feature_string("tso")))
+            .with_columns(pl.col('kalhor_id').cast(pl.Utf8))
+            .filter(pl.col('raw_ibar')==foc_ibar)
+            .with_row_count(name='id')
+            .with_columns(pl.col('id').cast(pl.Utf8))
+            .with_columns(pl.count().over(['WT', 'spacer']).cast(pl.Utf8).alias('count'))
+            .with_columns(pl.col('kalhor_id').fill_null('NA'))
+            .with_columns(
+                (">WT_"+pl.col('WT')+"_kalhor_"+pl.col('kalhor_id')+"_count_"+pl.col('count')+"_id_"+pl.col('id')\
+                        +"\n"+pl.col('oseq')+"\n").alias('fasta'))
+        )
+
+    if len(raw_fasta_entries) ==0:
+        print("No entries found to generate a fasta file")
+        return None
+
+    foc_spacer = raw_fasta_entries.filter(pl.col('WT'))['spacer'].value_counts().sort('counts')['spacer'][0]
+
+    ref_foc = ref_str.replace('[SPACER]', foc_spacer).replace('[IBAR]', foc_ibar)
+
+    run_id = f'{foc_sample}_{foc_ibar}'
+    reads_fa = f'{run_id}_in_pair_algn.fa' 
+    ref_fa = f'{run_id}_ref_pair_algn.fasta' 
+    final_alignment = f'{run_id}_pair_algn.fa'
+
+    with open(reads_fa, 'wt') as reads_out, open(ref_fa, 'wt') as ref_out:
+        ref_out.write(f">ref\n{ref_foc}\n")
+        for i in raw_fasta_entries['fasta'].to_numpy():
+            if i is not None:
+                reads_out.write(i)
+
+    ogtk.ltr.ltr_utils.mltbc_align_reads_to_ref(name=run_id, fa_ofn=final_alignment, ref_path=ref_fa, ref_name='ref')
+
+    pos = []
+
+    for ref_seq, read_seq in ogtk.ltr.ltr_utils.return_query_ref_pairs(final_alignment):
+        if "-" not in ref_seq:
+            idx = [i for i,ii in enumerate(read_seq) if ii=="-"]
+            pos.append(idx)
+            #print(f"[ref]{ref_seq}")
+            #print(f"[que]{read_seq}")
+            #console.print(f"[]{read_seq}")
+    pos = np.hstack(pos)
+    #fg = sns.displot(pos, aspect=3,  element='step', bins =200)
+    #fg.ax.set_title(run_id)
+    return to_intervals(pos, run_id)
+
+
+def to_intervals(pos_array, sample_id):
+    xy = (
+            pl.Series(pos_array)
+            .value_counts()
+            .rename({'':'pos', "counts":sample_id})
+            .with_columns(pl.col("pos").cast(pl.Float64))
+            .with_columns(pl.col(sample_id)/len(pos_array))
+            )
+    return xy
