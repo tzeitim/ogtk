@@ -9,6 +9,7 @@ import regex
 import seaborn as sns
 
 import ogtk
+from ogtk.ltr import ltr_utils
 from . import plot
 
 def error_string(string, errors=0, error_type='e'):
@@ -1585,72 +1586,97 @@ def plot_indel_stacked_fractions(element: str, df: pl.DataFrame, groups: List[st
 
     plot_stacked_rectangles(rects, title=f'{element_field} {element} {bc}', groups=groups)
 
-def poly(df, foc_ibar):
+def poly(df, foc_ibar, lim=50):
     '''
     Assumes a data frame that:
     - belongs to a single ibar
     - belongs to a single sample
     - is annotated with a 'kalhor_id' 
     '''
-    ref_str = "TTTCTTATATGGGGGT[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAACCTAAGGCTAGTCCGTTATCAACTTGGTACT"
+    ref_str = "TTTCTTATATGGG[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAACCTAAGGCTAGTCCGTTATCAACTTGGTACT"
 
     assert df['sample_id'].n_unique() == 1, "Please provide a data frame pre-filtered with a single sample"
     foc_sample = df['sample_id'][0]
 
     raw_fasta_entries = (
             df
-            .with_columns(pl.col('oseq').str.replace(f'.+?{return_feature_string("tso")}', return_feature_string("tso")))
+            .with_columns(pl.col('oseq').str.replace(f'.+?{return_feature_string("tso")}', return_feature_string("tso")).alias('seq_trim'))
+            #.with_columns(pl.col('seq_trim').str.replace(f'{foc_ibar}{return_feature_string("dsibar")}.+?$', ''))
             .with_columns(pl.col('kalhor_id').cast(pl.Utf8))
             .filter(pl.col('raw_ibar')==foc_ibar)
+            .with_columns(pl.col('kalhor_id').fill_null('NA'))
+            .with_columns(pl.count().over(['WT', 'seq_trim']).cast(pl.Utf8).alias('count'))
+            .select(['WT', 'kalhor_id', 'count', 'seq_trim', 'spacer'])
+            .unique()
             .with_row_count(name='id')
             .with_columns(pl.col('id').cast(pl.Utf8))
-            .with_columns(pl.count().over(['WT', 'spacer']).cast(pl.Utf8).alias('count'))
-            .with_columns(pl.col('kalhor_id').fill_null('NA'))
             .with_columns(
                 (">WT_"+pl.col('WT')+"_kalhor_"+pl.col('kalhor_id')+"_count_"+pl.col('count')+"_id_"+pl.col('id')\
-                        +"\n"+pl.col('oseq')+"\n").alias('fasta'))
+                        +"\n"+pl.col('seq_trim')+"\n").alias('fasta'))
         )
 
     if len(raw_fasta_entries) ==0:
         print("No entries found to generate a fasta file")
         return None
 
-    foc_spacer = raw_fasta_entries.filter(pl.col('WT'))['spacer'].value_counts().sort('counts')['spacer'][0]
+    foc_spacer = raw_fasta_entries.filter(pl.col('WT'))['spacer'].value_counts().sort('counts', descending=True)
 
+    if foc_spacer.shape[0]==0:
+        print(f'No WT allele found for {foc_ibar}')
+        return None
+    foc_spacer = foc_spacer['spacer'][0]
+    
     ref_foc = ref_str.replace('[SPACER]', foc_spacer).replace('[IBAR]', foc_ibar)
 
-    run_id = f'{foc_sample}_{foc_ibar}'
-    reads_fa = f'{run_id}_in_pair_algn.fa' 
-    ref_fa = f'{run_id}_ref_pair_algn.fasta' 
-    final_alignment = f'{run_id}_pair_algn.fa'
 
-    with open(reads_fa, 'wt') as reads_out, open(ref_fa, 'wt') as ref_out:
-        ref_out.write(f">ref\n{ref_foc}\n")
-        for i in raw_fasta_entries['fasta'].to_numpy():
-            if i is not None:
-                reads_out.write(i)
+    import tempfile
 
-    ogtk.ltr.ltr_utils.mltbc_align_reads_to_ref(name=run_id, fa_ofn=final_alignment, ref_path=ref_fa, ref_name='ref')
+    with tempfile.TemporaryDirectory() as temp_dir:
+        run_id = f'{foc_sample}_{foc_ibar}'
+        reads_fa = f'{temp_dir}/{run_id}_in_pair_algn.fa'
+        ref_fa = f'{temp_dir}/{run_id}_ref_pair_algn.fa' 
+        final_alignment = f'{run_id}_pair_algn.fa'
 
-    pos = []
+        with open(reads_fa, 'wt') as reads_out, open(ref_fa, 'wt') as ref_out:
+            ref_out.write(f">ref\n{ref_foc}\n")
+            for i in raw_fasta_entries['fasta'].to_numpy():
+                if i is not None:
+                    reads_out.write(i)
 
-    for ref_seq, read_seq in ogtk.ltr.ltr_utils.return_query_ref_pairs(final_alignment):
+        ltr_utils.mltbc_align_reads_to_ref(
+                name=run_id, 
+                fa_ofn=final_alignment, 
+                ref_path=ref_fa, 
+                ref_name='ref', 
+                wd=temp_dir)
+        #TODO clean the messy paths related to the temp_dir
+        alignment_tuples = ltr_utils.return_alignment_tuples(f'{temp_dir}/{final_alignment}') 
+
+    coord_bins = range(lim)
+    h_counts, h_coords = np.histogram([], bins =coord_bins)
+    must = []
+    for ((ref_name, read_name), (ref_seq, read_seq)) in alignment_tuples:
         if "-" not in ref_seq:
-            idx = [i for i,ii in enumerate(read_seq) if ii=="-"]
-            pos.append(idx)
-            #print(f"[ref]{ref_seq}")
-            #print(f"[que]{read_seq}")
-            #console.print(f"[]{read_seq}")
-    pos = np.hstack(pos)
-    #fg = sns.displot(pos, aspect=3,  element='step', bins =200)
-    #fg.ax.set_title(run_id)
-    return to_intervals(pos, run_id)
+            #idx = [i for i,ii in enumerate(read_seq) if ii=="-"]
+            vref_seq = np.array([i for i in ref_seq])
+            vread_seq = np.array([i for i in read_seq])
+            idx = np.where(vread_seq == "-")[0]
+            vread_seq[idx]= "-"
+            vread_seq[idx[idx<18]]=vref_seq[idx[idx<18]]
+            read_seq= ''.join(vread_seq)
+            expansion_factor = regex.search(".+count_(.+)_id", read_name)
+            expansion_factor = int(expansion_factor.groups()[0])
+            f_counts = np.histogram(idx, bins = coord_bins)[0]
+            must.append((foc_sample, foc_ibar, read_name, read_seq[0:lim], expansion_factor, pl.Series(f_counts)))
+    return (must)
 
 
 def to_intervals(pos_array, sample_id):
     xy = (
-            pl.Series(pos_array)
+            pl.Series(pos_array, dtype=pl.Float64)
+            .append(pl.Series(range(50)).cast(pl.Float64))
             .value_counts()
+            .with_columns(pl.col('counts')-1)
             .rename({'':'pos', "counts":sample_id})
             .with_columns(pl.col("pos").cast(pl.Float64))
             .with_columns(pl.col(sample_id)/len(pos_array))
