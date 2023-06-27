@@ -5,8 +5,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
+import os
 import regex
 import seaborn as sns
+import tempfile
 
 import ogtk
 from ogtk.ltr import ltr_utils
@@ -1586,7 +1588,7 @@ def plot_indel_stacked_fractions(element: str, df: pl.DataFrame, groups: List[st
 
     plot_stacked_rectangles(rects, title=f'{element_field} {element} {bc}', groups=groups)
 
-def poly(df, foc_ibar, lim=50):
+def poly(df, foc_ibar, lim=50, correct_tss=True, keep_intermediate=False):
     '''
     Assumes a data frame that:
     - belongs to a single ibar
@@ -1601,18 +1603,24 @@ def poly(df, foc_ibar, lim=50):
     raw_fasta_entries = (
             df
             .with_columns(pl.col('oseq').str.replace(f'.+?{return_feature_string("tso")}', return_feature_string("tso")).alias('seq_trim'))
-            #.with_columns(pl.col('seq_trim').str.replace(f'{foc_ibar}{return_feature_string("dsibar")}.+?$', ''))
-            .with_columns(pl.col('kalhor_id').cast(pl.Utf8))
             .filter(pl.col('raw_ibar')==foc_ibar)
-            .with_columns(pl.col('kalhor_id').fill_null('NA'))
-            .with_columns(pl.count().over(['WT', 'seq_trim']).cast(pl.Utf8).alias('count'))
-            .select(['WT', 'kalhor_id', 'count', 'seq_trim', 'spacer'])
-            .unique()
+            .with_columns(pl.count().over(['WT', 'seq_trim']).alias('sweight'))
+    .with_columns([pl.col(i).rank().cast(pl.Int64).suffix('_encoded') for i in ['seq_trim',]])
+            #.select(['WT', 'raw_ibar', 'kalhor_id', 'count', 'seq_trim', 'spacer', 'seq_trim_encoded'])
+            #.unique()
+            #.filter(pl.col('seq_trim').str.contains('N').is_not())
             .with_row_count(name='id')
-            .with_columns(pl.col('id').cast(pl.Utf8))
-            .with_columns(
-                (">WT_"+pl.col('WT')+"_kalhor_"+pl.col('kalhor_id')+"_count_"+pl.col('count')+"_id_"+pl.col('id')\
-                        +"\n"+pl.col('seq_trim')+"\n").alias('fasta'))
+            .with_columns((
+                 "WT_"+pl.col('WT')\
+                 +"_kalhor_"+pl.col('kalhor_id').cast(pl.Utf8).fill_null('NA')\
+                 +"_sweight_"+pl.col('sweight').cast(pl.Utf8)\
+                 +"_id_"+pl.col('id').cast(pl.Utf8)\
+                 +"_seqid_"+pl.col('seq_trim_encoded').cast(pl.Utf8)\
+                 ).alias('id'))
+            .with_columns((
+                 ">"+pl.col('id')\
+                 +"\n"+pl.col('seq_trim')\
+                 +"\n").alias('fasta'))
         )
 
     if len(raw_fasta_entries) ==0:
@@ -1627,9 +1635,9 @@ def poly(df, foc_ibar, lim=50):
     foc_spacer = foc_spacer['spacer'][0]
     
     ref_foc = ref_str.replace('[SPACER]', foc_spacer).replace('[IBAR]', foc_ibar)
-
-
-    import tempfile
+    
+    import re
+    ref_foc_match = re.search(f'{foc_ibar}{return_feature_string("dsibar")}', ref_foc)
 
     with tempfile.TemporaryDirectory() as temp_dir:
         run_id = f'{foc_sample}_{foc_ibar}'
@@ -1651,25 +1659,41 @@ def poly(df, foc_ibar, lim=50):
                 wd=temp_dir)
         #TODO clean the messy paths related to the temp_dir
         alignment_tuples = ltr_utils.return_alignment_tuples(f'{temp_dir}/{final_alignment}') 
+        if keep_intermediate:
+            os.system(f'cp -r {temp_dir} ./{run_id}')
 
     coord_bins = range(lim)
-    h_counts, h_coords = np.histogram([], bins =coord_bins)
-    must = []
+    ref_foc_match = lim if ref_foc_match is None else ref_foc_match.start()
+
+    alg_df = []
     for ((ref_name, read_name), (ref_seq, read_seq)) in alignment_tuples:
         if "-" not in ref_seq:
-            #idx = [i for i,ii in enumerate(read_seq) if ii=="-"]
             vref_seq = np.array([i for i in ref_seq])
             vread_seq = np.array([i for i in read_seq])
             idx = np.where(vread_seq == "-")[0]
             vread_seq[idx]= "-"
-            vread_seq[idx[idx<18]]=vref_seq[idx[idx<18]]
+            if correct_tss:
+                vread_seq[idx[idx<18]]=vref_seq[idx[idx<18]]
             read_seq= ''.join(vread_seq)
-            expansion_factor = regex.search(".+count_(.+)_id", read_name)
+            expansion_factor = regex.search(".+sweight_(.+)_id", read_name)
             expansion_factor = int(expansion_factor.groups()[0])
             f_counts = np.histogram(idx, bins = coord_bins)[0]
-            must.append((foc_sample, foc_ibar, read_name, read_seq[0:lim], expansion_factor, pl.Series(f_counts)))
-    return (must)
+            alg_df.append((foc_sample, foc_ibar, read_name, read_seq[0:ref_foc_match], expansion_factor, pl.Series(f_counts[0:ref_foc_match])))
 
+    schema = {"sample_id":str, "ibar":str, "id":str, "read_seq":str, "sweight":pl.Int64, "alg":pl.List}
+    alg_df = to_interval_df(alg_df, schema=schema) 
+
+    raw_fasta_entries = (
+        raw_fasta_entries
+        .join(alg_df.select('id', 'read_seq', 'alg'), left_on='id', right_on='id')
+        .with_columns(pl.count().over('read_seq').alias('aweight'))
+        .with_columns(pl.col('read_seq').rank().cast(pl.Int64).suffix('_encoded'))
+    )
+    return raw_fasta_entries
+
+def to_interval_df(alignment_data, schema):
+        df = pl.DataFrame(alignment_data, schema=schema).sort('sweight', descending=True)
+        return df
 
 def to_intervals(pos_array, sample_id):
     xy = (
@@ -1682,3 +1706,12 @@ def to_intervals(pos_array, sample_id):
             .with_columns(pl.col(sample_id)/len(pos_array))
             )
     return xy
+
+def explode_pos(df):
+    dsource = (
+            df
+            .drop(['alg', 'read_seq', 'weight'])
+            .melt(id_vars=['sample_id', 'ibar', 'id'], variable_name='pos')
+            .with_columns(pl.col('pos').str.replace('pos_', '').cast(pl.Int64))
+        )
+    return dsource
