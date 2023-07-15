@@ -529,6 +529,7 @@ class Xp(db.Xp):
         full_cpus:int=8,
         moderate_cpus: int=8,
         target_metacell_size:int=100,
+        max_parallel_piles=None,
         adata=None,
         *args,
         **kwargs,
@@ -561,6 +562,7 @@ class Xp(db.Xp):
                     adata_workdir=self.wd_scrna,
                     explore = explore,
                     force = force,
+                    max_parallel_piles=max_parallel_piles,
                     *args,
                     **kwargs
                   )
@@ -687,6 +689,7 @@ class Xp(db.Xp):
         adata = ad.concat(adatas, join='outer', label='batch_id', index_unique="_")
         adata = adata[~adata.obs['excluded_cell'], ].copy()
         adata.var = adata.var.drop(adata.var.columns[2:].to_list(), axis='columns')
+        adata.obs = adata.obs[['sample_id', 'batch_id']].copy()
         
         batch_map = adata.obs.groupby(['sample_id', 'batch_id']).head(1).reset_index().loc[:, ['sample_id', 'batch_id']]
         batch_map = dict(list(zip(batch_map.sample_id, batch_map.batch_id)))
