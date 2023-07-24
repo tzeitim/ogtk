@@ -49,6 +49,7 @@ def metacellize(
     properly_sampled_max_cell_total=20000,
     force:bool=False,
     grid:bool=True,
+    max_parallel_piles=None,
                 ):
     '''
 
@@ -106,6 +107,8 @@ def metacellize(
         cpus=cpus,
         mc_cpus_key=mc_cpus_key,
         var_cpus_key=var_cpus_key,
+        max_parallel_piles=max_parallel_piles,
+
     )
 
 
@@ -143,15 +146,15 @@ def scanpyfi(
       qc = False):
     '''Run vanilla scanpy clustering 
     '''
-    import scanpy as sc
-    import polars as pl
-    import numpy as np
-    import matplotlib.pyplot as plt
-
-
     print(adata)
-    adata.var['mt'] = adata.var_names.str.startswith('mt-')  # annotate the group of mitochondrial genes as 'mt'
-    sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], percent_top=None, log1p=False, inplace=True)
+    # annotate the group of mitochondrial genes as 'mt'
+    adata.var['mt'] = adata.var_names.str.startswith('mt-')  
+
+    sc.pp.calculate_qc_metrics(adata, 
+                               qc_vars=['mt'], 
+                               percent_top=None, 
+                               log1p=False, 
+                               inplace=True)
 
     if qc:
         sc.pl.violin(adata, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'],
@@ -314,10 +317,20 @@ def qc_masks(adata,
     fg.ax.set(xlabel='UMIs', ylabel='Density', yticks=[])
     fg.ax.axvline(x=properly_sampled_min_cell_total, color='darkgreen')
     fg.ax.axvline(x=properly_sampled_max_cell_total, color='crimson')
+    fg.ax.set_xticks()
     fg.ax.set_xlim((100, 1e5))
-    fg.ax.set_xscale('log')
     fg.ax.set_title(f'{set_name}')
     fg.savefig(f'{adata_workdir}/{set_name}_umi_dplot.png')
+
+    # fig total umis per cell histogram (log)
+    fg = sns.displot(total_umis_of_cells, bins=800, aspect=3, element='step')
+    fg.ax.set(xlabel='UMIs', ylabel='Density', yticks=[])
+    fg.ax.axvline(x=properly_sampled_min_cell_total, color='darkgreen')
+    fg.ax.axvline(x=properly_sampled_max_cell_total, color='crimson')
+    fg.ax.set_xlim((100, 1e5))
+    fg.ax.set_xscale('log')
+    fg.ax.set_title(f'{set_name} x-log')
+    fg.savefig(f'{adata_workdir}/{set_name}_umi_dlogplot.png')
 
 
     # fig total umis of excluded genes
@@ -351,7 +364,7 @@ def qc_masks(adata,
                     too_excluded_cells_percent,
                     100.0 * properly_sampled_max_excluded_genes_fraction))
 
-        fg = sns.displot(excluded_fraction_of_umis_of_cells, bins=200, aspect=3, element="step")
+        fg = sns.displot(excluded_fraction_of_umis_of_cells, bins=200, aspect=3, element="step", color='orange')
         fg.ax.set(xlabel="Fraction of excluded gene UMIs", ylabel='Density', yticks=[])
         fg.ax.axvline(x=properly_sampled_max_excluded_genes_fraction, color='crimson')
         fg.ax.set_title(f'{set_name}')
@@ -446,10 +459,10 @@ def analyze_related_genes(
     
     suspect_gene_modules_pl = (
             pl_var
-            .filter(pl.col('suspect_module'))
+            #.filter(pl.col('suspect_module'))
             .groupby(['lateral_genes_module'])
             .agg(pl.col('gene_name'))
-            .with_columns(pl.col('gene_name').arr.join(", "))
+            .with_columns(pl.col('gene_name').list.join(", "))
             .sort('lateral_genes_module')
           )
     
@@ -585,6 +598,12 @@ def invoque_mc(adata,
                return_adatas=True,
                max_parallel_piles:int|None=50,
                ):
+    # output names
+    ofn_single_cells = f'{adata_workdir}/{set_name}.scells.h5ad'
+    ofn_meta_cells = f'{adata_workdir}/{set_name}.mcells.h5ad'
+    ofn_outliers = f'{adata_workdir}/{set_name}.outliers.h5ad'
+    ofn_metadata = f'{adata_workdir}/{set_name}_metadata.csv'
+    
     if max_parallel_piles is None:
         max_parallel_piles = mc.pl.guess_max_parallel_piles(adata)
     
@@ -635,11 +654,9 @@ def invoque_mc(adata,
     mc.utilities.parallel.set_processors_count(cpus['full'])
     print(f"done, back to {cpus['full']} CPUs")
 
-    ofn_single_cells = f'{adata_workdir}/{set_name}.scells.h5ad'
-    ofn_meta_cells = f'{adata_workdir}/{set_name}.mcells.h5ad'
-    ofn_outliers = f'{adata_workdir}/{set_name}.outliers.h5ad'
-    ofn_metadata = f'{adata_workdir}/{set_name}_metadata.csv'
-    
+    adata.write_h5ad(ofn_single_cells)
+    metacells.write_h5ad(ofn_meta_cells)
+
     # set embedding coords
     metacells.obsm['X_mcumap'] =  np.array(list(zip(metacells.obs.x, metacells.obs.y)))
 
