@@ -282,7 +282,8 @@ class Xp(db.Xp):
             valid_ibars = None,
             downsample = None,
             use_cache = True,
-            corr_dir_fn=None):
+            corr_dir_fn=None,
+            filter_valid_cells=False):
         ''' Returns data frame at the molecule level
 
             Invokes ``shltr.sc.reads_to_molecules``
@@ -313,6 +314,10 @@ class Xp(db.Xp):
                         min_reads=min_reads, 
                         max_reads=1e6, 
                         clone=clone)
+
+        if filter_valid_cells:
+            self.load_final_ad()
+            df = df.filter(pl.col('cbc').is_in(self.scs.obs.index.to_list()))
         return(df)
 
     def init_mols(self,
@@ -451,7 +456,7 @@ class Xp(db.Xp):
         if 'pp' in vars(self):
             db.run_cranger(self, localcores=75, uiport=uiport)
 
-        res = self.load_final_ad(sample_name=sample_name)
+        res = self.load_final_ad()
 
         if self.tabulate is not None:
             db.tabulate_xp(self)
@@ -460,7 +465,7 @@ class Xp(db.Xp):
         if not skip_mols:
             self.init_mols(valid_ibars = self.default_ibars(), clone=self.clone, min_reads=min_reads_per_mol)
 
-    def load_final_ad(self, sample_name):
+    def load_final_ad(self):
         ''' Loads final version of mcs and scs adatas
         ''' 
         mcs_fad_path = self.return_path('mcs_ad_path')
