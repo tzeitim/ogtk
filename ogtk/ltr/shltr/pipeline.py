@@ -324,7 +324,7 @@ class Xp(db.Xp):
                   valid_ibars: Sequence,
                   clone: str, 
                   suffix: str='shrna',
-                  ibar_ann: str='/local/users/polivar/src/artnilet/workdir/scv2/all_parquetino_clusters',
+                  ibar_ann: str|None=None,
                   min_cell_size: int=0,
                   min_reads: int=2,
                   downsample: str|None=None,
@@ -362,9 +362,10 @@ class Xp(db.Xp):
     def annotate_ibars(
             self, 
             mols,
-            ibar_ann: str='/local/users/polivar/src/artnilet/workdir/scv2/all_parquetino_clusters',
+            ibar_ann: str|None=None,
             ):
 
+        ibar_ann = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_clusters.parquet' if ibar_ann is None else ibar_ann
         dfc = (pl.scan_parquet(ibar_ann)
                .drop('sample_id').unique()
                 #.filter(pl.col('sample_id')==sample_id)
