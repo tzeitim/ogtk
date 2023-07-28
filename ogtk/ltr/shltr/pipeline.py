@@ -219,7 +219,7 @@ class Xp(db.Xp):
         self.raw_adata = None
         self.batch_map = None
         self.attr_d= {'shrna':'mols', 'zshrna':'zmols'}
-        self.is_chimera = 'is_chimera' in vars(self).keys()
+        #self.is_chimera = 'is_chimera' in vars(self).keys()
 
 
     def init_wd(self):
@@ -303,21 +303,22 @@ class Xp(db.Xp):
         self.print(parquet_ifn)
 
         df = shltr.sc.reads_to_molecules(
-                        sample_id=sample_id,
-                        parquet_ifn=parquet_ifn,
-                        valid_ibars=valid_ibars, 
-                        use_cache=use_cache,
-                        cache_dir=self.return_cache_path('mols', suffix),
-                        corr_dict_fn=corr_dir_fn,
-                        downsample=downsample,
-                        #min_cells_per_ibar=int(len(obs27['cbc']) * 0.2),
-                        min_reads=min_reads, 
-                        max_reads=1e6, 
-                        clone=clone)
+                sample_id=sample_id,
+                parquet_ifn=parquet_ifn,
+                valid_ibars=valid_ibars, 
+                use_cache=use_cache,
+                cache_dir=self.return_cache_path('mols', suffix),
+                corr_dict_fn=corr_dir_fn,
+                downsample=downsample,
+                #min_cells_per_ibar=int(len(obs27['cbc']) * 0.2),
+                min_reads=min_reads, 
+                max_reads=1e6, 
+                clone=clone)
 
         if filter_valid_cells:
             self.load_final_ad()
             df = df.filter(pl.col('cbc').is_in(self.scs.obs.index.to_list()))
+
         return(df)
 
     def init_mols(self,
@@ -366,10 +367,8 @@ class Xp(db.Xp):
             ):
 
         ibar_ann = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_clusters.parquet' if ibar_ann is None else ibar_ann
+
         dfc = (pl.scan_parquet(ibar_ann)
-               .drop('sample_id').unique()
-                #.filter(pl.col('sample_id')==sample_id)
-                #.filter(pl.col('cluster')!=0)
                 .collect()
             )
 
@@ -675,7 +674,7 @@ class Xp(db.Xp):
                 Loads pre-determined list of valid ibars
             '''
             self.print(':red_square: :red_square: Loading pre-computed valid ibars :red_square: :red_square:', 'bold #ff0000')
-            valid_ibars = pl.read_csv('/local/users/polivar/src/artnilet/conf/valid_ibars.csv')['valid_ibars'].to_list()      
+            valid_ibars = pl.read_csv('/local/users/polivar/src/artnilet/conf/valid_ibars.csv')['valid_ibar'].to_list()      
             return(valid_ibars)
 
     @wraps(_plot_cc)
