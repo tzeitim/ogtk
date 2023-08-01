@@ -345,7 +345,7 @@ class Xp(db.Xp):
             downsample = int(downsample)
 
         mols = self.load_guide_molecules(valid_ibars=valid_ibars, 
-                                            min_reads=min_reads, 
+                                         min_reads=min_reads, 
                                          clone=clone, 
                                          suffix=suffix, 
                                          downsample=downsample, 
@@ -660,8 +660,10 @@ class Xp(db.Xp):
         plt.rcParams['figure.dpi'] = 100
         fn = shltr.sc.to_matlin
         self.matl = fn(self.alleles, cells=cells, subset=subset,  *args, **kwargs)
+
         self.matl.plot_mat(rows=range(0, self.matl.df.shape[0]))
         plt.figure()
+
         if do_cluster:
             self.matl.allele_distance(cores=cores)    
             self.matl.hclust(optimal_ordering=False)
@@ -689,6 +691,8 @@ class Xp(db.Xp):
             self.print('This experiment seems to be have ingested others. No need to ingest unless force=True')
             return None
 
+
+
         adatas = [i.scs for i in xps]
         
         adata = ad.concat(adatas, join='outer', label='batch_id', index_unique="_")
@@ -696,8 +700,17 @@ class Xp(db.Xp):
         adata.var = adata.var.drop(adata.var.columns[2:].to_list(), axis='columns')
         adata.obs = adata.obs[['sample_id', 'batch_id']].copy()
         
-        batch_map = adata.obs.groupby(['sample_id', 'batch_id']).head(1).reset_index().loc[:, ['sample_id', 'batch_id']]
-        batch_map = dict(list(zip(batch_map.sample_id, batch_map.batch_id)))
+        batch_map = adata.obs.set_index('sample_id')['batch_id'].to_dict()
+
+        #batch_map = (
+        #        adata.obs
+        #        .groupby(['sample_id', 'batch_id'])
+        #        .head(1)
+        #        .reset_index()
+        #        .loc[:, ['sample_id', 'batch_id']]
+        #        )
+
+        #batch_map = dict(list(zip(batch_map.sample_id, batch_map.batch_id)))
 
         self.batch_map = batch_map
         assert len(batch_map) == len(adata.obs.sample_id.unique()), "It seems that one or more batches are duplicated"
@@ -709,13 +722,25 @@ class Xp(db.Xp):
         if skip_mols:
             self.export_xpconf(xp_conf_keys = set(self.conf_keys))
             return None
-        # merge molecules from individual experiments  
-        def pl_exp(xp):
-            return xp.mols.with_columns(pl.col('cbc')+"_"+batch_map[xp.mols['sample_id'].unique()[0]])
-        
-        self.mols = pl.concat(
-            [ pl_exp(xp) for xp in xps ]
+
+        mols = (
+           pl.concat([i.load_guide_molecules(clone=i.clone, filter_valid_cells=True) for i in xps])
         )
+        #batch_dict = .scs.obs.set_index('sample_id')['batch_id'].to_dict()
+        self.mols = (
+                mols
+                .with_columns(pl.col('sample_id')
+                .map_dict(batch_map)
+                .alias('batch_id'))        
+        )
+
+        ## merge molecules from individual experiments  
+        #def pl_exp(xp):
+        #    return xp.mols.with_columns(pl.col('cbc')+"_"+batch_map[xp.mols['sample_id'].unique()[0]])
+        #
+        #self.mols = pl.concat(
+        #    [ pl_exp(xp) for xp in xps ]
+        #)
 
         # save parquet file
         self.print(f"saving molecules to {self.return_path('mols', suffix=suffix)}")
