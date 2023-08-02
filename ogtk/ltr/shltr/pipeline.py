@@ -1,4 +1,5 @@
 from ogtk.utils import db
+from ogtk.ltr.shltr import cluster
 import matplotlib.pyplot as plt
 import seaborn as sns
 import ogtk.utils as ut
@@ -218,8 +219,10 @@ class Xp(db.Xp):
         
         self.raw_adata = None
         self.batch_map = None
+        self.mols = None
         self.attr_d= {'shrna':'mols', 'zshrna':'zmols'}
-        #self.is_chimera = 'is_chimera' in vars(self).keys()
+        if 'is_chimera' not in vars(self).keys():
+            self.is_chimera = False
 
 
     def init_wd(self):
@@ -365,6 +368,10 @@ class Xp(db.Xp):
             mols,
             ibar_ann: str|None=None,
             ):
+        '''
+        applies a `.join` to a specicied cluster-annotated ibar table.
+
+        '''
 
         ibar_ann = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_clusters.parquet' if ibar_ann is None else ibar_ann
 
@@ -607,8 +614,6 @@ class Xp(db.Xp):
                      valid_ibars:Sequence|None=None,
                      *args,
                      **kwargs):
-        ''' 
-        '''
         if valid_ibars is None:
             valid_ibars = self.default_ibars()
 
@@ -655,11 +660,11 @@ class Xp(db.Xp):
 
 
     @wraps(shltr.sc.to_matlin)
-    def init_matlin(self, do_cluster = False, subset=['cluster', 'raw_ibar'], cells= 100, cores=4, *args, **kwargs):
+    def init_matlin(self, do_cluster = False, sort_by=['cluster', 'raw_ibar'], cells= 100, cores=4, *args, **kwargs):
 
         plt.rcParams['figure.dpi'] = 100
         fn = shltr.sc.to_matlin
-        self.matl = fn(self.alleles, cells=cells, subset=subset,  *args, **kwargs)
+        self.matl = fn(self.alleles, cells=cells, sort_by=sort_by,  *args, **kwargs)
 
         self.matl.plot_mat(rows=range(0, self.matl.df.shape[0]))
         plt.figure()
@@ -683,9 +688,11 @@ class Xp(db.Xp):
     def plot_cc(self, *args, **kwargs):
         _plot_cc(self, *args, **kwargs)
 
-    def ingest_xps(self, xps: Iterable, suffix='shrna', force=False, skip_mols=False):
+    def ingest_xps(self, xps: Iterable, suffix='shrna', force=False, skip_mols=False, ibar_ann: str|None =None):
         ''' Merge compatible experiments and integrate them into an invidiual one.
             a ``batch_map`` keeps track of an appended identifier to single-cell barcodes
+
+            ibar_ann: path to ibar annotations. None (default) resources to the default path specified on `.annotate_ibar()`
         '''
         if self.mols is not None and self.raw_adata is not None:
             self.print('This experiment seems to be have ingested others. No need to ingest unless force=True')
@@ -702,16 +709,6 @@ class Xp(db.Xp):
         
         batch_map = adata.obs.set_index('sample_id')['batch_id'].to_dict()
 
-        #batch_map = (
-        #        adata.obs
-        #        .groupby(['sample_id', 'batch_id'])
-        #        .head(1)
-        #        .reset_index()
-        #        .loc[:, ['sample_id', 'batch_id']]
-        #        )
-
-        #batch_map = dict(list(zip(batch_map.sample_id, batch_map.batch_id)))
-
         self.batch_map = batch_map
         assert len(batch_map) == len(adata.obs.sample_id.unique()), "It seems that one or more batches are duplicated"
 
@@ -723,25 +720,21 @@ class Xp(db.Xp):
             self.export_xpconf(xp_conf_keys = set(self.conf_keys))
             return None
 
-        mols = (
+        self.mols = (
            pl.concat([i.load_guide_molecules(clone=i.clone, filter_valid_cells=True) for i in xps])
         )
-        #batch_dict = .scs.obs.set_index('sample_id')['batch_id'].to_dict()
+
         self.mols = (
-                mols
-                .with_columns(pl.col('sample_id')
-                .map_dict(batch_map)
-                .alias('batch_id'))        
+                self.mols
+                .with_columns(
+                    pl.col('sample_id')
+                    .map_dict(batch_map)
+                    .alias('batch_id')
+                )        
+                .with_columns(pl.col('cbc')+"_"+pl.col('batch_id').alias('cbc'))
         )
 
-        ## merge molecules from individual experiments  
-        #def pl_exp(xp):
-        #    return xp.mols.with_columns(pl.col('cbc')+"_"+batch_map[xp.mols['sample_id'].unique()[0]])
-        #
-        #self.mols = pl.concat(
-        #    [ pl_exp(xp) for xp in xps ]
-        #)
-
+        self.mols = self.annotate_ibars(mols=self.mols, ibar_ann=ibar_ann)
         # save parquet file
         self.print(f"saving molecules to {self.return_path('mols', suffix=suffix)}")
         self.mols.write_parquet(self.return_path('mols', suffix=suffix))
@@ -754,6 +747,12 @@ class Xp(db.Xp):
         if key =='mols':
             assert suffix is not None, "A suffix for the type of molecule is needed, e.g., 'shrna', 'zhrna'"
             return f'{self.wd_samplewd}/{suffix}/'
+
+    @wraps(cluster.cluster_ibars)
+    def cluster_ibars(self, *args, **kwargs):
+        loc_cluster = cluster.cluster_ibars(df=self.mols, write_parquets=False, *args, **kwargs)
+        return loc_cluster
+
 
     @wraps(_cassit)
     def cassit(self, *arg, **kwargs):

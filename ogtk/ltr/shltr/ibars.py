@@ -1710,6 +1710,7 @@ def to_intervals(pos_array, sample_id):
 def explode_pos(df):
     dsource = (
             df
+
             .drop(['alg', 'read_seq', 'weight'])
             .melt(id_vars=['sample_id', 'ibar', 'id'], variable_name='pos')
             .with_columns(pl.col('pos').str.replace('pos_', '').cast(pl.Int64))

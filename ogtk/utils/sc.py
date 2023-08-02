@@ -317,7 +317,6 @@ def qc_masks(adata,
     fg.ax.set(xlabel='UMIs', ylabel='Density', yticks=[])
     fg.ax.axvline(x=properly_sampled_min_cell_total, color='darkgreen')
     fg.ax.axvline(x=properly_sampled_max_cell_total, color='crimson')
-    fg.ax.set_xticks()
     fg.ax.set_xlim((100, 1e5))
     fg.ax.set_title(f'{set_name}')
     fg.savefig(f'{adata_workdir}/{set_name}_umi_dplot.png')
@@ -477,9 +476,10 @@ def analyze_related_genes(
  
     # plotting
     if grid:
-        plt.rcParams.update(plt.rcParamsDefault)
-        fig, axes = plt.subplots(rows, columns, dpi=dpi, figsize=(unit, aspect_f*unit * rows ))
-        iaxes = iter(axes.flat)
+        with plt.rc_context({'figure.dpi':100}):
+            #plt.rcParams.update(plt.rcParamsDefault)
+            fig, axes = plt.subplots(rows, columns, dpi=dpi, figsize=(unit, aspect_f*unit * rows ))
+            iaxes = iter(axes.flat)
 
     def heatmap_mod(x, cmap='RdYlBu_r'):
         ''' polars-based module plotting
@@ -636,7 +636,7 @@ def invoque_mc(adata,
     #lfc =  lfc.apply(lambda x: x - np.median(x), axis=0)
     #metacells.layers['lfc'] = lfc 
 
-    plt.rcParams.update(plt.rcParamsDefault)
+    #plt.rcParams.update(plt.rcParamsDefault)
     
 
     mc.utilities.parallel.set_processors_count(cpus[var_cpus_key])

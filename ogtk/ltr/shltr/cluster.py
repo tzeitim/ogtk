@@ -1,36 +1,30 @@
-
-import rich
 import numpy as np
 import seaborn as sns
-import itertools 
 import polars as pl
-pl.Config.set_fmt_str_lengths(150)
-
-from scipy.cluster.vq import vq, kmeans, whiten, kmeans2
+from scipy.cluster.vq import vq, kmeans, whiten
 import umap
 from sklearn.preprocessing import StandardScaler
-
 import hdbscan
 import fastcluster
-
 from scipy.cluster import hierarchy
 import matplotlib.pyplot as plt
-
 import ogtk
 from ogtk.utils import db as db 
-from ogtk.ltr.shltr import pp
+
 
 #__all__ = [
 #    "cluster_ibars",
 #]
 
+pl.Config.set_fmt_str_lengths(150)
 
-def load_parquet_for_analysis(mols_parquet, plot = True, min_cov_log10=2):
+def load_parquet_for_analysis(df, plot = True, min_cov_log10=2):
     '''
 
     '''
     df = (
-        pl.scan_parquet(mols_parquet)
+        df
+        .lazy()
         .groupby(['cbc','raw_ibar','seq', 'sample_id'])
          .agg([
             pl.col('umi_dom_reads').sum().alias('allele_reads'),
@@ -67,15 +61,21 @@ def load_parquet_for_analysis(mols_parquet, plot = True, min_cov_log10=2):
 
 
 def cluster_ibars(
-        mols_parquet, 
-        plot, 
+        mols_parquet: None| str=None, 
+        df: None| pl.DataFrame= None,
+        plot=True, 
         min_cov_log10=2, 
+        write_parquets=False,
         umap=False, 
         out_parquet = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_clusters.parquet',
-        out_valid_ibars = '/local/users/polivar/src/artnilet/conf/valid_ibars.csv'):
+        out_valid_ibars = '/local/users/polivar/src/artnilet/conf/valid_ibars.csv')->pl.DataFrame:
     '''
     '''
-    df = load_parquet_for_analysis(mols_parquet, plot, min_cov_log10)
+    assert not (mols_parquet is None and df is None), "You need to specify mols_parque or df"
+
+    if df is None:
+        df =pl.scan_parquet(mols_parquet)
+    df = load_parquet_for_analysis(df, plot, min_cov_log10)
 
     zz = (df
           .pivot(
@@ -109,18 +109,18 @@ def cluster_ibars(
             .with_columns(pl.col('sample_id').str.replace('e.?$', '')).rename({'sample_id':'clone'})
         )
 
-    final_df.write_parquet(out_parquet)
+    if write_parquets:
+        final_df.write_parquet(out_parquet)
 
-    (
-        pl.read_parquet(out_parquet)
-        .rename({'raw_ibar':"valid_ibar"})
-        .select('valid_ibar')
-        .write_csv(out_valid_ibars)
-    )
+        (
+            pl.read_parquet(out_parquet)
+            .rename({'raw_ibar':"valid_ibar"})
+            .select('valid_ibar')
+            .write_csv(out_valid_ibars)
+        )
 
-    console=   rich.Console()
-
-    console.print("written final parquet")
+        print(f'written file {out_parquet}')
+        print(f'written file {out_valid_ibars}')
 
     if plot:
         plot_heatmap(zz)

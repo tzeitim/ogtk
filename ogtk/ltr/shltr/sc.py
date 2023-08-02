@@ -125,7 +125,8 @@ def allele_calling(
         #.sort(['umis_allele', 'wt'], [True, False]) # we give priority to non-wt
         #.filter(pl.col('umis_allele')>=2)
         .groupby(['cbc', 'raw_ibar'], maintain_order=True)
-        .head(1) # <- this is it!
+        # https://github.com/pola-rs/polars/issues/10054
+        .head(1) # <- this is it! # change to .first() or .top_k()
         .select(['cbc', 'raw_ibar', 'seq', 'wt', 'umi_reads',\
                 'umis_allele', 'umis_cell', 'cs_norm_umis_allele', 'ib_norm_umis_allele', 'db_norm_umis_allele',\
                 'cluster', 'sample_id', 'valid_ibar'])
@@ -143,8 +144,10 @@ def allele_calling(
             .head(1) # <- this is it!
     )
 
-def to_matlin(df, expr: None | pl.Expr, subset='cluster', cells=100):
+def to_matlin(df, expr: None | pl.Expr, sort_by='cluster', cells=100):
     ''' Returns a matlin object from an allele-called (e.g. `allele_calling()`)
+
+        If `expr` is `None` then the `top` cells are selected. `top` cells are defined by `cells` multiplied by the total number if ibars. 
     '''
     matl = ogtk.ltr.matlin()
     #subset = ['kalhor_id', 'nspeed', 'raw_ibar']
@@ -153,9 +156,9 @@ def to_matlin(df, expr: None | pl.Expr, subset='cluster', cells=100):
     top = cells 
 
     if expr is None:
-        matl.ingest_ibars_pl(df.sample(top), subset=subset)
+        matl.ingest_ibars_pl(df.sample(top), sort_by=sort_by)
     else:
-        matl.ingest_ibars_pl(df.filter(expr), subset=subset)
+        matl.ingest_ibars_pl(df.filter(expr), sort_by=sort_by)
 
     return matl
 
@@ -385,7 +388,7 @@ def compute_clonal_composition(
     per_cell_clonal_composition = (
         df
          .filter(pl.col('cluster').is_not_null())
-         .with_columns(pl.col('cluster').apply(lambda x : clone_dict[x]))
+         .with_columns(pl.col('cluster').map_dict(clone_dict))
          .with_columns(pl.col('raw_ibar').n_unique().over(['cluster']).alias('cluster_size'))
          .groupby(['cbc', 'cluster_size', 'umis_cell'])
          .agg(pl.col('cluster').value_counts()).explode('cluster').unnest('cluster').rename({"cluster":"clone_score"})
