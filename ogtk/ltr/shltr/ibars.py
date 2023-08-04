@@ -1588,55 +1588,78 @@ def plot_indel_stacked_fractions(element: str, df: pl.DataFrame, groups: List[st
 
     plot_stacked_rectangles(rects, title=f'{element_field} {element} {bc}', groups=groups)
 
-def poly(df, foc_ibar, lim=50, correct_tss=True, keep_intermediate=False):
+def return_aligned_alleles(df, lim=50, correct_tss=True, keep_intermediate=False, min_group_size=100):
     '''
     Assumes a data frame that:
     - belongs to a single ibar
     - belongs to a single sample
     - is annotated with a 'kalhor_id' 
     '''
+    import re
     ref_str = "TTTCTTATATGGG[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAACCTAAGGCTAGTCCGTTATCAACTTGGTACT"
+    schema = {"sample_id":str, "ibar":str, "id":str, "read_seq":str, "sweight":pl.Int64, "alg":pl.List}
 
-    assert df['sample_id'].n_unique() == 1, "Please provide a data frame pre-filtered with a single sample"
+    assert df['sample_id'].n_unique() == 1, "Please provide a data frame pre-filtered with a single sample_id. Best when this function is called within a groupby"
     foc_sample = df['sample_id'][0]
+
+    assert df['raw_ibar'].n_unique() == 1, "Please provide a data frame pre-filtered with a single ibar. Best when this function is called within a groupby"
+    foc_ibar= df['raw_ibar'][0]
+
+    if df.shape[0]<min_group_size:
+        return pl.DataFrame(schema=schema)
 
     raw_fasta_entries = (
             df
-            .with_columns(pl.col('oseq').str.replace(f'.+?{return_feature_string("tso")}', return_feature_string("tso")).alias('seq_trim'))
-            .filter(pl.col('raw_ibar')==foc_ibar)
-            .with_columns(pl.count().over(['WT', 'seq_trim']).alias('sweight'))
-    .with_columns([pl.col(i).rank().cast(pl.Int64).suffix('_encoded') for i in ['seq_trim',]])
+            .with_columns(
+                pl.col('oseq').str.replace(f'.+?{return_feature_string("tso")}', return_feature_string("tso"))
+                .alias('seq_trim')
+            )
+            .with_columns(
+                pl.count().over(['WT', 'seq_trim'])
+                .alias('sweight')
+            )
+            .with_columns(
+                [pl.col(i).rank().cast(pl.Int64).suffix('_encoded') for i in ['seq_trim',]]
+            )
             #.select(['WT', 'raw_ibar', 'kalhor_id', 'count', 'seq_trim', 'spacer', 'seq_trim_encoded'])
             #.unique()
             #.filter(pl.col('seq_trim').str.contains('N').is_not())
             .with_row_count(name='id')
-            .with_columns((
+            .with_columns(
+                (
                  "WT_"+pl.col('WT')\
                  +"_kalhor_"+pl.col('kalhor_id').cast(pl.Utf8).fill_null('NA')\
                  +"_sweight_"+pl.col('sweight').cast(pl.Utf8)\
                  +"_id_"+pl.col('id').cast(pl.Utf8)\
                  +"_seqid_"+pl.col('seq_trim_encoded').cast(pl.Utf8)\
-                 ).alias('id'))
-            .with_columns((
-                 ">"+pl.col('id')\
+                 )
+                 .alias('id')
+            )
+            .with_columns(
+                (">"+pl.col('id')\
                  +"\n"+pl.col('seq_trim')\
-                 +"\n").alias('fasta'))
+                 +"\n")
+                 .alias('fasta')
+            )
         )
 
-    if len(raw_fasta_entries) ==0:
+    if len(raw_fasta_entries)==0:
         print("No entries found to generate a fasta file")
-        return None
+        return pl.DataFrame(schema=schema)
 
-    foc_spacer = raw_fasta_entries.filter(pl.col('WT'))['spacer'].value_counts().sort('counts', descending=True)
+    foc_spacer = (
+            raw_fasta_entries
+            .filter(pl.col('WT'))['spacer']
+            .value_counts()
+            .sort('counts', descending=True)
+            )
 
     if foc_spacer.shape[0]==0:
         print(f'No WT allele found for {foc_ibar}')
-        return None
+        return pl.DataFrame(schema=schema)
+
     foc_spacer = foc_spacer['spacer'][0]
-    
     ref_foc = ref_str.replace('[SPACER]', foc_spacer).replace('[IBAR]', foc_ibar)
-    
-    import re
     ref_foc_match = re.search(f'{foc_ibar}{return_feature_string("dsibar")}', ref_foc)
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -1673,14 +1696,13 @@ def poly(df, foc_ibar, lim=50, correct_tss=True, keep_intermediate=False):
             idx = np.where(vread_seq == "-")[0]
             vread_seq[idx]= "-"
             if correct_tss:
-                vread_seq[idx[idx<18]]=vref_seq[idx[idx<18]]
+                vread_seq[idx[idx<=18]]=vref_seq[idx[idx<=18]]
             read_seq= ''.join(vread_seq)
             expansion_factor = regex.search(".+sweight_(.+)_id", read_name)
             expansion_factor = int(expansion_factor.groups()[0])
             f_counts = np.histogram(idx, bins = coord_bins)[0]
             alg_df.append((foc_sample, foc_ibar, read_name, read_seq[0:ref_foc_match], expansion_factor, pl.Series(f_counts[0:ref_foc_match])))
 
-    schema = {"sample_id":str, "ibar":str, "id":str, "read_seq":str, "sweight":pl.Int64, "alg":pl.List}
     alg_df = to_interval_df(alg_df, schema=schema) 
 
     raw_fasta_entries = (
