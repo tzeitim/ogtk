@@ -1590,23 +1590,27 @@ def plot_indel_stacked_fractions(element: str, df: pl.DataFrame, groups: List[st
 
 def return_aligned_alleles(df, lim=50, correct_tss=True, keep_intermediate=False, min_group_size=100):
     '''
-    Assumes a data frame that:
+    Requires a data frame that:
     - belongs to a single ibar
     - belongs to a single sample
     - is annotated with a 'kalhor_id' 
     '''
     import re
     ref_str = "TTTCTTATATGGG[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAACCTAAGGCTAGTCCGTTATCAACTTGGTACT"
-    schema = {"sample_id":str, "ibar":str, "id":str, "read_seq":str, "sweight":pl.Int64, "alg":pl.List}
+    schema = {"sample_id":str, "ibar":str, "id":str, "aseq":str, "sweight":pl.Int64, "alg":pl.List(pl.Int64)}
+    oschema = {"aseq":str, "alg":pl.List(pl.Int64), "aweight":pl.Int64}
+    merged_schema = df.schema.copy()
+    merged_schema.update(oschema)
 
     assert df['sample_id'].n_unique() == 1, "Please provide a data frame pre-filtered with a single sample_id. Best when this function is called within a groupby"
     foc_sample = df['sample_id'][0]
 
     assert df['raw_ibar'].n_unique() == 1, "Please provide a data frame pre-filtered with a single ibar. Best when this function is called within a groupby"
+
     foc_ibar= df['raw_ibar'][0]
 
     if df.shape[0]<min_group_size:
-        return pl.DataFrame(schema=schema)
+        return pl.DataFrame(schema=merged_schema)
 
     raw_fasta_entries = (
             df
@@ -1641,11 +1645,13 @@ def return_aligned_alleles(df, lim=50, correct_tss=True, keep_intermediate=False
                  +"\n")
                  .alias('fasta')
             )
+            .drop('seq_trim_encoded')
         )
 
+    ### delete?
     if len(raw_fasta_entries)==0:
-        print("No entries found to generate a fasta file")
-        return pl.DataFrame(schema=schema)
+        print("No entries found to generate a fasta file {foc_ibar} {foc_sample}")
+        return pl.DataFrame(schema=merged_schema)
 
     foc_spacer = (
             raw_fasta_entries
@@ -1653,10 +1659,10 @@ def return_aligned_alleles(df, lim=50, correct_tss=True, keep_intermediate=False
             .value_counts()
             .sort('counts', descending=True)
             )
-
+    # change to use a defined spacer db
     if foc_spacer.shape[0]==0:
-        print(f'No WT allele found for {foc_ibar}')
-        return pl.DataFrame(schema=schema)
+        print(f'No WT allele found for {foc_ibar} {foc_sample}')
+        return pl.DataFrame(schema=merged_schema)
 
     foc_spacer = foc_spacer['spacer'][0]
     ref_foc = ref_str.replace('[SPACER]', foc_spacer).replace('[IBAR]', foc_ibar)
@@ -1690,32 +1696,38 @@ def return_aligned_alleles(df, lim=50, correct_tss=True, keep_intermediate=False
 
     alg_df = []
     for ((ref_name, read_name), (ref_seq, read_seq)) in alignment_tuples:
+        # TODO add the cases for insertions!!
         if "-" not in ref_seq:
             vref_seq = np.array([i for i in ref_seq])
             vread_seq = np.array([i for i in read_seq])
             idx = np.where(vread_seq == "-")[0]
-            vread_seq[idx]= "-"
+            #vread_seq[idx]= "-"
             if correct_tss:
-                vread_seq[idx[idx<=18]]=vref_seq[idx[idx<=18]]
+                c_idx = idx[idx<=18]
+                vread_seq[c_idx]=vref_seq[c_idx]
             read_seq= ''.join(vread_seq)
             expansion_factor = regex.search(".+sweight_(.+)_id", read_name)
             expansion_factor = int(expansion_factor.groups()[0])
             f_counts = np.histogram(idx, bins = coord_bins)[0]
             alg_df.append((foc_sample, foc_ibar, read_name, read_seq[0:ref_foc_match], expansion_factor, pl.Series(f_counts[0:ref_foc_match])))
 
-    alg_df = to_interval_df(alg_df, schema=schema) 
+    alg_df = to_interval_df(alg_df, schema=schema, sort_by='sweight') 
 
     raw_fasta_entries = (
         raw_fasta_entries
-        .join(alg_df.select('id', 'read_seq', 'alg'), left_on='id', right_on='id')
-        .with_columns(pl.count().over('read_seq').alias('aweight'))
-        .with_columns(pl.col('read_seq').rank().cast(pl.Int64).suffix('_encoded'))
+        .join(alg_df, left_on='id', right_on='id', how='left')
+        .with_columns(pl.count().over('aseq').alias('aweight'))
+        .select(merged_schema.keys())
+        .with_columns(pl.col('aweight').cast(pl.Int64))
     )
     return raw_fasta_entries
 
-def to_interval_df(alignment_data, schema):
-        df = pl.DataFrame(alignment_data, schema=schema).sort('sweight', descending=True)
-        return df
+def to_interval_df(alignment_data, schema, sort_by):
+    '''
+        Converts a list of tuples containing intervals data (``alignment_data``) into  a data frame following a ``schema``.
+    '''
+    df = pl.DataFrame(alignment_data, schema=schema).sort(sort_by, descending=True)
+    return df
 
 def to_intervals(pos_array, sample_id):
     xy = (
@@ -1738,3 +1750,6 @@ def explode_pos(df):
             .with_columns(pl.col('pos').str.replace('pos_', '').cast(pl.Int64))
         )
     return dsource
+
+def alignment_schema():
+    return {'id': pl.Utf8, 'umi': pl.Utf8, 'raw_ibar': pl.Utf8, 'spacer': pl.Utf8, 'WT': pl.Boolean, 'oseq': pl.Utf8, 'seq': pl.Utf8, 'umi_dom_reads': pl.UInt32, 'umi_reads': pl.UInt32, 'tsos': pl.UInt32, 'dss': pl.UInt32, 'sts': pl.UInt32, 'u6s': pl.UInt32, 'bu6s': pl.UInt32, 'can': pl.UInt32, 'wts': pl.UInt32, 'spacer_len': pl.UInt32, 'tg_cmp': pl.Float64, 'sample_id': pl.Utf8, 'clone': pl.Utf8, 'qc_pc_offt': pl.Float64, 'qc_tot_umis': pl.Int64, 'qc_tot_reads': pl.Int64, 'qc_umis_per_10kreads': pl.Float64, 'cluster': pl.Int64, 'ibar_reads': pl.UInt32, 'ibar_umis': pl.UInt32, 'ibar_reads_log10': pl.Float64, 'ibar_umis_log10': pl.Float64, 'ibar_reads_q': pl.Float64, 'ibar_umis_q': pl.Float64, 'valid_h1': pl.Boolean, 'valid_g10': pl.Boolean, 'kalhor_id': pl.Int64, 'speed': pl.Utf8, 'nspeed': pl.Int64, 'diversity': pl.Utf8, 'neo': pl.Boolean, 'seq_trim': pl.Utf8, 'sweight': pl.UInt32, 'seq_trim_encoded': pl.Int64, 'fasta': pl.Utf8, 'read_seq': pl.Utf8, 'alg': pl.List(pl.Int64), 'aweight': pl.UInt32, 'read_seq_encoded': pl.Int64}
