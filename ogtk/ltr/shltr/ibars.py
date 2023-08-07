@@ -1588,12 +1588,14 @@ def plot_indel_stacked_fractions(element: str, df: pl.DataFrame, groups: List[st
 
     plot_stacked_rectangles(rects, title=f'{element_field} {element} {bc}', groups=groups)
 
-def return_aligned_alleles(df, lim=50, correct_tss=True, keep_intermediate=False, min_group_size=100):
+def return_aligned_alleles(df, lim=50, correct_tss=True, keep_intermediate=False, min_group_size=100)->pl.DataFrame:
     '''
     Requires a data frame that:
     - belongs to a single ibar
     - belongs to a single sample
     - is annotated with a 'kalhor_id' 
+
+    Returns the original data frame with additional fields that contain a an aligned version of the original sequence
     '''
     import re
     ref_str = "TTTCTTATATGGG[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAACCTAAGGCTAGTCCGTTATCAACTTGGTACT"
@@ -1695,21 +1697,36 @@ def return_aligned_alleles(df, lim=50, correct_tss=True, keep_intermediate=False
     ref_foc_match = lim if ref_foc_match is None else ref_foc_match.start()
 
     alg_df = []
-    for ((ref_name, read_name), (ref_seq, read_seq)) in alignment_tuples:
-        # TODO add the cases for insertions!!
+    for ((ref_name, read_name), (ref_seq, aligned_seq)) in alignment_tuples:
+        vref_seq = np.array([i for i in ref_seq])
+        valigned_seq = np.array([i for i in aligned_seq])
+        idx = np.asarray(valigned_seq == "-").nonzero()[0]
+        ridx = np.asarray(vref_seq == "-").nonzero()
+        expansion_factor = regex.search(".+sweight_(.+)_id", read_name)
+        expansion_factor = int(expansion_factor.groups()[0])
+        # cases wgere there are only deletions in the original sequence
         if "-" not in ref_seq:
-            vref_seq = np.array([i for i in ref_seq])
-            vread_seq = np.array([i for i in read_seq])
-            idx = np.where(vread_seq == "-")[0]
-            #vread_seq[idx]= "-"
+            #valigned_seq[idx]= "-"
             if correct_tss:
                 c_idx = idx[idx<=18]
-                vread_seq[c_idx]=vref_seq[c_idx]
-            read_seq= ''.join(vread_seq)
-            expansion_factor = regex.search(".+sweight_(.+)_id", read_name)
-            expansion_factor = int(expansion_factor.groups()[0])
+                valigned_seq[c_idx]=vref_seq[c_idx]
+            aligned_seq= ''.join(valigned_seq)
             f_counts = np.histogram(idx, bins = coord_bins)[0]
-            alg_df.append((foc_sample, foc_ibar, read_name, read_seq[0:ref_foc_match], expansion_factor, pl.Series(f_counts[0:ref_foc_match])))
+            f_counts = pl.Series(f_counts[0:ref_foc_match])
+            aseq = aligned_seq[0:ref_foc_match]
+            alg_df.append((foc_sample, foc_ibar, read_name, aseq, expansion_factor, f_counts))
+        # cases where there are insertions
+        # apply a position-scpecific encoding of the length of the integration
+        # -1 is for gap
+        # add an additional field iseq to concatenate a string of integrations, 
+        # which can be split based in the alg itself if needed
+        else:
+            aligned_seq= ''.join(valigned_seq)
+            f_counts = pl.Series()
+            aseq = aligned_seq
+            alg_df.append((foc_sample, foc_ibar, read_name, aseq, expansion_factor, f_counts))
+
+
 
     alg_df = to_interval_df(alg_df, schema=schema, sort_by='sweight') 
 
@@ -1744,12 +1761,9 @@ def to_intervals(pos_array, sample_id):
 def explode_pos(df):
     dsource = (
             df
-
-            .drop(['alg', 'read_seq', 'weight'])
+            .drop(['alg', 'aseq', 'weight'])
             .melt(id_vars=['sample_id', 'ibar', 'id'], variable_name='pos')
             .with_columns(pl.col('pos').str.replace('pos_', '').cast(pl.Int64))
         )
     return dsource
 
-def alignment_schema():
-    return {'id': pl.Utf8, 'umi': pl.Utf8, 'raw_ibar': pl.Utf8, 'spacer': pl.Utf8, 'WT': pl.Boolean, 'oseq': pl.Utf8, 'seq': pl.Utf8, 'umi_dom_reads': pl.UInt32, 'umi_reads': pl.UInt32, 'tsos': pl.UInt32, 'dss': pl.UInt32, 'sts': pl.UInt32, 'u6s': pl.UInt32, 'bu6s': pl.UInt32, 'can': pl.UInt32, 'wts': pl.UInt32, 'spacer_len': pl.UInt32, 'tg_cmp': pl.Float64, 'sample_id': pl.Utf8, 'clone': pl.Utf8, 'qc_pc_offt': pl.Float64, 'qc_tot_umis': pl.Int64, 'qc_tot_reads': pl.Int64, 'qc_umis_per_10kreads': pl.Float64, 'cluster': pl.Int64, 'ibar_reads': pl.UInt32, 'ibar_umis': pl.UInt32, 'ibar_reads_log10': pl.Float64, 'ibar_umis_log10': pl.Float64, 'ibar_reads_q': pl.Float64, 'ibar_umis_q': pl.Float64, 'valid_h1': pl.Boolean, 'valid_g10': pl.Boolean, 'kalhor_id': pl.Int64, 'speed': pl.Utf8, 'nspeed': pl.Int64, 'diversity': pl.Utf8, 'neo': pl.Boolean, 'seq_trim': pl.Utf8, 'sweight': pl.UInt32, 'seq_trim_encoded': pl.Int64, 'fasta': pl.Utf8, 'read_seq': pl.Utf8, 'alg': pl.List(pl.Int64), 'aweight': pl.UInt32, 'read_seq_encoded': pl.Int64}
