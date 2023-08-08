@@ -1588,7 +1588,13 @@ def plot_indel_stacked_fractions(element: str, df: pl.DataFrame, groups: List[st
 
     plot_stacked_rectangles(rects, title=f'{element_field} {element} {bc}', groups=groups)
 
-def return_aligned_alleles(df, lim=50, correct_tss=True, keep_intermediate=False, min_group_size=100)->pl.DataFrame:
+def return_aligned_alleles(
+                           df,
+                           lim=50,
+                           correct_tss=True,
+                           keep_intermediate=False,
+                           min_group_size=100
+                           )->pl.DataFrame:
     '''
     Requires a data frame that:
     - belongs to a single ibar
@@ -1698,19 +1704,22 @@ def return_aligned_alleles(df, lim=50, correct_tss=True, keep_intermediate=False
 
     alg_df = []
     for ((ref_name, read_name), (ref_seq, aligned_seq)) in alignment_tuples:
-        vref_seq = np.array([i for i in ref_seq])
-        valigned_seq = np.array([i for i in aligned_seq])
-        idx = np.asarray(valigned_seq == "-").nonzero()[0]
-        ridx = np.asarray(vref_seq == "-").nonzero()
+        ref_seqv = np.array(list(ref_seq)
+        aligned_seqv = np.array(list(aligned_seq))
+
+        idx = np.asarray(aligned_seqv == "-").nonzero()[0]
+        ridx = np.asarray(ref_seqv == "-").nonzero()[0]
+
         expansion_factor = regex.search(".+sweight_(.+)_id", read_name)
         expansion_factor = int(expansion_factor.groups()[0])
-        # cases wgere there are only deletions in the original sequence
+
+        # reads with only deletions 
         if "-" not in ref_seq:
-            #valigned_seq[idx]= "-"
+            #aligned_seqv[idx]= "-"
             if correct_tss:
                 c_idx = idx[idx<=18]
-                valigned_seq[c_idx]=vref_seq[c_idx]
-            aligned_seq= ''.join(valigned_seq)
+                aligned_seqv[c_idx]=ref_seqv[c_idx]
+            aligned_seq= ''.join(aligned_seqv)
             f_counts = np.histogram(idx, bins = coord_bins)[0]
             f_counts = pl.Series(f_counts[0:ref_foc_match])
             aseq = aligned_seq[0:ref_foc_match]
@@ -1721,7 +1730,14 @@ def return_aligned_alleles(df, lim=50, correct_tss=True, keep_intermediate=False
         # add an additional field iseq to concatenate a string of integrations, 
         # which can be split based in the alg itself if needed
         else:
-            aligned_seq= ''.join(valigned_seq)
+            blank = np.zeros(17, dtype=int)
+            cur = 0
+            for match in re.finditer("-+", ref_seq):
+                ins_len = np.diff(match.span())[0]
+                blank[match.start()-cur] = ins_len
+                cur = ins_len-1
+
+            aligned_seq= ''.join(aligned_seqv)
             f_counts = pl.Series()
             aseq = aligned_seq
             alg_df.append((foc_sample, foc_ibar, read_name, aseq, expansion_factor, f_counts))
@@ -1746,10 +1762,10 @@ def to_interval_df(alignment_data, schema, sort_by):
     df = pl.DataFrame(alignment_data, schema=schema).sort(sort_by, descending=True)
     return df
 
-def to_intervals(pos_array, sample_id):
+def to_intervals(pos_array, sample_id, lim=50):
     xy = (
             pl.Series(pos_array, dtype=pl.Float64)
-            .append(pl.Series(range(50)).cast(pl.Float64))
+            .append(pl.Series(range(lim)).cast(pl.Float64))
             .value_counts()
             .with_columns(pl.col('counts')-1)
             .rename({'':'pos', "counts":sample_id})
