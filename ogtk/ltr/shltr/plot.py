@@ -1,16 +1,17 @@
+import polars as pl 
 import matplotlib.pyplot as plt
+import matplotlib.colors as colors
 import colorhash   
 from colorhash import ColorHash
 import seaborn as sns
 
 ### plotting ###
-sns.set_context("talk")
-plt.rc('axes', axisbelow=True)
-
-plt.rcParams['figure.dpi'] = 150
+#sns.set_context("talk")
+#plt.rc('axes', axisbelow=True)
+#
+#plt.rcParams['figure.dpi'] = 150
 
 def reads_per_unit(unit, umi_counts, sample_id, png_prefix=None):
-
     with plt.rc_context({'figure.figsize':(8.5, 8.5)}):
         fig_title = f'Reads per single {unit}'
         fig, ax = plt.subplots(1,1)
@@ -527,4 +528,32 @@ def plot_sibling_noise(df):
     plt.yscale('log')
     #sns.displot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas()['wt'])
 
+def hmap_grid(data, **kwargs):
 
+    ''' 
+    This is a very sensitive visualization since it shows all individual
+    alignments in the provided data frame. It's supposed to be share a common
+    color code across elements in a facet grid so a `vmax` argument should be
+    provided as part of kwargs 
+    '''
+
+    data = pl.DataFrame(data).sort('aweight', descending=True)
+    mat = data.select(pl.col("^pos.+$"))
+    mat = mat.unique(maintain_order=True)
+    mat = mat.to_numpy()[0:50,0:50]+1
+    map = plt.pcolormesh(mat, norm=colors.LogNorm(vmin=1, vmax=kwargs['vmax']), cmap='Spectral_r')
+    return map
+
+
+def hmap_grid_sum(data, **kwargs):
+    ''' 
+    For a given set of aligned alleles represents the 'erosion' of each position
+    '''
+    data = pl.DataFrame(data)
+    weight = data['aweight'].sum()
+    mm = data.groupby(['sample_id', 'raw_ibar'], maintain_order=True).agg(pl.col('^pos.+$').sum())
+    mat = (mm.select(pl.col('^pos.+$')).to_numpy()[:,0:50]/weight)
+    map = plt.pcolormesh(mat, cmap='Spectral_r', vmin=0, vmax=2)
+    #print(pl.Series(np.hstack(mat)).max())
+    
+    return map
