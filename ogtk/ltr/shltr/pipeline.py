@@ -500,13 +500,24 @@ class Xp(db.Xp):
         self.mcs.write_h5ad(mcs_fad_path)
         self.scs.write_h5ad(scs_fad_path)
 
-    def return_path(self, kind, sample_name:str|None=None, suffix=None):
+    def return_path(self, kind: str, sample_name:str|None=None, suffix=None):
+        """ returns a standardized path for a given `kind` of file.
+            kinds are self contained variables that define the dataset to return the path to (needs improvement)
+            e.g. mcs_ad_path, mcs_fad_path, raw_scs_ad_path, clean_scs_ad_path, scs_ad_path, scs_fad_path, otl_ad_path
+        """
         if sample_name is None:
             sample_name = self.sample_id
+
+        kinds="mcs_ad_path,mcs_fad_path,raw_scs_ad_path,clean_scs_ad_path,scs_ad_path,scs_fad_path,otl_ad_path".split(',')
+        assert kind not in kinds, f"please provide a `kind` of the following {kinds}"
+
         #_f for final
         mcs_ad_path = f'{self.wd_scrna}/{sample_name}.mcells.h5ad'
         mcs_fad_path = mcs_ad_path.replace('mcells', 'mcells_f')
-        
+
+        raw_scs_ad_path = mcs_ad_path.replace('mcells', 'raw_scells')
+        clean_scs_ad_path = mcs_ad_path.replace('mcells', 'clean_scells')
+
         scs_ad_path = mcs_ad_path.replace('mcells', 'scells')
         scs_fad_path = mcs_fad_path.replace('mcells', 'scells')
         
@@ -757,6 +768,41 @@ class Xp(db.Xp):
     @wraps(_cassit)
     def cassit(self, *arg, **kwargs):
         _cassit(self, *arg, **kwargs)
+
+    def lineage_analysis(
+            self,
+            exp, 
+            clone = 'g10',
+            cells=1000, 
+            clc_dict = {'h1':[-1, 1, 2], 'g10':[0, 3]}):
+        import cassiopeia as cas
+
+        exp.is_chimera = True
+        exp.init_alleles(by='umis_allele', descending=True)
+        expr = (
+            (pl.col('umis_allele')>2) & \
+            (pl.col('metacell_name')!='Outliers')  &\
+            #(pl.col('raw_ibar').is_in(top_cut_ibars['raw_ibar'])) &\
+            (pl.col('total_umis')>=10) 
+            )
+        exp.alleles = exp.salleles
+        alleles = exp.alleles.filter(expr)
+        
+        exp.init_matlin(cells=cells, expr=expr)
+        
+        exp.x(alleles=alleles, clusters=clc_dict[clone], allele_rep_thresh=1)
+
+        # plot tree
+        cas.pl.plot_matplotlib(exp.tree, 
+                          orient='right', 
+                           allele_table=exp.tree.clone_allele_table, 
+                           indel_colors=pp._cas_return_colors(exp.tree.clone_allele_table),
+                           figsize=(1*7*1, 1*7*1),
+                           colorstrip_spacing = 0, 
+                       colorstrip_width = 4, 
+                          )
+        plt.show()
+        return exp
 
 
 
