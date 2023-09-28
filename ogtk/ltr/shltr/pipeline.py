@@ -11,6 +11,7 @@ import polars as pl
 import anndata as ad
 import os
 from functools import wraps
+from pyaml import yaml
 
 
 def _cassit(exp, alleles, clusters= [-1, 1, 2],
@@ -221,9 +222,12 @@ class Xp(db.Xp):
         self.batch_map = None
         self.mols = None
         self.attr_d= {'shrna':'mols', 'zshrna':'zmols'}
+
         if 'is_chimera' not in vars(self).keys():
             self.is_chimera = False
-
+        # paths
+        self.default_raw_h5ad = f"{self.wd_mc}/{self.sample_id}.full.h5ad"
+        self.default_clean_h5ad = f"{self.wd_mc}/{self.sample_id}.clean.h5ad"
 
     def init_wd(self):
         '''
@@ -369,7 +373,7 @@ class Xp(db.Xp):
             ibar_ann: str|None=None,
             ):
         '''
-        applies a `.join` to a specicied cluster-annotated ibar table.
+        applies a `.join` to a specified cluster-annotated ibar table.
 
         '''
 
@@ -391,6 +395,7 @@ class Xp(db.Xp):
         ''' Loads the raw cell ranger counts matrix
             When ``h5_path`` is provided it overrides the default routine that uses the matrix dir tree from 10x
         '''
+
         if h5_path is not None:
             self.raw_adata = self.load_10_h5(h5_path, *args, **kwargs)
             if cellbender:
@@ -400,8 +405,8 @@ class Xp(db.Xp):
                 self.raw_adata.X = self.raw_adata.X.astype(np.float32)
             return None
 
-
         if self.raw_adata is None or force:
+            # TODO check if there is as previous instance of the anndatas if 
             self.raw_adata = self.load_10_mtx()
             return None
 
@@ -509,10 +514,11 @@ class Xp(db.Xp):
             sample_name = self.sample_id
 
         kinds="mcs_ad_path,mcs_fad_path,raw_scs_ad_path,clean_scs_ad_path,scs_ad_path,scs_fad_path,otl_ad_path".split(',')
-        assert kind not in kinds, f"please provide a `kind` of the following {kinds}"
+
+        assert kind in kinds, f"{kind} is invalid. Please provide a `kind` of the following {kinds}"
 
         #_f for final
-        mcs_ad_path = f'{self.wd_scrna}/{sample_name}.mcells.h5ad'
+        mcs_ad_path = f'{self.wd_mc}/{sample_name}.mcells.h5ad'
         mcs_fad_path = mcs_ad_path.replace('mcells', 'mcells_f')
 
         raw_scs_ad_path = mcs_ad_path.replace('mcells', 'raw_scells')
@@ -540,7 +546,197 @@ class Xp(db.Xp):
                 print(f'removing {i}')
                 os.system(f'rm {i}') 
         
+    def mc_clean_plots(self,
+              raw_adata: ad.AnnData, 
+              properly_sampled_min_cell_total: int|float, 
+              properly_sampled_max_cell_total: int|float,
+              properly_sampled_max_excluded_genes_fraction: int|float,
+              sample_name: str | None,
+              adata_workdir: None | str = None,
+              )-> None:
+        """
+        """
+        import metacells as mc
+
+        if adata_workdir is None:
+            adata_workdir=self.wd_mc
+
+
+        if sample_name is None:
+            sample_name =self.wd_mc
+
+        total_umis_of_cells = mc.ut.get_o_numpy(raw_adata, name='__x__', sum=True)
+        # fig total umis per cell histogram
+        fg = sns.displot(total_umis_of_cells, bins=800, aspect=3, element='step')
+        fg.ax.set(xlabel='UMIs', ylabel='Density', yticks=[])
+        fg.ax.axvline(x=properly_sampled_min_cell_total, color='darkgreen')
+        fg.ax.axvline(x=properly_sampled_max_cell_total, color='crimson')
+        fg.ax.set_xlim((100, 1e5))
+        fg.ax.set_title(f'{sample_name}')
+        fg.savefig(f'{adata_workdir}/{sample_name}_umi_dplot.png')
+
+        # fig total umis per cell histogram (log)
+        fg = sns.displot(total_umis_of_cells, bins=800, aspect=3, element='step')
+        fg.ax.set(xlabel='UMIs', ylabel='Density', yticks=[])
+        fg.ax.axvline(x=properly_sampled_min_cell_total, color='darkgreen')
+        fg.ax.axvline(x=properly_sampled_max_cell_total, color='crimson')
+        fg.ax.set_xlim((100, 1e5))
+        fg.ax.set_xscale('log')
+        fg.ax.set_title(f'{sample_name} x-log')
+        fg.savefig(f'{adata_workdir}/{sample_name}_umi_dlogplot.png')
+
+
+        # fig total umis of excluded genes
+        too_small_cells_count = sum(total_umis_of_cells < properly_sampled_min_cell_total)
+        too_large_cells_count = sum(total_umis_of_cells > properly_sampled_max_cell_total)
         
+        too_small_cells_percent = 100.0 * too_small_cells_count / len(total_umis_of_cells)
+        too_large_cells_percent = 100.0 * too_large_cells_count / len(total_umis_of_cells)
+        
+        print(f"Will exclude {too_small_cells_count} ({too_small_cells_percent:.2f}%)\
+                cells with less than {properly_sampled_min_cell_total} UMIs")
+
+        print(f"Will exclude {too_large_cells_count} ({too_large_cells_percent:.2f}%)\
+                cells with less than {properly_sampled_max_cell_total} UMIs")
+
+        excluded_genes_data = mc.tl.filter_data(raw_adata, var_masks=[f'&excluded_gene'])
+
+        if excluded_genes_data is not None:
+            excluded_genes_data = excluded_genes_data[0]
+            excluded_umis_of_cells = mc.ut.get_o_numpy(excluded_genes_data, name='__x__', sum=True)
+            excluded_fraction_of_umis_of_cells = excluded_umis_of_cells / total_umis_of_cells
+
+            too_excluded_cells_count = sum(excluded_fraction_of_umis_of_cells > properly_sampled_max_excluded_genes_fraction)
+            too_excluded_cells_percent = 100.0 * too_excluded_cells_count / len(total_umis_of_cells)
+            
+            print(f"Will exclude {too_excluded_cells_count} ({too_excluded_cells_percent}%)\
+                cells with less than {properly_sampled_max_excluded_genes_fraction * 100.0} UMIs")
+
+            fg = sns.displot(excluded_fraction_of_umis_of_cells + 1e-5,
+                    bins=200,
+                    aspect=3,
+                    element="step",
+                    color='orange',
+                    log_scale=(10,None))
+
+            fg.ax.set(xlabel="Fraction of excluded gene UMIs", ylabel='Density', yticks=[])
+            fg.ax.axvline(x=properly_sampled_max_excluded_genes_fraction, color='crimson')
+            fg.ax.set_title(f'{sample_name}')
+
+            print(f'{adata_workdir}/{sample_name}_fr_excluded.png')
+            fg.savefig(f'{adata_workdir}/{sample_name}_fr_excluded.png')
+        else:
+            excluded_fraction_of_umis_of_cells = 0
+        plt.show()
+
+    def mc_clean(
+        self,
+        sample_name:str|None=None, 
+        raw_adata:ad.AnnData|None=None, 
+        adata_workdir:str|None=None,
+        excluded_gene_patterns:Sequence=[], 
+        excluded_gene_names:Sequence|None=None, 
+        target_metacell_size=100,
+        suspect_gene_names = Sequence | None,
+        suspect_gene_patterns = Sequence | None,
+        manual_ban: Sequence | None=[],
+        lateral_modules: Sequence | None=None,
+        return_adatas=True, 
+        log_debug=False, 
+        explore=True, 
+        cpus = {'full':56, 'moderate':8},
+        mc_cpus_key='moderate',
+        var_cpus_key='moderate',
+        dpi=90,
+        properly_sampled_max_excluded_genes_fraction=0.03,
+        properly_sampled_min_cell_total=500,
+        properly_sampled_max_cell_total=20000,
+        force:bool=False,
+        random_seed=123456,
+        grid:bool=True,
+        max_parallel_piles=None,
+                    ):
+        '''
+
+        '''
+        import metacells as mc
+        import metacells.utilities.typing as utt
+
+        if raw_adata is None:
+            raw_adata = self.raw_adata
+
+        if sample_name is None:
+            sample_name = self.sample_id
+
+        if suspect_gene_names is None:
+            suspect_gene_names = self.suspect_gene_names
+
+        if suspect_gene_patterns is None:
+            suspect_gene_patterns = self.suspect_gene_patterns
+
+        print(f'mc2 v{mc.__version__}')
+
+        if log_debug:
+            import logging
+            mc.ut.setup_logger(level=logging.DEBUG)
+            print(np.show_config())
+
+        plt.rcParams['figure.dpi'] = dpi
+
+        # sanitize andata
+        utt.sum_duplicates(raw_adata.X)
+        utt.sort_indices(raw_adata.X)
+
+        mc.ut.set_name(raw_adata, sample_name)
+
+        if lateral_modules is None:
+            lateral_modules = []
+
+        if 'excluded_gene' in raw_adata.var.columns and not force:
+            print('This anndata does not look raw since some genes have been marked already as excluded, use force=True to start from scratch')
+            return raw_adata
+            
+        if excluded_gene_patterns is None:
+            excluded_gene_patterns = self.excluded_gene_patterns
+
+        if excluded_gene_names is None:
+            excluded_gene_names = self.excluded_gene_names
+
+        # .var gets masks: bursty_lonely_gene, properly_sampled_gene, excluded_gene
+        mc.pl.exclude_genes(
+            raw_adata, 
+            excluded_gene_patterns=excluded_gene_patterns,
+            excluded_gene_names=excluded_gene_names,
+            random_seed=random_seed)
+
+        # .obs gets masks properly_sampled_cell, excluded_cell 
+        mc.pl.exclude_cells(
+            raw_adata, 
+            properly_sampled_min_cell_total=properly_sampled_min_cell_total, 
+            properly_sampled_max_cell_total=properly_sampled_max_cell_total, 
+            properly_sampled_max_excluded_genes_fraction=properly_sampled_max_excluded_genes_fraction)
+        
+        if 'mc_clean' in raw_adata.uns and not force:
+            print('This anndata has the "mc_clean" token, use force=True to start from scratch')
+            return raw_adata
+
+        ##### 
+        self.mc_clean_plots(raw_adata, 
+                            properly_sampled_min_cell_total, 
+                            properly_sampled_max_cell_total, 
+                            properly_sampled_max_excluded_genes_fraction,
+                            sample_name)
+        #####
+        raw_adata.uns['mc_clean'] = True
+        clean = mc.pl.extract_clean_data(raw_adata, name=f"{sample_name}.iteration-1.clean")
+        ###
+        # save anndatas
+        raw_adata.write_h5ad(self.default_raw_h5ad)
+        clean.write_h5ad(self.default_clean_h5ad)
+
+        raw_adata = None  
+
+
     @wraps(ut.sc.metacellize)
     def do_mc(
         self,
@@ -580,11 +776,11 @@ class Xp(db.Xp):
                 self.init_adata(force)
 
             res = ut.sc.metacellize(
-                    set_name=sample_name,
+                    sample_name=sample_name,
                     adata=adata if adata is not None else self.raw_adata, 
-                    adata_workdir=self.wd_scrna,
-                    explore = explore,
-                    force = force,
+                    adata_workdir=self.wd_mc,
+                    explore=explore,
+                    force=force,
                     max_parallel_piles=max_parallel_piles,
                     *args,
                     **kwargs
