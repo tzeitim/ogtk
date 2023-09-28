@@ -23,6 +23,9 @@ class Xp():
 
         if "xp_template" in vars(self):
             self.consolidate_conf()
+
+        if 'gene_conf_fn' in vars(self):
+            self.__init_genes()
     
     def __str__(self):
         return '\n'.join([f'{i}:\t{ii}' for i,ii in self.__rich_repr__()])
@@ -30,6 +33,13 @@ class Xp():
     def __rich_repr__(self):
         for k,v in vars(self).items():
             yield k,v
+
+    def __init_genes(self):
+        ''' import a pre-defined set of genes and gene_conf
+        '''
+        conf_dict = yaml.load(open(self.gene_conf_fn), Loader=yaml.FullLoader)
+        for k,v in conf_dict.items():
+            setattr(self, k, v)
         
     def to_pl(self): 
         ''' Manually sanitize the vars() dictionary for direct coversion to a polars object
