@@ -1,25 +1,27 @@
 from ogtk.utils import db
 from ogtk.ltr.shltr import cluster
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
 import seaborn as sns
 import ogtk.utils as ut
 import ogtk.ltr.shltr as shltr
 import numpy as np
 import scanpy as sc
-from typing import Sequence,Optional,Iterable
+from typing import Sequence,Optional,Iterable,List
 import polars as pl
+import metacells as mc
 import anndata as ad
 import os
 from functools import wraps
 from pyaml import yaml
+import cassiopeia as cas
 
 
-def _cassit(exp, alleles, clusters= [-1, 1, 2],
+def _cassit(exp, alleles, clusters=List,
     allele_rep_thresh = 0.9,
            ):
     '''
     '''
-    import cassiopeia as cas
     import pandas as pd
     import tempfile
     import os
@@ -226,8 +228,17 @@ class Xp(db.Xp):
         if 'is_chimera' not in vars(self).keys():
             self.is_chimera = False
         # paths
-        self.default_raw_h5ad = f"{self.wd_mc}/{self.sample_id}.full.h5ad"
-        self.default_clean_h5ad = f"{self.wd_mc}/{self.sample_id}.clean.h5ad"
+        self.path_mcs_h5ad = f'{self.wd_mc}/{self.sample_id}.mcells.h5ad'
+        self.path_raw_h5ad = f"{self.wd_mc}/{self.sample_id}.full.h5ad"
+        self.path_clean_h5ad = f"{self.wd_mc}/{self.sample_id}.clean.h5ad"
+        self.path_iterationx_h5ad = f"{self.wd_mc}/{self.sample_id}.iteration-XXX.h5ad"
+        self.path_final_h5ad = self.path_iterationx_h5ad.replace('iteration-XXX', 'final')
+
+        # mc ann
+        self.mc_colormap = None
+
+        # lineage
+        self.tree:None|cas.data.CassiopeiaTree.CassiopeiaTree = None
 
     def init_wd(self):
         '''
@@ -281,15 +292,15 @@ class Xp(db.Xp):
 
     def load_guide_molecules(
             self,
-            clone,
-            sample_id = None,
-            suffix = 'shrna',
-            pattern: str|None=None,
-            min_reads = 2,
+            clone:str,
+            sample_id:str|None = None,
+            suffix:str = 'shrna',
+            pattern:str|None=None,
+            min_reads:int = 2,
             valid_ibars = None,
             downsample = None,
-            use_cache = True,
-            corr_dir_fn=None,
+            use_cache:bool = True,
+            corr_dir_fn:str|None=None,
             filter_valid_cells=False):
         ''' Returns data frame at the molecule level
 
@@ -323,7 +334,7 @@ class Xp(db.Xp):
                 clone=clone)
 
         if filter_valid_cells:
-            self.load_final_ad()
+            self.load_latest_ad()
             df = df.filter(pl.col('cbc').is_in(self.scs.obs.index.to_list()))
 
         return(df)
@@ -380,7 +391,8 @@ class Xp(db.Xp):
         ibar_ann = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_clusters.parquet' if ibar_ann is None else ibar_ann
 
         dfc = (pl.scan_parquet(ibar_ann)
-                .collect()
+               .drop('clone')
+               .collect()
             )
 
         dfc = (mols.join(
@@ -406,7 +418,9 @@ class Xp(db.Xp):
             return None
 
         if self.raw_adata is None or force:
-            # TODO check if there is as previous instance of the anndatas if 
+            # TODO check if there is a previous instance of the anndatas if 
+            if os.path.exists(self.path_raw_h5ad) and not force:
+                self.raw_adata = ad.read_h5ad(self.path_raw_h5ad)
             self.raw_adata = self.load_10_mtx()
             return None
 
@@ -457,7 +471,13 @@ class Xp(db.Xp):
                     how='left')
         )
 
-    def init_object(self, sample_name: str| None= None, uiport=7777, skip_mols=False, min_reads_per_mol: int=2,):
+    def init_object(self,
+        sample_name: str| None= None,
+        uiport=7777,
+        skip_mols=False,
+        min_reads_per_mol: int=2,
+        forced_pattern:str|None=None,
+)->None:
         ''' Main function to load full experiment object
         '''
         if sample_name is None:
@@ -468,31 +488,58 @@ class Xp(db.Xp):
         if 'pp' in vars(self):
             db.run_cranger(self, localcores=75, uiport=uiport)
 
-        res = self.load_final_ad()
+        res = self.load_latest_ad(forced_pattern=forced_pattern)
 
         if self.tabulate is not None:
             db.tabulate_xp(self)
 
-
         if not skip_mols:
             self.init_mols(valid_ibars = self.default_ibars(), clone=self.clone, min_reads=min_reads_per_mol)
 
-    def load_final_ad(self):
-        ''' Loads final version of mcs and scs adatas
+    def load_latest_ad(self, forced_pattern:str|None=None):
+        ''' Loads latest version of mcs and scs adatas
+        #TODO add option to fetch a specific one
         ''' 
-        mcs_fad_path = self.return_path('mcs_ad_path')
-        scs_fad_path = self.return_path('scs_ad_path')
-        
-        if os.path.exists(mcs_fad_path) and os.path.exists(scs_fad_path):
-            self.print(f'loading final adatas:\n{mcs_fad_path}\n{scs_fad_path}', 'bold white')
-            self.mcs = ad.read_h5ad(mcs_fad_path)
+        # check for pre-cleaned cells
+        if os.path.exists(self.path_clean_h5ad):
+            print(f"found {self.path_clean_h5ad}")
+            scs_fad_path = self.path_clean_h5ad
             self.scs = ad.read_h5ad(scs_fad_path)
-            return 0
 
+        if forced_pattern is None:
+            # check for final h5ad, else get latest, else get raw
+            if os.path.exists(self.path_final_h5ad):
+                mcs_fad_path = self.path_final_h5ad
+            else:
+                iteration_paths = sorted(ut.sfind(self.wd_mc, "*iteration*.h5ad"))
+                if len(iteration_paths)==0:
+                    mcs_fad_path = self.path_raw_h5ad
+                    self.print(f'No final adatas found for metacells', 'bold #ff0000', force = True)
+                    return 1
+                else:
+                    # get latest iteration
+                    mcs_fad_path = iteration_paths[-1]
         else:
-            self.print(f'No final adatas found, compute them manually using .do_mc(explore=True), select best parameters and re-run .do_mc(explore=False)', 'bold #ff0000', force = True)
-            return 1
-            raise ValueError 
+            forced_paths = ut.sfind(self.wd_mc, f"*{forced_pattern}*.h5ad")
+            if len(forced_paths) ==1:
+                mcs_fad_path = forced_paths[0]
+            elif len(forced_paths) == 0:
+                # no match
+                raise ValueError("No files match the provided {forced_pattern=}")
+                return 1
+            elif len(forced_paths) >1:
+                # error there are many options
+                raise ValueError("Many files matched the {forced_pattern=}")
+                return 1
+        
+        self.print(f'loading final adatas:\n{mcs_fad_path}\n{scs_fad_path}', 'bold white')
+        self.mcs = ad.read_h5ad(mcs_fad_path)
+        return 0
+
+        #else:
+        #    self.print(f'No final adatas found, compute them manually using .do_mc(explore=True), select best parameters and re-run .do_mc(explore=False)', 'bold #ff0000', force = True)
+        #    return 1
+        #    raise ValueError 
 
     def save_final_ad(self, sample_name):
         '''
@@ -505,20 +552,23 @@ class Xp(db.Xp):
         self.mcs.write_h5ad(mcs_fad_path)
         self.scs.write_h5ad(scs_fad_path)
 
-    def return_path(self, kind: str, sample_name:str|None=None, suffix=None):
+    def return_path(self, kind:str, sample_name:str|None=None, suffix=None):
         """ returns a standardized path for a given `kind` of file.
-            kinds are self contained variables that define the dataset to return the path to (needs improvement)
-            e.g. mcs_ad_path, mcs_fad_path, raw_scs_ad_path, clean_scs_ad_path, scs_ad_path, scs_fad_path, otl_ad_path
+            kinds are local variables that define the dataset to return the path to (needs improvement)
+            e.g. mols, mcs_ad_path, mcs_fad_path, raw_scs_ad_path, clean_scs_ad_path, 
+            scs_ad_path, scs_fad_path, otl_ad_path
+
+        f"{sample_name}.iteration-1.clean"
         """
         if sample_name is None:
             sample_name = self.sample_id
 
-        kinds="mcs_ad_path,mcs_fad_path,raw_scs_ad_path,clean_scs_ad_path,scs_ad_path,scs_fad_path,otl_ad_path".split(',')
+        kinds="mols,mcs_ad_path,mcs_fad_path,raw_scs_ad_path,clean_scs_ad_path,scs_ad_path,scs_fad_path,otl_ad_path".split(',')
 
         assert kind in kinds, f"{kind} is invalid. Please provide a `kind` of the following {kinds}"
 
         #_f for final
-        mcs_ad_path = f'{self.wd_mc}/{sample_name}.mcells.h5ad'
+        mcs_ad_path = self.path_mcs_h5ad 
         mcs_fad_path = mcs_ad_path.replace('mcells', 'mcells_f')
 
         raw_scs_ad_path = mcs_ad_path.replace('mcells', 'raw_scells')
@@ -556,7 +606,6 @@ class Xp(db.Xp):
               )-> None:
         """
         """
-        import metacells as mc
 
         if adata_workdir is None:
             adata_workdir=self.wd_mc
@@ -609,7 +658,7 @@ class Xp(db.Xp):
             too_excluded_cells_count = sum(excluded_fraction_of_umis_of_cells > properly_sampled_max_excluded_genes_fraction)
             too_excluded_cells_percent = 100.0 * too_excluded_cells_count / len(total_umis_of_cells)
             
-            print(f"Will exclude {too_excluded_cells_count} ({too_excluded_cells_percent}%)\
+            print(f"Will exclude {too_excluded_cells_count} ({too_excluded_cells_percent:.2f}%)\
                 cells with less than {properly_sampled_max_excluded_genes_fraction * 100.0} UMIs")
 
             fg = sns.displot(excluded_fraction_of_umis_of_cells + 1e-5,
@@ -633,10 +682,8 @@ class Xp(db.Xp):
         self,
         sample_name:str|None=None, 
         raw_adata:ad.AnnData|None=None, 
-        adata_workdir:str|None=None,
-        excluded_gene_patterns:Sequence=[], 
+        excluded_gene_patterns:Sequence|None=None, 
         excluded_gene_names:Sequence|None=None, 
-        target_metacell_size=100,
         suspect_gene_names = Sequence | None,
         suspect_gene_patterns = Sequence | None,
         manual_ban: Sequence | None=[],
@@ -659,7 +706,6 @@ class Xp(db.Xp):
         '''
 
         '''
-        import metacells as mc
         import metacells.utilities.typing as utt
 
         if raw_adata is None:
@@ -731,11 +777,27 @@ class Xp(db.Xp):
         clean = mc.pl.extract_clean_data(raw_adata, name=f"{sample_name}.iteration-1.clean")
         ###
         # save anndatas
-        raw_adata.write_h5ad(self.default_raw_h5ad)
-        clean.write_h5ad(self.default_clean_h5ad)
+        raw_adata.write_h5ad(self.path_raw_h5ad)
+        clean.write_h5ad(self.path_clean_h5ad)
 
+        print(f"Saved {self.path_raw_h5ad}")
+        print(f"Saved {self.path_clean_h5ad}")
+
+        self.scs = clean
         raw_adata = None  
 
+    @wraps(ut.sc.mc_relate_to_lateral_genes)
+    def mc_relate_to_lateral_genes(self, force:bool=False, *args, **kwargs):
+        ut.sc.mc_relate_to_lateral_genes(self.scs, force, *args, **kwargs)
+
+    @wraps(ut.sc.mc_update_lateral_genes)
+    def mc_update_lateral_genes(self, *args, **kwargs):
+        ut.sc.mc_update_lateral_genes(cells=self.scs, *args, **kwargs)
+
+    @wraps(ut.sc.mc_compute_lateral_module_similarity)
+
+    def mc_compute_lateral_module_similarity(self, *args, **kwargs):
+      self.similarity_of_modules =  ut.sc.mc_compute_lateral_module_similarity(cells=self.scs, *args, **kwargs) 
 
     @wraps(ut.sc.metacellize)
     def do_mc(
@@ -812,13 +874,16 @@ class Xp(db.Xp):
         self.mcs = mcs
         self.metadata = metadata
        
-        self.save_final_ad(sample_name)
+        self.scs.write_h5ad(self.path_clean_h5ad)
+        self.mcs.write_h5ad(self.path_iterationx_h5ad.replace('XXX', '1'))
+        #self.save_final_ad(sample_name)
 
     @wraps(shltr.sc.allele_calling)
     def init_alleles(self, 
                      suffix='shrna',
                      expr:None|pl.Expr=None,
                      valid_ibars:Sequence|None=None,
+                     ann_source:str|None=None,
                      *args,
                      **kwargs):
         if valid_ibars is None:
@@ -865,6 +930,8 @@ class Xp(db.Xp):
 
             self.scs.obs['cs'] = np.log10(self.scs.obs['g10']/self.scs.obs['h1'])
 
+        if ann_source is not None:
+            self.annotate_alleles(source)
 
     @wraps(shltr.sc.to_matlin)
     def init_matlin(self, do_cluster = False, sort_by=['cluster', 'raw_ibar'], cells= 100, cores=4, *args, **kwargs):
@@ -905,8 +972,6 @@ class Xp(db.Xp):
             self.print('This experiment seems to be have ingested others. No need to ingest unless force=True')
             return None
 
-
-
         adatas = [i.scs for i in xps]
         
         adata = ad.concat(adatas, join='outer', label='batch_id', index_unique="_")
@@ -919,7 +984,7 @@ class Xp(db.Xp):
         self.batch_map = batch_map
         assert len(batch_map) == len(adata.obs.sample_id.unique()), "It seems that one or more batches are duplicated"
 
-        self.raw_adata = adata
+        self.adata = adata
         self.batch_map = batch_map
         self.conf_keys.append('batch_map')
 
@@ -964,6 +1029,44 @@ class Xp(db.Xp):
     @wraps(_cassit)
     def cassit(self, *arg, **kwargs):
         _cassit(self, *arg, **kwargs)
+
+    @wraps(_cas_return_colors)
+    def return_allele_colors(self):
+        _cas_return_colors(self.tree.clone_allele_table)
+
+    def load_mc_ann(self, source):
+        ''' Loads MCView-exported metacell annotation and creates a color map based on the MCView annotation
+        Populates the experiment's:
+         - .mc_ann
+         - .mc_color_dict
+         - .mc_colormap 
+
+         It additionally registers .mc_colormap into matplotlib's cmap registry
+        '''
+        self.mc_ann = pl.read_csv(source, null_values=['NA'])
+        self.mc_color_dict = (self.mc_ann[:, ['cell_type', 'color']]
+                              .unique()
+                              .sort('cell_type')
+                              .to_pandas()
+                              .set_index('color')
+                              .to_dict()['cell_type']
+                              )
+        if self.mc_colormap is not None:
+            plt.colormaps.unregister('mc_colormap')
+
+        self.mc_colormap = ListedColormap(self.mc_color_dict.keys())
+        plt.colormaps.register(name='mc_colormap', cmap=self.mc_colormap, force=True)
+
+    def annotate_alleles(self, source:str|None=None):
+        ''' 
+        '''
+        if source is not None:
+            self.load_mc_ann(source)
+
+        if source is None and self.mc_ann is None:
+            raise ValueError("Load an MCView annotation first using `.load_mc_ann`")
+        self.salleles = self.salleles.with_columns(pl.col('metacell_name').cast(pl.Utf8()))
+        self.salleles = self.salleles.join(self.mc_ann, left_on='metacell_name', right_on='metacell', how='left')
 
     def lineage_analysis(
             self,
