@@ -67,7 +67,7 @@ class SGE_JOB:
             job_file.write(self.filled_job)
 
         # Submit the job using SSH
-        ssh_command = ["ssh", f"{sge_conf.user}@{sge_conf.host}", "qsub", job_script_path]
+        ssh_command = ["ssh", f"{self.sge_conf.user}@{self.sge_conf.host}", "qsub", job_script_path]
         ssh_result = subprocess.run(ssh_command, check=True, capture_output=True)
         job_submitted_id = ssh_result.stdout.decode().strip()
         return job_submitted_id
@@ -86,7 +86,7 @@ class SGE_JOB:
         print('}')
 
     def qstat(self, times=10, sleep=1):
-        ssh_cmd = ["ssh", f"{sge_conf.user}@{sge_conf.host}", f"for i in {{1..{times}}}; do qstat; sleep {sleep}; done"]
+        ssh_cmd = ["ssh", f"{self.sge_conf.user}@{self.sge_conf.host}", f"for i in {{1..{times}}}; do qstat; sleep {sleep}; done"]
         process = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE)
 
         while True:
