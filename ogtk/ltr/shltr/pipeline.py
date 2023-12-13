@@ -7,6 +7,7 @@ import ogtk.utils as ut
 import ogtk.ltr.shltr as shltr
 import numpy as np
 import scanpy as sc
+import subprocess
 from typing import Sequence,Optional,Iterable,List
 import polars as pl
 import metacells as mc
@@ -17,15 +18,48 @@ from pyaml import yaml
 import cassiopeia as cas
 
 
-def _cassit(exp, alleles, clusters=List,
-    allele_rep_thresh = 0.9,
-           ):
+def _check_required_attributes(self, case):
+    """
+    Check if the required attributes for a specific case are present in the instance.
+
+    Args:
+        case (str): The case for which to check the required attributes. Supported cases
+                    include 'scvi_solo', 'cellbender', 'scvi'.
+
+    Raises:
+        AttributeError: If any required attribute for the specified case is missing.
+    """
+
+    attribute_sets = {
+        "scvi_solo": ["path_scvi_solo_sh", "path_scvi_solo_sge", "wd_sge"],
+        "cellbender": ["cellbender_attribute_1", "cellbender_attribute_2"],
+        "scvi": ["scvi_attribute_1", "scvi_attribute_2"]
+    }
+
+    # Select the required attributes based on the case
+    required_attrs = attribute_sets.get(case)
+
+    if not required_attrs:
+        raise ValueError(f"Unsupported case '{case}'. Supported cases are: {', '.join(attribute_sets.keys())}")
+
+    for attr in required_attrs:
+        if not hasattr(self, attr):
+            raise AttributeError(f"experiment not configured for '{case}'. Add '{attr}' to the experiment's template")
+    return True
+
+
+def _cassit(exp, 
+            alleles, 
+            clusters=List, 
+            allele_rep_thresh = 0.9,
+            solver:str='vanilla',
+            collapse_mutationless_edges=False,
+) -> None:
     '''
+    - expects a filtered allele table, e.g. no further decisions are made at the allele level
     '''
     import pandas as pd
     import tempfile
-    import os
-    import numpy as np
 
     cas_dict = {
             'cbc':'cellBC',
@@ -36,23 +70,25 @@ def _cassit(exp, alleles, clusters=List,
             'umi_reads':'readCount',
             'umis_allele':'UMI',
            }
-    
+
+    if 'cellBC' in alleles:
+        alleles = alleles.drop('cellBC')
+
     pallele_table = (alleles
          #   .filter(pl.col('valid_ibar'))
             .drop('valid_ibar')
             .rename(cas_dict)
-            .filter(pl.col('UMI')>1)
-           )
+   )
 
     allele_table = (
-                    pallele_table
-                    .with_columns(
-                        pl.when(pl.col('wt'))
-                        .then('NONE')
-                        .otherwise(pl.col('r1'))
-                        .alias('r1'))
-                    .to_pandas()
-                    )
+            pallele_table
+            .with_columns(
+                pl.when(pl.col('wt'))
+                .then('NONE')
+                .otherwise(pl.col('r1'))
+                .alias('r1'))
+            .to_pandas()
+    )
 
     indel_priors = cas.pp.compute_empirical_indel_priors(
             allele_table, 
@@ -71,6 +107,7 @@ def _cassit(exp, alleles, clusters=List,
                'UMI': 'sum', 
                'sampleID': 'unique', 
                'metacell_name':'unique'} 
+
     cell_meta = clone_allele_table.groupby('cellBC').agg(agg_dict)
     cell_meta['sampleID'] = [x[0] for x in cell_meta['sampleID']]
     cell_meta['metacell_name'] = [x[0] for x in cell_meta['metacell_name']]
@@ -85,17 +122,88 @@ def _cassit(exp, alleles, clusters=List,
     cas_tree.cell_meta = cell_meta
     cas_tree.character_meta = character_meta
     
-    vanilla = True
-    if vanilla:
+    if solver == 'vanilla':
         # create a basic vanilla greedy solver
         vanilla_greedy = cas.solver.VanillaGreedySolver()
-
         # reconstruct the tree
         vanilla_greedy.solve(cas_tree, collapse_mutationless_edges=True)
+
+    if solver == 'ilp':
+        ilp_solver = cas.solver.ILPSolver(convergence_time_limit=500, 
+                                        maximum_potential_graph_layer_size=500, 
+                                        weighted=True, 
+                                        seed=1234)
+        ilp_solver.solve(cas_tree)
+
+    if solver == 'hybrid':
+        vanilla_greedy = cas.solver.VanillaGreedySolver()
+
+        ilp_solver = cas.solver.ILPSolver(convergence_time_limit=500, 
+                                          maximum_potential_graph_layer_size=500, 
+                                          weighted=True, 
+                                          seed=1234)
+
+        hybrid_solver = cas.solver.HybridSolver(top_solver=vanilla_greedy, 
+                                                bottom_solver=ilp_solver, 
+                                                cell_cutoff=40, 
+                                                threads=10)
+        hybrid_solver.solve(cas_tree, logfile=f'{exp.path_trees}/example_hybrid.log')
+
+    if solver == 'nj':
+        nj_solver = cas.solver.NeighborJoiningSolver(
+                dissimilarity_function=cas.solver.dissimilarity.weighted_hamming_distance, 
+                add_root=True)
+        nj_solver.solve(cas_tree, collapse_mutationless_edges=collapse_mutationless_edges)
 
     exp.tree = cas_tree
     exp.tree.clone_allele_table = clone_allele_table
     exp.tree.indel_to_char = state_2_indel
+
+    # annotate cell metadata with single-cell data from anndata
+    # this might include the metacell already
+
+    column_iset = list(set(exp.tree.cell_meta.columns).difference(exp.scs.obs.columns))
+
+    exp.tree.cell_meta = (
+            exp.tree.cell_meta.loc[:, column_iset].merge(
+                exp.scs.obs,
+                left_index=True,
+                right_index=True, 
+                how='left')
+            )
+
+    if exp.mc_ann is not None:
+        _cas_annotate_mc(exp.tree.cell_meta, mc_ann=exp.mc_ann)
+
+def _cas_update_mc_ann(exp, mc_ann: pl.DataFrame):
+    exp.load_mc_ann(mc_ann)
+    exp.tree.cell_meta = _cas_annotate_mc(exp.tree.cell_meta, mc_ann=exp.mc_ann)
+
+def _cas_annotate_mc(cell_meta, mc_ann: pl.DataFrame, 
+                     left_on='metacell_name', 
+                     right_on='metacell'):
+    ''' Annotates a cassiopeia tree cell metadata with a meta cell annotation from MCview
+    '''
+    column_iset = list(set(cell_meta.columns).intersection(mc_ann.columns))
+    
+    if left_on in column_iset:
+        column_iset.remove(left_on)
+        
+    cell_meta = cell_meta.loc[:, cell_meta.columns.difference(column_iset)]
+
+    cell_meta =(
+            cell_meta.reset_index()
+            .merge(
+                mc_ann.to_pandas(),
+                left_on=left_on,
+                right_on=right_on,
+                how='left')
+            )
+
+    cell_meta['cell_type'] = cell_meta['cell_type'].astype(str)
+    cell_meta = cell_meta.set_index('cellBC')
+
+    return cell_meta
 
 def _cas_return_colors(clone_allele_table, csp='hsv', do_plot=False):
     '''
@@ -228,11 +336,14 @@ class Xp(db.Xp):
         if 'is_chimera' not in vars(self).keys():
             self.is_chimera = False
         # paths
-        self.path_mcs_h5ad = f'{self.wd_mc}/{self.sample_id}.mcells.h5ad'
-        self.path_raw_h5ad = f"{self.wd_mc}/{self.sample_id}.full.h5ad"
-        self.path_clean_h5ad = f"{self.wd_mc}/{self.sample_id}.clean.h5ad"
-        self.path_iterationx_h5ad = f"{self.wd_mc}/{self.sample_id}.iteration-XXX.h5ad"
+        self.path_mcs_h5ad = f'{self.wd_mc}/{self.sample_id}.mcells.h5ad' # pyright: ignore
+        self.path_raw_h5ad = f"{self.wd_mc}/{self.sample_id}.full.h5ad" # pyright: ignore
+        self.path_clean_h5ad = f"{self.wd_mc}/{self.sample_id}.clean.h5ad" # pyright: ignore
+        self.path_iterationx_h5ad = f"{self.wd_mc}/{self.sample_id}.iteration-XXX.h5ad" # pyright: ignore
         self.path_final_h5ad = self.path_iterationx_h5ad.replace('iteration-XXX', 'final')
+        self.path_trees = f'{self.wd_cas}' # pyright: ignore
+
+        self.path_cr_outs = f'{self.wd_scrna}/{self.sample_id}/outs/'
 
         # mc ann
         self.mc_colormap = None
@@ -263,11 +374,10 @@ class Xp(db.Xp):
         adata.var_names_make_unique()
         return(adata)
 
-
     def load_10_mtx(self, cache = True, batch = None):
         ''' Loads the corresponding 10x matrix for a given experiment
         '''
-        matrix_dir = f'{self.wd_scrna}/{self.sample_id}/outs/filtered_feature_bc_matrix/'
+        matrix_dir = f'{self.path_cr_outs}/filtered_feature_bc_matrix/'
         self.print(f"importing matrix from:\n {matrix_dir}")
 
         adata = sc.read_10x_mtx(matrix_dir,
@@ -280,6 +390,7 @@ class Xp(db.Xp):
 
         adata.obs['sample_id'] = batch
         return(adata)
+
 
     def list_guide_tables(self,  suffix = 'shrna'):
         ''' Returns the file names of the available guide reads
@@ -426,6 +537,41 @@ class Xp(db.Xp):
 
 
 
+    def run_scvi_solo(self, min_counts=800, min_cells_gene=3):
+        
+        self.is_supported('scvi_solo')
+
+        sge_conf = ut.sge.SGE_CONF(user='polivar', host='max-login2')
+
+        job = ut.sge.SGE_JOB(
+             job_template_path = self.path_scvi_solo_sge, 
+             id = self.sample_id,
+             wd = self.wd_sge, 
+             sge_conf=sge_conf,
+             console=self.console)
+
+        job.fill_job_template({
+            'SCRIPT': 'run_scvi_solo.py', 
+            'INPUT_H5': f'raw_feature_bc_matrix.h5', 
+            'MIN_COUNTS': str(min_counts), 
+            'MIN_CELLS': str(min_cells_gene), 
+        })
+
+        files = [f'{self.path_cr_outs}/raw_feature_bc_matrix.h5', 
+                 self.path_scvi_solo_sh]
+        # TODO capture output
+        job.submit_job(files=files)
+        self.job_scvi_solo = job
+        # TODO keep job object as an element in a dictionary
+        # TODO get output?
+
+        expected_files = [f'{self.wd_sge}/adata_scvi_solo.h5ad']
+        
+        for file in expected_files:
+            subprocess.run(["rsync", file, self.path_raw_h5ad], check=True)
+
+        self.raw_adata = sc.read_h5ad(f'{self.wd_sge}/adata_scvi_solo.h5ad')
+
 
     @wraps(db.run_bcl2fq)
     def demux(self, *args, **kwargs):
@@ -438,7 +584,7 @@ class Xp(db.Xp):
         ''' cell ranger wrapper
         '''
         db.run_cranger(self, *args, **kwargs)
-
+    
     @wraps(shltr.sc.compute_clonal_composition)
     def score_clone(self, min_cell_size=0, *args, **kwargs):
         ''' Compute clonal composition 
@@ -883,7 +1029,7 @@ class Xp(db.Xp):
                      suffix='shrna',
                      expr:None|pl.Expr=None,
                      valid_ibars:Sequence|None=None,
-                     ann_source:str|None=None,
+                     ann_source:str|None|pl.DataFrame=None,
                      *args,
                      **kwargs):
         if valid_ibars is None:
@@ -898,8 +1044,7 @@ class Xp(db.Xp):
         
         # add mask for valid ibars
         alleles = (alleles
-                        .with_columns(pl.col('raw_ibar').is_in(valid_ibars)
-                            .alias('valid_ibar'))
+                        .with_columns(pl.col('raw_ibar').is_in(valid_ibars).alias('valid_ibar'))
                         .sort(['cluster', 'raw_ibar'])
                         )
 
@@ -924,14 +1069,15 @@ class Xp(db.Xp):
         setattr(self, suffix[0]+'alleles', alleles)
         if self.is_chimera:
             # TODO clean this block, e.g. log2 or 10?
-            import numpy as np
+            # the chimera flag should be complemented by the definition of which clones comprise it
+            # and its corresponding annotation functions, e.g. fiels h1 and g10 in the following lines
             self.salleles = self.salleles.with_columns((pl.col('h1')/pl.col('g10')).log(base=10).alias('cs'))
             self.salleles = self.salleles.with_columns(pl.col(pl.Categorical).cast(pl.Utf8))
 
             self.scs.obs['cs'] = np.log10(self.scs.obs['g10']/self.scs.obs['h1'])
 
         if ann_source is not None:
-            self.annotate_alleles(source)
+            self.annotate_alleles(ann_source)
 
     @wraps(shltr.sc.to_matlin)
     def init_matlin(self, do_cluster = False, sort_by=['cluster', 'raw_ibar'], cells= 100, cores=4, *args, **kwargs):
@@ -1034,7 +1180,11 @@ class Xp(db.Xp):
     def return_allele_colors(self):
         _cas_return_colors(self.tree.clone_allele_table)
 
-    def load_mc_ann(self, source):
+    @wraps(_cas_update_mc_ann)
+    def tree_update_mc_ann(self, mc_ann: pl.DataFrame):
+        _cas_update_mc_ann(self, mc_ann)
+
+    def load_mc_ann(self, source: str|pl.DataFrame):
         ''' Loads MCView-exported metacell annotation and creates a color map based on the MCView annotation
         Populates the experiment's:
          - .mc_ann
@@ -1043,7 +1193,12 @@ class Xp(db.Xp):
 
          It additionally registers .mc_colormap into matplotlib's cmap registry
         '''
-        self.mc_ann = pl.read_csv(source, null_values=['NA'])
+        match source:
+            case pl.DataFrame():
+                self.mc_ann = source
+            case str():
+                self.mc_ann = pl.read_csv(source, null_values=['NA'])
+
         self.mc_color_dict = (self.mc_ann[:, ['cell_type', 'color']]
                               .unique()
                               .sort('cell_type')
@@ -1051,6 +1206,7 @@ class Xp(db.Xp):
                               .set_index('color')
                               .to_dict()['cell_type']
                               )
+
         if self.mc_colormap is not None:
             plt.colormaps.unregister('mc_colormap')
 
@@ -1065,6 +1221,7 @@ class Xp(db.Xp):
 
         if source is None and self.mc_ann is None:
             raise ValueError("Load an MCView annotation first using `.load_mc_ann`")
+
         self.salleles = self.salleles.with_columns(pl.col('metacell_name').cast(pl.Utf8()))
         self.salleles = self.salleles.join(self.mc_ann, left_on='metacell_name', right_on='metacell', how='left')
 
@@ -1104,7 +1261,12 @@ class Xp(db.Xp):
         return exp
 
 
+    @wraps(_check_required_attributes)
+    def is_supported(self, case):
+        return _check_required_attributes(self, case)
 
 @wraps(db.print_template)
 def print_template(*args, **kwargs):
     db.print_template(*args, **kwargs)
+
+
