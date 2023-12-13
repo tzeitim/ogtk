@@ -13,6 +13,7 @@ import polars as pl
 import metacells as mc
 import anndata as ad
 import os
+import time
 from functools import wraps
 from pyaml import yaml
 import cassiopeia as cas
@@ -537,18 +538,20 @@ class Xp(db.Xp):
 
 
 
-    def run_scvi_solo(self, min_counts=800, min_cells_gene=3):
+    def run_scvi_solo(self, min_counts=800, min_cells_gene=3, force=False, wait_time=30, timeout=1000, use_console=False):
         
         self.is_supported('scvi_solo')
 
         sge_conf = ut.sge.SGE_CONF(user='polivar', host='max-login2')
 
-        job = ut.sge.SGE_JOB(
+        self.job_scvi_solo = ut.sge.SGE_JOB(
              job_template_path = self.path_scvi_solo_sge, 
              id = self.sample_id,
              wd = self.wd_sge, 
              sge_conf=sge_conf,
              console=self.console)
+
+        job = self.job_scvi_solo
 
         job.fill_job_template({
             'SCRIPT': 'run_scvi_solo.py', 
@@ -556,21 +559,44 @@ class Xp(db.Xp):
             'MIN_COUNTS': str(min_counts), 
             'MIN_CELLS': str(min_cells_gene), 
         })
+        
 
-        files = [f'{self.path_cr_outs}/raw_feature_bc_matrix.h5', 
-                 self.path_scvi_solo_sh]
-        # TODO capture output
+        done_file = f'{job.wd}/adata_scvi_solo.h5ad'
+
+        if os.path.exists(done_file):
+            if force:
+                print('Removed')
+                os.remove(done_file)
+            else:
+                print(f"Change force=True to re-run")
+                return
+
+        files = [
+                f'{self.path_cr_outs}/raw_feature_bc_matrix.h5', 
+                 self.path_scvi_solo_sh
+                 ]
+
+        job.set_use_console(use_console)
         job.submit_job(files=files)
-        self.job_scvi_solo = job
-        # TODO keep job object as an element in a dictionary
-        # TODO get output?
+                
+        start_time = time.time()
+        while not os.path.exists(done_file):
+            if timeout is not None and time.time() - start_time > timeout:
+                print("Timeout reached, file not found.")
+                break
 
-        expected_files = [f'{self.wd_sge}/adata_scvi_solo.h5ad']
+            print(f"Waiting for job {job.id} to finish")
+            job.qstat(times=1, sleep=wait_time)
+
+        expected_files = [done_file]
         
         for file in expected_files:
-            subprocess.run(["rsync", file, self.path_raw_h5ad], check=True)
+            cmd = ["rsync", file, self.path_raw_h5ad]
+            subprocess.run(cmd, check=True)
 
-        self.raw_adata = sc.read_h5ad(f'{self.wd_sge}/adata_scvi_solo.h5ad')
+        self.raw_adata = sc.read_h5ad(self.path_raw_h5ad)
+        self.print(f"Populated .raw_adata with doublet-free data and saved to {self.path_raw_h5ad}")
+        # TODO keep job object as an element in a dictionary
 
 
     @wraps(db.run_bcl2fq)
@@ -651,6 +677,8 @@ class Xp(db.Xp):
             print(f"found {self.path_clean_h5ad}")
             scs_fad_path = self.path_clean_h5ad
             self.scs = ad.read_h5ad(scs_fad_path)
+        else:
+            scs_fad_path = None
 
         if forced_pattern is None:
             # check for final h5ad, else get latest, else get raw
