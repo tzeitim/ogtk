@@ -632,7 +632,7 @@ class Xp(db.Xp):
             job.qstat(times=1, sleep=wait_time)
 
 
-        cmd = ["rsync", file_done, dedoublets_scs_ad_path]
+        cmd = ["rsync", done_file, dedoublets_scs_ad_path]
         subprocess.run(cmd, check=True)
         
         self.print(f"Saved to {dedoublets_scs_ad_path} without removal!")
