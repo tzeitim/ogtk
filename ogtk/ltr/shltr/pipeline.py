@@ -339,11 +339,10 @@ class Xp(db.Xp):
         # paths
         self.path_mcs_h5ad = f'{self.wd_mc}/{self.sample_id}.mcells.h5ad' # pyright: ignore
         self.path_raw_h5ad = f"{self.wd_mc}/{self.sample_id}.full.h5ad" # pyright: ignore
-        self.path_clean_h5ad = f"{self.wd_mc}/{self.sample_id}.clean.h5ad" # pyright: ignore
+        self.path_cleansc_h5ad = self.return_path("clean_scs_ad_path")#f"{self.wd_mc}/{self.sample_id}.clean.h5ad" # pyright: ignore
         self.path_iterationx_h5ad = f"{self.wd_mc}/{self.sample_id}.iteration-XXX.h5ad" # pyright: ignore
         self.path_final_h5ad = self.path_iterationx_h5ad.replace('iteration-XXX', 'final')
         self.path_trees = f'{self.wd_cas}' # pyright: ignore
-
         self.path_cr_outs = f'{self.wd_scrna}/{self.sample_id}/outs/'
 
         # mc ann
@@ -569,6 +568,7 @@ class Xp(db.Xp):
                 os.remove(done_file)
             else:
                 print(f"Change force=True to re-run")
+                self.raw_adata = sc.read_h5ad(clean_scs_ad_path)
                 return
 
         files = [
@@ -589,13 +589,16 @@ class Xp(db.Xp):
             job.qstat(times=1, sleep=wait_time)
 
         expected_files = [done_file]
-        
+        dedoublets_scs_ad_path = self.return_path("dedoublets_scs_ad_path") 
+
         for file in expected_files:
-            cmd = ["rsync", file, self.path_raw_h5ad]
+            cmd = ["rsync", file, clean_scs_ad_path]
             subprocess.run(cmd, check=True)
 
-        self.raw_adata = sc.read_h5ad(self.path_raw_h5ad)
-        self.print(f"Populated .raw_adata with doublet-free data and saved to {self.path_raw_h5ad}")
+        self.raw_adata = sc.read_h5ad(clean_scs_ad_path)
+        self.raw_adata.obs['sample_id'] = self.sample_id
+
+        self.print(f"Populated .raw_adata with labeled doublets. Saved to {clean_scs_ad_path}")
         # TODO keep job object as an element in a dictionary
 
 
@@ -673,12 +676,20 @@ class Xp(db.Xp):
         #TODO add option to fetch a specific one
         ''' 
         # check for pre-cleaned cells
-        if os.path.exists(self.path_clean_h5ad):
-            print(f"found {self.path_clean_h5ad}")
-            scs_fad_path = self.path_clean_h5ad
+        mcs_fad_path = None
+        scs_fad_path = None
+
+        if os.path.exists(self.path_cleansc_h5ad):
+            print(f"found {self.path_cleansc_h5ad}")
+            scs_fad_path = self.path_cleansc_h5ad
             self.scs = ad.read_h5ad(scs_fad_path)
+
+        # check for final h5ad, else get latest, else get raw
+        # single-cells
+        if os.path.exists(self.path_cleansc_h5ad):
+            scs_fad_path = self.path_cleansc_h5ad
         else:
-            scs_fad_path = None
+            self.init_adata()
 
         if forced_pattern is None:
             # check for final h5ad, else get latest, else get raw
@@ -707,7 +718,11 @@ class Xp(db.Xp):
                 return 1
         
         self.print(f'loading final adatas:\n{mcs_fad_path}\n{scs_fad_path}', 'bold white')
-        self.mcs = ad.read_h5ad(mcs_fad_path)
+        if mcs_fad_path is not None:
+            self.mcs = ad.read_h5ad(mcs_fad_path)
+
+        if scs_fad_path is not None:
+            self.scs = ad.read_h5ad(scs_fad_path)
         return 0
 
         #else:
@@ -729,7 +744,7 @@ class Xp(db.Xp):
     def return_path(self, kind:str, sample_name:str|None=None, suffix=None):
         """ returns a standardized path for a given `kind` of file.
             kinds are local variables that define the dataset to return the path to (needs improvement)
-            e.g. mols, mcs_ad_path, mcs_fad_path, raw_scs_ad_path, clean_scs_ad_path, 
+            e.g. mols, mcs_ad_path, mcs_fad_path, raw_scs_ad_path, clean_scs_ad_path, dedoublets_scs_ad_path
             scs_ad_path, scs_fad_path, otl_ad_path
 
         f"{sample_name}.iteration-1.clean"
@@ -739,15 +754,17 @@ class Xp(db.Xp):
 
         kinds="mols,mcs_ad_path,mcs_fad_path,raw_scs_ad_path,clean_scs_ad_path,scs_ad_path,scs_fad_path,otl_ad_path".split(',')
 
-        assert kind in kinds, f"{kind} is invalid. Please provide a `kind` of the following {kinds}"
 
         #_f for final
         mcs_ad_path = self.path_mcs_h5ad 
+        iteration_mcs_ad_path = mcs_ad_path.replace('mcells', 'iteration-ITER_mcells')
         mcs_fad_path = mcs_ad_path.replace('mcells', 'mcells_f')
 
         raw_scs_ad_path = mcs_ad_path.replace('mcells', 'raw_scells')
         clean_scs_ad_path = mcs_ad_path.replace('mcells', 'clean_scells')
+        dedoublets_scs_ad_path = mcs_ad_path.replace('mcells', 'dedoublet_scells')
 
+        iteration_scs_ad_path = mcs_ad_path.replace('mcells', 'iteration-ITER_scells')
         scs_ad_path = mcs_ad_path.replace('mcells', 'scells')
         scs_fad_path = mcs_fad_path.replace('mcells', 'scells')
         
@@ -757,6 +774,8 @@ class Xp(db.Xp):
             mols = self.return_cache_path('mols', suffix=suffix)
             mols = f'{mols}/{sample_name}_r2mols.parquet'
 
+        valid_kinds = [i for i in locals() if '_path' in i or i == 'mols']
+        assert kind in valid_kinds, f"{kind} is invalid. Please provide a `kind` of the following {valid_kinds}"
         return locals()[kind]
     
     def clear_mc(self, 
@@ -816,10 +835,10 @@ class Xp(db.Xp):
         too_small_cells_percent = 100.0 * too_small_cells_count / len(total_umis_of_cells)
         too_large_cells_percent = 100.0 * too_large_cells_count / len(total_umis_of_cells)
         
-        print(f"Will exclude {too_small_cells_count} ({too_small_cells_percent:.2f}%)\
+        self.print(f"Will exclude {too_small_cells_count} small ({too_small_cells_percent:.2f}%)\
                 cells with less than {properly_sampled_min_cell_total} UMIs")
 
-        print(f"Will exclude {too_large_cells_count} ({too_large_cells_percent:.2f}%)\
+        self.print(f"Will exclude {too_large_cells_count} large ({too_large_cells_percent:.2f}%)\
                 cells with less than {properly_sampled_max_cell_total} UMIs")
 
         excluded_genes_data = mc.tl.filter_data(raw_adata, var_masks=[f'&excluded_gene'])
@@ -832,7 +851,7 @@ class Xp(db.Xp):
             too_excluded_cells_count = sum(excluded_fraction_of_umis_of_cells > properly_sampled_max_excluded_genes_fraction)
             too_excluded_cells_percent = 100.0 * too_excluded_cells_count / len(total_umis_of_cells)
             
-            print(f"Will exclude {too_excluded_cells_count} ({too_excluded_cells_percent:.2f}%)\
+            self.print(f"Will exclude {too_excluded_cells_count} excluded (e.g. mito) ({too_excluded_cells_percent:.2f}%)\
                 cells with less than {properly_sampled_max_excluded_genes_fraction * 100.0} UMIs")
 
             fg = sns.displot(excluded_fraction_of_umis_of_cells + 1e-5,
@@ -950,15 +969,86 @@ class Xp(db.Xp):
         raw_adata.uns['mc_clean'] = True
         clean = mc.pl.extract_clean_data(raw_adata, name=f"{sample_name}.iteration-1.clean")
         ###
+
         # save anndatas
         raw_adata.write_h5ad(self.path_raw_h5ad)
-        clean.write_h5ad(self.path_clean_h5ad)
+        clean.write_h5ad(self.path_cleansc_h5ad)
 
-        print(f"Saved {self.path_raw_h5ad}")
-        print(f"Saved {self.path_clean_h5ad}")
+        self.print(f"Saved {self.path_raw_h5ad}")
+        self.print(f"Saved {self.path_cleansc_h5ad}")
 
         self.scs = clean
         raw_adata = None  
+        self.print('Clean cells have populated the .scs attribute')
+
+    @wraps(mc.tl.convey_obs_fractions_to_group)
+    def mc_convey_cell_annotations_to_metacells(self, property_name="sample_id") -> None:
+        mc.tl.convey_obs_fractions_to_group(adata=self.scs, gdata=self.mcs, property_name=property_name)
+
+    def mc_compute_next_iteration(self, iteration: int, cores=10, random_seed=123456) -> None:
+        
+        max_parallel_piles = mc.pl.guess_max_parallel_piles(self.scs)
+
+        mc.pl.set_max_parallel_piles(max_parallel_piles)
+        mc.ut.set_processors_count(cores)
+
+        self.print("# DIVIDE AND CONQUER...")
+        global metacells
+        self.mcs = None # So can be gc-ed
+
+        mc.pl.divide_and_conquer_pipeline(self.scs, random_seed=random_seed)
+
+        self.print("# COLLECT METACELLS...")
+        self.mcs = mc.pl.collect_metacells(
+            self.scs, name=f"{self.sample_id}.iteration-{iteration}.metacells", 
+            random_seed=random_seed
+        )
+        self.print(f"Iteration {iteration}: {self.mcs.n_obs} metacells, {self.mcs.n_vars} genes")
+
+        self.print("# CONVEY CELL ANNOTATIONS...")
+        self.mc_convey_cell_annotations_to_metacells()
+
+    def mc_finalize_next_iteration(self, iteration: int, *, with_types: bool, cores=10, random_seed=123456) -> None:
+        max_parallel_piles = mc.pl.guess_max_parallel_piles(self.scs)
+        mc.pl.set_max_parallel_piles(max_parallel_piles)
+        mc.ut.set_processors_count(cores)
+
+        self.print("# COMPUTE FOR MCVIEW...")
+        mc.pl.compute_for_mcview(adata=self.scs, gdata=self.mcs, random_seed=random_seed)
+
+        self.print("# PLOT UMAP...")
+        if with_types:
+            type_annotation = f"type.iteration-{iteration}.auto"
+        else:
+            type_annotation = None
+
+        self.mc_plot_umap(type_annotation=type_annotation)
+
+        self.print("# SAVE CELLS...")
+        scs_path =self.return_path('iteration_scs_ad_path').replace('ITER', str(iteration))
+        self.scs.write_h5ad(scs_path)
+
+        self.print("# SAVE METACELLS...")
+        mcs_path =self.return_path('iteration_mcs_ad_path').replace('ITER', str(iteration))
+        self.mcs.write_h5ad(mcs_path)
+        
+        self.print(mcs_path)
+        self.print(scs_path)
+        #print("# IMPORT TO MCVIEW...")
+        #os.system(
+        #    f"Rscript ../scripts/import_dataset.r hca_bm iterative/iteration-{iteration} "
+        #    f"'HCABM IT|{iteration}'"
+        #)
+
+    def mc_next_iteration_without_types(self, iteration: int, cores = 10) -> None:
+        '''
+        '''
+        self.mc_compute_next_iteration(iteration, cores=cores)
+        self.mc_finalize_next_iteration(iteration, with_types=False, cores=cores)
+
+    @wraps(ut.sc.mc_plot_umap)
+    def mc_plot_umap(self, type_annotation: str|None = None) -> None:
+        ut.sc.mc_plot_umap(self.mcs, type_annotation)
 
     @wraps(ut.sc.mc_relate_to_lateral_genes)
     def mc_relate_to_lateral_genes(self, force:bool=False, *args, **kwargs):
@@ -969,9 +1059,19 @@ class Xp(db.Xp):
         ut.sc.mc_update_lateral_genes(cells=self.scs, *args, **kwargs)
 
     @wraps(ut.sc.mc_compute_lateral_module_similarity)
-
     def mc_compute_lateral_module_similarity(self, *args, **kwargs):
-      self.similarity_of_modules =  ut.sc.mc_compute_lateral_module_similarity(cells=self.scs, *args, **kwargs) 
+        ut.sc.mc_compute_lateral_module_similarity(cells=self.scs, *args, **kwargs) 
+
+    @wraps(ut.sc.mc_plot_associated_lmodules)
+    def mc_plot_associated_lmodules(self, *args, **kwargs):
+        if 'similarity_of_modules' not in self.scs.uns:
+            self.mc_compute_lateral_module_similarity()
+        ut.sc.mc_plot_associated_lmodules(adata=self.scs, fig_dir=self.wd_figs)
+        
+    @wraps(ut.sc.mc_update_lateral_flags)
+    def mc_update_lateral_flags(self, attr, *args, **kwargs):
+        adata = getattr(self, attr) 
+        ut.sc.mc_update_lateral_flags(adata=adata, *args, **kwargs)
 
     @wraps(ut.sc.metacellize)
     def do_mc(
@@ -1048,7 +1148,7 @@ class Xp(db.Xp):
         self.mcs = mcs
         self.metadata = metadata
        
-        self.scs.write_h5ad(self.path_clean_h5ad)
+        self.scs.write_h5ad(self.path_cleansc_h5ad)
         self.mcs.write_h5ad(self.path_iterationx_h5ad.replace('XXX', '1'))
         #self.save_final_ad(sample_name)
 
@@ -1148,6 +1248,9 @@ class Xp(db.Xp):
 
         adatas = [i.scs for i in xps]
         
+        if not all([True for c in [x.obs.columns for x in adatas] if 'excluded_cell' in c]):
+            raise ValueError("The field 'excluded_cell' is not present in some adatas.obs columns. Please include (the metacell scripts do it automatically).")
+
         adata = ad.concat(adatas, join='outer', label='batch_id', index_unique="_")
         adata = adata[~adata.obs['excluded_cell'], ].copy()
         adata.var = adata.var.drop(adata.var.columns[2:].to_list(), axis='columns')
