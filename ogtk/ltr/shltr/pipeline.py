@@ -330,6 +330,8 @@ class Xp(db.Xp):
         self.explored = False
         
         self.raw_adata = None
+        self.scs = None
+        self.mcs = None
         self.batch_map = None
         self.mols = None
         self.attr_d= {'shrna':'mols', 'zshrna':'zmols'}
@@ -401,7 +403,7 @@ class Xp(db.Xp):
             files=[files]
         return(files)
 
-    def load_guide_molecules(
+    def load_guide_mols(
             self,
             clone:str,
             sample_id:str|None = None,
@@ -445,8 +447,13 @@ class Xp(db.Xp):
                 clone=clone)
 
         if filter_valid_cells:
-            self.load_latest_ad()
-            df = df.filter(pl.col('cbc').is_in(self.scs.obs.index.to_list()))
+            if self.scs is None:
+                raise ValueError("Please populate .scs before ingesting")
+            if 'excluded_cell' not in self.scs.obs.columns:
+                raise ValueError("Expected field `excluded_cell` in .obs")
+            #self.load_latest_ad()
+            #df = df.filter(pl.col('cbc').is_in(self.scs.obs.index.to_list()))
+            df = df.filter(pl.col('cbc').is_in(self.scs[~self.scs.obs.excluded_cell].obs.index.to_list()))
 
         return(df)
 
@@ -473,7 +480,7 @@ class Xp(db.Xp):
             self.print(f'Downsampling to {downsample} reads', style='bold #ff0000')
             downsample = int(downsample)
 
-        mols = self.load_guide_molecules(valid_ibars=valid_ibars, 
+        mols = self.load_guide_mols(valid_ibars=valid_ibars, 
                                          min_reads=min_reads, 
                                          clone=clone, 
                                          suffix=suffix, 
@@ -514,7 +521,24 @@ class Xp(db.Xp):
                     )
         return(dfc)
 
-    def init_adata(self, force:bool=True, h5_path: str|None= None, cellbender: bool=False, *args, **kwargs):
+    def init_adata_std(self, kind, attr='raw_adata'):
+        ''' Populates .raw_adata from a standard kind
+        '''
+        adata = ad.read_h5ad(self.return_path(kind))
+        if kind == 'dedoublets_scs_ad_path':
+            adata.obs['excluded_cell']  = adata.obs.doublet_prediction != 'singlet'
+            adata.obs['sample_id'] = self.sample_id
+            adata = adata[adata.obs.doublet_prediction == 'singlet'].copy()
+
+        setattr(self, attr, adata)
+        adata = None
+
+    def init_adata(self,
+        force:bool=True,
+        h5_path: str|None= None,
+        cellbender: bool=False,
+        *args,
+        **kwargs):
         ''' Loads the raw cell ranger counts matrix
             When ``h5_path`` is provided it overrides the default routine that uses the matrix dir tree from 10x
         '''
@@ -532,15 +556,41 @@ class Xp(db.Xp):
             # TODO check if there is a previous instance of the anndatas if 
             if os.path.exists(self.path_raw_h5ad) and not force:
                 self.raw_adata = ad.read_h5ad(self.path_raw_h5ad)
+                return None
             self.raw_adata = self.load_10_mtx()
             return None
 
 
 
-    def run_scvi_solo(self, min_counts=800, min_cells_gene=3, force=False, wait_time=30, timeout=1000, use_console=False):
-        
+    def run_scvi_solo(self,
+        input_cells_path=None,
+        min_counts=800,
+        min_cells_gene=3,
+        force=False,
+        wait_time=10,
+        timeout=1000,
+        use_console=False,
+        remove_doublets=True):
+
         self.is_supported('scvi_solo')
 
+        input_cells_path = input_cells_path if input_cells_path is not None else f'{self.path_cr_outs}/raw_feature_bc_matrix.h5'
+
+
+        dedoublets_scs_ad_path = self.return_path("dedoublets_scs_ad_path") 
+
+        if os.path.exists(dedoublets_scs_ad_path):
+            if force:
+                print('Removed')
+                os.remove(dedoublets_scs_ad_path)
+            else:
+                self.print(f"previous computation found. loading {dedoublets_scs_ad_path}")
+                self.print(f"Change force=True to re-run")
+                self.raw_adata = sc.read_h5ad(dedoublets_scs_ad_path)
+                return
+
+
+        # TODO remove my credentials
         sge_conf = ut.sge.SGE_CONF(user='polivar', host='max-login2')
 
         self.job_scvi_solo = ut.sge.SGE_JOB(
@@ -551,6 +601,7 @@ class Xp(db.Xp):
              console=self.console)
 
         job = self.job_scvi_solo
+        done_file = f'{job.wd}/adata_scvi_solo.h5ad'
 
         job.fill_job_template({
             'SCRIPT': 'run_scvi_solo.py', 
@@ -559,22 +610,13 @@ class Xp(db.Xp):
             'MIN_CELLS': str(min_cells_gene), 
         })
         
-
-        done_file = f'{job.wd}/adata_scvi_solo.h5ad'
-
-        if os.path.exists(done_file):
-            if force:
-                print('Removed')
-                os.remove(done_file)
-            else:
-                print(f"Change force=True to re-run")
-                self.raw_adata = sc.read_h5ad(clean_scs_ad_path)
-                return
-
         files = [
-                f'{self.path_cr_outs}/raw_feature_bc_matrix.h5', 
+                 input_cells_path,
                  self.path_scvi_solo_sh
                  ]
+
+        if os.path.exists(done_file):
+            os.remove(done_file)
 
         job.set_use_console(use_console)
         job.submit_job(files=files)
@@ -585,21 +627,22 @@ class Xp(db.Xp):
                 print("Timeout reached, file not found.")
                 break
 
+            # TODO improve this loop. The while never find the done_file
             print(f"Waiting for job {job.id} to finish")
             job.qstat(times=1, sleep=wait_time)
 
-        expected_files = [done_file]
-        dedoublets_scs_ad_path = self.return_path("dedoublets_scs_ad_path") 
 
-        for file in expected_files:
-            cmd = ["rsync", file, clean_scs_ad_path]
-            subprocess.run(cmd, check=True)
+        cmd = ["rsync", file_done, dedoublets_scs_ad_path]
+        subprocess.run(cmd, check=True)
+        
+        self.print(f"Saved to {dedoublets_scs_ad_path} without removal!")
 
-        self.raw_adata = sc.read_h5ad(clean_scs_ad_path)
-        self.raw_adata.obs['sample_id'] = self.sample_id
+        adata = sc.read_h5ad(dedoublets_scs_ad_path)
+        adata.obs['sample_id'] = self.sample_id
+        adata.obs['excluded_cell']  = adata.obs.doublet_prediction != 'singlet'
+        adata.obs['sample_id'] = self.sample_id
+        self.raw_adata = adata[adata.obs.doublet_prediction == 'singlet'].copy()
 
-        self.print(f"Populated .raw_adata with labeled doublets. Saved to {clean_scs_ad_path}")
-        # TODO keep job object as an element in a dictionary
 
 
     @wraps(db.run_bcl2fq)
@@ -651,6 +694,7 @@ class Xp(db.Xp):
         uiport=7777,
         skip_mols=False,
         min_reads_per_mol: int=2,
+        kind: str| None = None,
         forced_pattern:str|None=None,
 )->None:
         ''' Main function to load full experiment object
@@ -663,21 +707,26 @@ class Xp(db.Xp):
         if 'pp' in vars(self):
             db.run_cranger(self, localcores=75, uiport=uiport)
 
-        res = self.load_latest_ad(forced_pattern=forced_pattern)
+        if self.raw_adata is None and self.scs is None:
+            #self.init_adata()
+            self.load_latest_ad(forced_pattern=forced_pattern, kind=kind)
 
         if self.tabulate is not None:
             db.tabulate_xp(self)
 
         if not skip_mols:
             self.init_mols(valid_ibars = self.default_ibars(), clone=self.clone, min_reads=min_reads_per_mol)
-
-    def load_latest_ad(self, forced_pattern:str|None=None):
+    def load_latest_ad(self, forced_pattern:str|None=None, kind:str|None=None):
         ''' Loads latest version of mcs and scs adatas
         #TODO add option to fetch a specific one
         ''' 
         # check for pre-cleaned cells
         mcs_fad_path = None
         scs_fad_path = None
+
+        if kind is not None:
+            self.init_adata_std(kind)
+            return
 
         if os.path.exists(self.path_cleansc_h5ad):
             print(f"found {self.path_cleansc_h5ad}")
@@ -1236,7 +1285,13 @@ class Xp(db.Xp):
     def plot_cc(self, *args, **kwargs):
         _plot_cc(self, *args, **kwargs)
 
-    def ingest_xps(self, xps: Iterable, suffix='shrna', force=False, skip_mols=False, ibar_ann: str|None =None):
+    def ingest_xps(self,
+        xps: Iterable,
+        suffix='shrna',
+        force=False,
+        skip_mols=False,
+        filter_valid_cells=False,
+        ibar_ann: str|None =None):
         ''' Merge compatible experiments and integrate them into an invidiual one.
             a ``batch_map`` keeps track of an appended identifier to single-cell barcodes
 
@@ -1248,7 +1303,7 @@ class Xp(db.Xp):
 
         adatas = [i.scs for i in xps]
         
-        if not all([True for c in [x.obs.columns for x in adatas] if 'excluded_cell' in c]):
+        if not any([True for c in [x.obs.columns for x in adatas] if 'excluded_cell' in c]):
             raise ValueError("The field 'excluded_cell' is not present in some adatas.obs columns. Please include (the metacell scripts do it automatically).")
 
         adata = ad.concat(adatas, join='outer', label='batch_id', index_unique="_")
@@ -1261,7 +1316,12 @@ class Xp(db.Xp):
         self.batch_map = batch_map
         assert len(batch_map) == len(adata.obs.sample_id.unique()), "It seems that one or more batches are duplicated"
 
-        self.adata = adata
+        self.scs = adata
+        
+        ad_path = 'raw_scs_ad_path'
+        self.scs.write(self.return_path(ad_path))
+
+        self.print(f"saved raw ingested cells as {self.return_path(ad_path)}")
         self.batch_map = batch_map
         self.conf_keys.append('batch_map')
 
@@ -1270,7 +1330,9 @@ class Xp(db.Xp):
             return None
 
         self.mols = (
-           pl.concat([i.load_guide_molecules(clone=i.clone, filter_valid_cells=True) for i in xps])
+           pl.concat(
+               [i.load_guide_mols(clone=i.clone, filter_valid_cells=filter_valid_cells) 
+                for i in xps])
         )
 
         self.mols = (
