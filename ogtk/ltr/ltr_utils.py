@@ -599,10 +599,11 @@ def mltbc_align_reads_to_ref(
     if mode == 'needleman':
         cmd_template = f'needleall -gapextend {gapextend} -gapopen {gapopen} -datafile EDNAFULL -awidth3=100  -minscore 90 -bsequence {ref_path} -asequence {pwalg_in} -aaccshow3 yes'
 
+        if conda_prefix is not None:
+            cmd_template = f"{conda_prefix} {cmd_template}"
+
         cmd_needleman = f'{cmd_template} -aformat3 fasta -outfile {pwalg_out}'
 
-        if conda_prefix is not None:
-            cmd_needleman = f"{conda_prefix} {cmd_needleman}"
 
         if verbose: print(cmd_needleman) 
 
