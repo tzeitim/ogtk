@@ -475,7 +475,7 @@ def mlt_create_fasta_ref(ref_name, ref_seq, ref_path):
     fout.write('>{}\n{}\n'.format(ref_name, ref_seq))
     fout.close()
 
-def mltbc_make_unique_fa_ref_entries(fa_ifn, fa_ofn, ref_name = 'hspdrv7_scgstl'):
+def mltbc_make_unique_fa_ref_entries(fa_ifn, fa_ofn, ref_name = 'hspdrv7_scgstl', wd='.'):
     '''
     Relabels reference entries in a FASTA file to create unique identifiers by appending the UMI (Unique Molecular Identifier).
 
@@ -517,22 +517,32 @@ def mltbc_make_unique_fa_ref_entries(fa_ifn, fa_ofn, ref_name = 'hspdrv7_scgstl'
         new_ref = "{}_{}\n".format(whole_fa[ref].strip(), umi)
         whole_fa[ref] = new_ref
     
-    ofa = open(fa_ofn, 'w')
+    ofa = open(f'{wd}/{fa_ofn}', 'w')
     for i in whole_fa:
         ofa.write(i)
     ofa.close()
    
 
-def mltbc_align_reads_to_ref(name, fa_ofn,  ref_path, 
-    ref_name = 'hspdrv7_scgstl', 
-    mode='needleman', 
-    gapopen = 20, 
-    gapextend = 1, 
-    rs=None,
-    verbose = False):
+def mltbc_align_reads_to_ref(
+        name, 
+        fa_ofn,  
+        ref_path, 
+        input_fasta=None,
+        ref_name = 'hspdrv7_scgstl', 
+        mode = 'needleman', 
+        gapopen = 20, 
+        gapextend = 1, 
+        rs=None,
+        wd = '.',
+        conda_prefix = None,
+        verbose = False):
     '''
     Performs pair-wise alignment of reads against a reference, and relabels reference entries to make them unique.
 
+    Supports a custom conda environment via the conda_prefix argument which should be a string of the form:
+    ```conda run -n name_of_env```
+    Assumes a conda environment with the EMBOSS suite installed:
+        conda create -n emboss -y -c bioconda  emboss
     Parameters:
     name: str
         The base name for input and output files.
@@ -573,8 +583,11 @@ def mltbc_align_reads_to_ref(name, fa_ofn,  ref_path,
     using the helper function mltbc_make_unique_fa_ref_entries. The relabeled alignment is saved to the output FASTA file.
     '''
 
-    pwalg_in = '{}_in_pair_algn.fa'.format(name)
-    pwalg_out = '{}_out_pair_algn.fa'.format(name)
+    if input_fasta is None:
+        pwalg_in = f'{wd}/{name}_in_pair_algn.fa'
+    else:
+        pwalg_in = input_fasta
+    pwalg_out = f'{wd}/{name}_out_pair_algn.fa'
 
     if rs is not None:
         rs.write_consensuses_fasta(pwalg_in)
@@ -584,11 +597,17 @@ def mltbc_align_reads_to_ref(name, fa_ofn,  ref_path,
     if mode == 'waterman':
         'water -gapextend 1 -gapopen 20 -datafile EDNAFULL -awidth3=100 -aformat3 fasta  -asequence ptol2-hspdrv7_scgstl.fa -bsequence msa_in.fa  -aaccshow3 yes -outfile ww.fasta -snucleotide2  -snucleotide1' 
     if mode == 'needleman':
-        cmd_template = 'needleall -gapextend {} -gapopen {} -datafile EDNAFULL -awidth3=100  -minscore 90 -bsequence {} -asequence {} -aaccshow3 yes'.format(gapextend, gapopen, ref_path, pwalg_in)
-    
-        cmd_needleman = '{} -aformat3 {} -outfile {}'.format(cmd_template, "fasta", pwalg_out)
+        cmd_template = f'needleall -gapextend {gapextend} -gapopen {gapopen} -datafile EDNAFULL -awidth3=100  -minscore 90 -bsequence {ref_path} -asequence {pwalg_in} -aaccshow3 yes'
+
+        cmd_needleman = f'{cmd_template} -aformat3 fasta -outfile {pwalg_out}'
+
+        if conda_prefix is not None:
+            cmd_needleman = f"{conda_prefix} {cmd_needleman}"
+
         if verbose: print(cmd_needleman) 
-        oo= subprocess.run(cmd_needleman.split(), stdout=subprocess.PIPE, stderr= subprocess.PIPE)
+
+        oo = subprocess.run(cmd_needleman.split(), stdout=subprocess.PIPE, stderr= subprocess.PIPE)
+
         if verbose: print(oo.stdout, oo.stderr)
 
         with open(f"{pwalg_out}_fasta.olog", 'wb') as logo, open(f"{pwalg_out}_fasta.elog", 'wb') as loge:
@@ -596,8 +615,9 @@ def mltbc_align_reads_to_ref(name, fa_ofn,  ref_path,
             loge.write(oo.stderr)
 
         cmd_needleman = '{} -aformat3 {} -outfile {}'.format(cmd_template, "score", pwalg_out.replace('fa', 'score'))
+
         if verbose: print(cmd_needleman) 
-        oo= subprocess.run(cmd_needleman.split(), stdout=subprocess.PIPE, stderr= subprocess.PIPE)
+        oo = subprocess.run(cmd_needleman.split(), stdout=subprocess.PIPE, stderr= subprocess.PIPE)
         if verbose: print(oo.stdout, oo.stderr)
 
         with open(f"{pwalg_out}_score.olog", 'wb') as logo, open(f"{pwalg_out}_score.elog", 'wb') as loge:
@@ -610,14 +630,14 @@ def mltbc_align_reads_to_ref(name, fa_ofn,  ref_path,
 
         cmd_needleman = '{} -aformat3 {} -outfile {}'.format(cmd_template, "simple", pwalg_out.replace('fa', 'simple'))
         if verbose: print(cmd_needleman) 
-        oo= subprocess.run(cmd_needleman.split(), stdout=subprocess.PIPE, stderr= subprocess.PIPE)
+        oo = subprocess.run(cmd_needleman.split(), stdout=subprocess.PIPE, stderr= subprocess.PIPE)
         if verbose: print(oo.stdout, oo.stderr)
 
         with open(f"{pwalg_out}_simple.olog", 'wb') as logo, open(f"{pwalg_out}_simple.elog", 'wb') as loge:
             logo.write(oo.stdout)
             loge.write(oo.stderr)
     
-    mltbc_make_unique_fa_ref_entries(fa_ifn = pwalg_out, fa_ofn = fa_ofn, ref_name = ref_name)
+    mltbc_make_unique_fa_ref_entries(fa_ifn = pwalg_out, fa_ofn = fa_ofn, ref_name = ref_name, wd=wd)
 
 
 def mlt_compute_barcode_matrix_paired(fa_ifn, fa_ifn2, umi_whitelist, umi_blacklist, tab_out, bint_db_ifn, tab_full_out = None, do_rc = False):
@@ -710,13 +730,45 @@ def align_reads_to_ref(name, fa_ofn, consensus_dict, ref_path, ref_name = 'hspdr
         if verbose: print(oo.stdout, oo.stderr)
     
     make_unique_fa_ref_entries(fa_ifn = pwalg_out, fa_ofn = fa_ofn, ref_name = ref_name)
-    
+
+def return_alignment_tuples(fasta_ifn):
+    ''' Returns a tuple of tuples in the form: 
+            ( (query_name, ref_name), (query_seq,ref_seq)) 
+        from an alignment from a fasta file
+    '''
+    FF = pyfaidx.Fasta(fasta_ifn, as_raw=True)
+    fa_entries = [i for i in FF.keys()]
+    return (((fa_entries[i+1], fa_entries[i]), (FF[i+1][:].upper(), FF[i][:].upper())) for i in range(0, len(fa_entries), 2))
+
 
 def compute_barcode_matrix_merged(fa_ifn, tab_out,  bint_db_ifn, tab_full_out = None, do_rc = False):
     '''
-    Writes to disk a tabulated file with the corresponfing bint strings.
-    Requires a fasta file that provides the pairwise aligment between a lineage
-    allele and the reference
+    Generates a barcode matrix by performing a pairwise alignment between a lineage allele and a reference sequence.
+    The output is written to disk as a tabulated file with corresponding bint strings.
+
+    Parameters:
+    fa_ifn: str
+        The input FASTA file providing the pairwise alignment between a lineage allele and the reference.
+
+    tab_out: str
+        The output file path where the tabulated file with the corresponding bint strings will be saved.
+
+    bint_db_ifn: str
+        The input file providing the binary identification (bint) strings.
+
+    tab_full_out: str, optional
+        The output file path for the full tabulated data. If not provided, '_full.txt' will be appended to the name of tab_out file.
+
+    do_rc: bool, optional
+        If True, the function performs reverse complement of the sequences. Default is False.
+
+    The function first reads the input FASTA file and initializes output files. For each pair of sequences (reference and read) 
+    in the FASTA file, it computes a lineage vector using the get_lineage_vector function. 
+
+    If the lineage vector does not contain "trash", the function writes the vector to the output files and keeps track of the 
+    number of "non-trash" hits. If the lineage vector contains "trash", the function records it but does not write it to the output.
+
+    Finally, if there are more than one "trash" vectors, the function prints their counts and proportions, and the proportion of "non-trash" hits.
     '''
 
     FF = pyfaidx.Fasta(fa_ifn, as_raw=True)
@@ -725,13 +777,13 @@ def compute_barcode_matrix_merged(fa_ifn, tab_out,  bint_db_ifn, tab_full_out = 
     if tab_full_out is None:
         tab_full_out = tab_out.replace('.txt', "_full.txt")
     full_out = open(tab_full_out, 'w')
-    #for i in range(0, int(len(fa_entries)/2), 2):
-    #### !!!!!
+
     hits_trash = []
     trashed = []
     for i in range(0, len(fa_entries), 2):
             ref_seq  = FF[i+1][:].upper() if not do_rc else ogtk.UM.rev_comp(FF[i+1][:].upper()) 
             read_seq = FF[i][:].upper() if not do_rc else ogtk.UM.rev_comp(FF[i][:].upper()) 
+
 
             lineage_vector = get_lineage_vector((ref_seq, read_seq, bint_db_ifn, 'merged'))
 
