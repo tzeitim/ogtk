@@ -9,10 +9,17 @@ import os
 import regex
 import seaborn as sns
 import tempfile
+import rich 
 
 import ogtk
+import ogtk.utils as ut
+import ogtk.utils.log as log
+
 from ogtk.ltr import ltr_utils
 from . import plot
+
+from ogtk.utils.log import Rlogger
+logger = Rlogger().get_logger()
 
 def error_string(string, errors=0, error_type='e'):
     ''' es = error string 
@@ -338,10 +345,10 @@ def genotype_ibar_clone(
     ## index a small sample of original reads
     if single_end:
         print(f'single_end {single_end}')
-        tabix_fn = ogtk.utils.tabulate_umified_fastqs(r1 = r1, cbc_len=0, umi_len=25, single_molecule=single_molecule, end=end, force=force, comparable=True)
+        tabix_fn = ut.tabulate_umified_fastqs(r1 = r1, cbc_len=0, umi_len=25, single_molecule=single_molecule, end=end, force=force, comparable=True)
     else:
         print(f'single_end {single_end}')
-        tabix_fn = ogtk.utils.tabulate_paired_umified_fastqs(r1 = r1, cbc_len=16, umi_len=10, single_molecule=single_molecule, end=end, force=force, comparable=True)
+        tabix_fn = ut.tabulate_paired_umified_fastqs(r1 = r1, cbc_len=16, umi_len=10, single_molecule=single_molecule, end=end, force=force, comparable=True)
     
     if not single_molecule:
         # import cell barcodes from cleaned andata's index
@@ -990,6 +997,7 @@ def return_feature_string(key: str):
     assert key in features_dict, f"{key} is not a valid feature. Look at {features_dict.keys()}"
     return(features_dict[key])
 
+@ogtk.utils.log.call
 def extract_read_grammar(
             batch: str,
             parquet_ifn: str| None = None,
@@ -999,8 +1007,6 @@ def extract_read_grammar(
             ) -> pl.DataFrame:
     ''' Encodes raw reads based on regular expressions. It doesn't aggregate results
     '''
-    import rich 
-    rich.print(f'[bold #ff0000]{batch}')
 
     wl = load_wl(True)
     wts = "|".join(wl['spacer'])
@@ -1053,9 +1059,22 @@ def extract_read_grammar(
             parquet_ifns = [parquet_ifns]
 
         if sample:
-            return (pl.scan_parquet(i).head(sample).drop(drop).with_columns(pl.lit(pfn(i)).alias('ifn')).collect()  for i in parquet_ifns)
+            return (
+                    pl.scan_parquet(i)
+                    .head(sample)
+                    .drop(drop)
+                    .with_columns(pl.lit(pfn(i)).alias('ifn'))
+                    .collect()  
+                    for i in parquet_ifns
+                    )
         else:
-            return (pl.scan_parquet(i).drop(drop).with_columns(pl.lit(pfn(i)).alias('ifn')).collect() for i in parquet_ifns)
+            return (
+                    pl.scan_parquet(i)
+                    .drop(drop)
+                    .with_columns(pl.lit(pfn(i)).alias('ifn'))
+                    .collect() 
+                    for i in parquet_ifns
+                    )
 
     def return_parquets_read(parquet_ifns, sample=False, use_pyarrow=True):
         '''
@@ -1063,15 +1082,26 @@ def extract_read_grammar(
         if not isinstance(parquet_ifns, list):
             parquet_ifns = [parquet_ifns]
         if sample:
-            return (pl.read_parquet(i, use_pyarrow=use_pyarrow).head(sample).drop(drop).with_columns(pl.lit(pfn(i)).alias('ifn'))  for i in parquet_ifns)
+            return (
+                    pl.read_parquet(i, use_pyarrow=use_pyarrow)
+                    .head(sample)
+                    .drop(drop)
+                    .with_columns(pl.lit(pfn(i)).alias('ifn'))
+                    for i in parquet_ifns
+                    )
         else:
-            return (pl.read_parquet(i, use_pyarrow=use_pyarrow).drop(drop).with_columns(pl.lit(pfn(i)).alias('ifn')) for i in parquet_ifns)
+            return (
+                    pl.read_parquet(i, use_pyarrow=use_pyarrow)
+                    .drop(drop)
+                    .with_columns(pl.lit(pfn(i)).alias('ifn'))
+                    for i in parquet_ifns
+                    )
 
     if df is None:
             fs = return_parquets_read(parquet_ifn, sample, use_pyarrow)
             df = pl.concat(fs)
 
-    print(f'total_reads={df.shape[0]}')
+    logger.info(f'total_reads={df.shape[0]}')
     
 
     if "cbc" in df.columns:
@@ -1082,14 +1112,13 @@ def extract_read_grammar(
         #print(f'{total_umis=}')
 
 
-    rich.print(f'[red]fuzzy encoding', end='')
+    logger.step(f'[red]fuzzy encoding[/]', extra={"markup": True})
     # It is faster to use fuzzy matching only once, so we encode first and then count
     df = (
         df
         .lazy()
         .with_columns(pl.col('seq').alias('oseq'))
         .with_columns(pl.col('seq').str.extract(f'({wts})', 1).alias('spacer'))
-        .with_columns(pl.when(pl.col('spacer').is_null()).then(False).otherwise(True).alias('WT')) #TODO
         #.with_columns(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
         .with_columns(pl.col('seq').str.replace_all(f'.*?({fuzzy_tso})', '[···TSO···]'))
         .with_columns(pl.col('seq').str.replace_all(f'.*({fuzzy_u6})', '[···U6···]'))
@@ -1120,9 +1149,9 @@ def extract_read_grammar(
         .drop([i for i in ['qual',  'readid', 'start', 'end', 'xspacer'] if i in df.columns])
   #      .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
     ).collect()
-    rich.print(f'[green] done')
+    logger.step(f'[green] done[/]', extra={"markup": True})
 
-    return(df)
+    return(mask_wt(df))
 
 def empirical_kalhor_annotation(df: pl.DataFrame, drop_counts: bool=True)->pl.DataFrame:
     ''' Determines the kalhor ids (and the metadata associated to each) to a given ibar-spacer pair.
@@ -1147,6 +1176,7 @@ def empirical_kalhor_annotation(df: pl.DataFrame, drop_counts: bool=True)->pl.Da
 
 
 
+@ogtk.utils.log.call
 def count_essential_patterns(df: pl.DataFrame, seq_col: str = 'seq') -> pl.DataFrame:
     ''' Count appearances of expected patterns in encoded seqs, for example TSOs, U6s, cannonical scaffolds, uncut matches
     '''
@@ -1187,6 +1217,7 @@ def plot_noise_properties(df):
     from matplotlib.colors import LogNorm
     sns.displot(df, x='tg_cmp', y='spacer_len', cmap='plasma', bins=(10,30),  cbar=True, cbar_kws=dict(norm=LogNorm()))
 
+@ogtk.utils.log.call
 def ibar_reads_to_molecules(
         df: pl.DataFrame,
         modality: str ='single-cell',
@@ -1197,8 +1228,7 @@ def ibar_reads_to_molecules(
     # collapse reads into molecules
     # top_n should always be == 1
     top_n = 1
-    print('collapse into molecules')
-    groups =['cbc', 'umi', 'raw_ibar', 'spacer', 'WT'] 
+    groups =['cbc', 'umi', 'raw_ibar', 'spacer', 'wt'] 
 
     if modality =='single-molecule':
         groups = groups[1:]
@@ -1219,42 +1249,7 @@ def ibar_reads_to_molecules(
 
     return(df)
 
-def compute_lookahead_ibar_stats(
-        df: pl.DataFrame,
-        over: Sequence[str] = ['cbc', 'raw_ibar'],
-        modality: str | None = None,
-        )-> pl.DataFrame: 
-
-    '''
-    Returns a dataframe with additional fields where molecules and
-    n_alleles are computed by over the provided fields. It also flags
-    off-target reads based on the absence of a raw_ibar.
-
-    Two predefined modalities are supported:
-    "single-cell" = ['cbc', 'raw_ibar'] 
-    "single-molecule" = ['raw_ibar']
-
-    '''
-    if modality is not None:
-        if modality =="single-cell":
-            over = ['cbc', 'raw_ibar']
-        if modality =="single-molecule":
-            over = ['raw_ibar']
-
-    df = (
-        df
-        .lazy()
-        .with_columns([
-            pl.col('umi').n_unique().over(over).alias('mols'), 
-            pl.col('seq').n_unique().over(over).alias('n_alleles'),
-            #pl.col('seq').count().over(['cbc', 'raw_ibar']).alias('reads'),
-            pl.col('raw_ibar').is_null().alias('offt'),
-            ])
-            .collect()
-    )
-    return(df)
-
-
+@ogtk.utils.log.call
 def noise_spectrum(batch: str,
                    df: pl.DataFrame,
                    columns: str | Sequence = 'wts',
@@ -1307,6 +1302,7 @@ def noise_spectrum(batch: str,
     
     plt.show()
 
+@ogtk.utils.log.call
 def filter_ibars(
         df: pl.DataFrame,
         valid_ibars: Sequence | None=None,
@@ -1316,20 +1312,19 @@ def filter_ibars(
         )->pl.DataFrame:
     ''' 
     '''
-    print('flag ibars') 
     if min_cells_per_ibar is None and 'valid_cells' not in df.columns:
             raise  ValueError('in order to estimate a fraction of cells, a "valid_cell" boolean mask must exist on the df or an estimation must be provided (min_cells_per_ibar)')
     # flag ibars 
     if valid_ibars is None:
         # determine valid ibars automatically
-        print('determining number of valid ibars')
+        logger.info('determining number of valid ibars')
         if min_cells_per_ibar is None and "valid_cell" in df.columns:
             total_cells =df.filter(pl.col('valid_cell'))["cbc"].n_unique() 
-            print(f'{total_cells=}')
+            logger.info(f'{total_cells=}')
             min_cells_per_ibar = int(total_cells*fraction_cells_ibar)
-            print(f'{min_cells_per_ibar=} ({fraction_cells_ibar:%})')
+            logger.info(f'{min_cells_per_ibar=} ({fraction_cells_ibar:%})')
         else:
-            print(f'{min_cells_per_ibar=} ')
+            logger.info(f'{min_cells_per_ibar=} ')
 
 
         valid_ibars = guess_ibars_df(
@@ -1339,22 +1334,23 @@ def filter_ibars(
 
     else:
         # they are provided:
-        print('using provided valid ibars')
+        logger.info('using provided valid ibars')
     
-    print(f'{len(valid_ibars)=}')
-
+    logger.info(f'{len(valid_ibars)=}')
 
     df = df.with_columns(pl.col('raw_ibar').is_in(valid_ibars).alias('valid_ibar'))
     return(df)
 
+@ogtk.utils.log.call
 def mask_wt(df: pl.DataFrame) -> pl.DataFrame:
     ''' Simple routine to add a boolean field that defines uncut entries
     '''
     wt_str = '\[···WT···\]\[···CNSCFL···\]'
     df= (df
-         .with_columns(( (pl.col('seq').str.count_match('WT')==1) 
+         .with_columns(
+             ((pl.col('seq').str.count_match('WT')==1) 
                        & (pl.col('seq').str.contains(wt_str)))
-    .alias('wt'))
+        .alias('wt'))
      )
     return df
 
@@ -1545,7 +1541,7 @@ def return_aligned_alleles(
                 .alias('seq_trim')
             )
             .with_columns(
-                pl.count().over(['WT', 'seq_trim'])
+                pl.count().over(['wt', 'seq_trim'])
                 .alias('sweight')
             )
             .with_columns(
@@ -1554,7 +1550,7 @@ def return_aligned_alleles(
             .with_row_count(name='id')
             .with_columns(
                 (
-                 "WT_"+pl.col('WT')\
+                 "WT_"+pl.col('wt')\
                  +"_kalhor_"+pl.col('kalhor_id').cast(pl.Utf8).fill_null('NA')\
                  +"_sweight_"+pl.col('sweight').cast(pl.Utf8)\
                  +"_id_"+pl.col('id').cast(pl.Utf8)\
@@ -1578,7 +1574,7 @@ def return_aligned_alleles(
 
     foc_spacer = (
             raw_fasta_entries
-            .filter(pl.col('WT'))['spacer']
+            .filter(pl.col('wt'))['spacer']
             .value_counts()
             .sort('counts', descending=True)
             )
