@@ -754,3 +754,51 @@ def import_mols(h5_ifn):
     return(mm)
     # then do something like
     #mmm= mm.groupby(['barcode_idx', 'umi']).agg(pl.col('feature_idx').n_unique())
+
+def run_sge_job(xp, files, sge_conf):
+    '''
+    Submit a job to a pre-configured SGE computing cluster.
+
+    '''
+    # Check for xp.wd_sge attribute for SGE workspace generation
+    if not hasattr(xp, 'wd_sge'):
+        raise AttributeError("xp does not have a valid 'wd_sge' attribute.")
+
+    # Create workspace if it doesn't exist
+    if not os.path.exists(xp.wd_sge):
+        os.makedirs(xp.wd_sge)
+
+    # Transfer files to workspace using rsync
+    for file in files:
+        rsync_command = ["rsync", file, xp.wd_sge]
+        subprocess.run(rsync_command, check=True)
+
+    # Read job template from file
+    with open(sge_conf.job_template, 'r') as file:
+        job_template_content = file.read()
+
+    # Format the job template with any required variables
+    formatted_job_template = job_template_content.format(xp=xp)
+
+    # Create a unique job ID using hash
+    unique_job_id = hashlib.md5(formatted_job_template.encode()).hexdigest()
+    unique_job_file_path = os.path.join(xp.wd_sge, f"job_{unique_job_id}.sh")
+    with open(unique_job_file_path, 'w') as job_file:
+        job_file.write(formatted_job_template)
+
+    # Submit the job using SSH
+    ssh_command = ["ssh", f"{sge_conf.user}@{sge_conf.host}", f"qsub {unique_job_file_path}"]
+    ssh_result = subprocess.run(ssh_command, check=True, capture_output=True)
+    job_id = ssh_result.stdout.decode().strip()
+
+    # Check for successful exit of the job
+    # This is a placeholder; actual implementation depends on how you want to monitor the job
+    check_command = ["ssh", f"{sge_conf.user}@{sge_conf.host}", f"qstat | grep {job_id}"]
+    while subprocess.run(check_command, check=False).returncode == 0:
+        # Implement some waiting mechanism here
+        pass
+
+    # Return results or pointer to results
+    # This part depends on how results are handled in your setup
+    return f"Job {job_id} (Unique ID: {unique_job_id}) completed. Check results in the specified directory."
+
