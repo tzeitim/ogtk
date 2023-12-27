@@ -8,6 +8,9 @@ import glob
 import itertools
 from typing import Optional, Sequence
 
+from ogtk.utils.log import Rlogger
+logger = Rlogger().get_logger()
+
 #https://docs.python.org/3/library/itertools.html#itertools.zip_longest
 def grouper(iterable, n, fillvalue=None):
     "Collect data into fixed-length chunks or blocks"
@@ -252,9 +255,8 @@ def tabulate_single_umified_fastq(r1, cbc_len =16 , umi_len = 10, end = None, si
         return(sorted_tab)
 
 
-    print("starting tabulation")
-    print(subprocess.getoutput('date'))
-
+    logger.info("starting tabulation")
+    logger.info(subprocess.getoutput('date'))
 
     with open(unsorted_tab, 'wt') as R3:
         with gzip.open(r1, 'rt') as R1:#, bgzip.BGZipWriter(R3) as zR3:
@@ -358,8 +360,8 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
                 return(parfn)
         return(sorted_tab)
 
-    print("starting tabulation")
-    print(subprocess.getoutput('date'))
+    logger.info("starting tabulation")
+    logger.info(subprocess.getoutput('date'))
 
     with open(unsorted_tab, 'wt') as R3:
         with gzip.open(r1, 'rt') as R1, gzip.open(r2, 'rt') as R2:#, bgzip.BGZipWriter(R3) as zR3:
@@ -433,8 +435,8 @@ def tabulate_umified_fastqs(r1, cbc_len =16, umi_len = 10, end = None, single_mo
         print(f'using pre-computed {sorted_tab}')
         return(sorted_tab)
 
-    print("starting tabulation")
-    print(subprocess.getoutput('date'))
+    logger.info("starting tabulation")
+    logger.info(subprocess.getoutput('date'))
 
     with open(unsorted_tab, 'wt') as R3:
         with gzip.open(r1, 'rt') as R1:#, bgzip.BGZipWriter(R3) as zR3:
