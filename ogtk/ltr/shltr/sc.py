@@ -1,21 +1,19 @@
-from logging import warning
 from typing import Sequence,Optional
-from sys import prefix
-import pysam
-import regex
 import ogtk 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import polars as pl
+import rich as rich
 from . import ibars as ib
 from . import plot as pt
 
+from ogtk.utils.log import Rlogger
+logger = Rlogger().get_logger()
 
-def lala():
-    pt.plot_sibling_noise()
 
+@ogtk.utils.log.call
 def reads_to_molecules(sample_id: str,
            parquet_ifn: str, 
            corr_dict_fn: str | None= None,
@@ -40,7 +38,11 @@ def reads_to_molecules(sample_id: str,
     cache_out = f'{cache_dir}/{sample_id}_r2mols.parquet'
     import os
 
-    if not use_cache or not os.path.exists(cache_out):
+    if use_cache and os.path.exists(cache_out):
+        logger.info(f'loading from {cache_out}')
+        rdf = pl.read_parquet(cache_out)
+    else:
+        # generate a reads data frame 
         rdf = ib.extract_read_grammar(parquet_ifn = parquet_ifn, batch = sample_id, sample = downsample)
         tot_reads = rdf.shape[0]
 
@@ -48,12 +50,14 @@ def reads_to_molecules(sample_id: str,
 
         # correct cbc if path to dictionary is provided
         if corr_dict_fn is not None:
-            print('correcting with dic')
+            logger.info('correcting with dic')
             rdf = ogtk.utils.cd.correct_cbc_pl(rdf, ogtk.utils.cd.load_corr_dict(corr_dict_fn))
 
         # CPU-intensive
         # TODO add thread control
+        
         rdf = ib.ibar_reads_to_molecules(rdf, modality='single-cell')
+
         rdf = ib.count_essential_patterns(rdf)
 
         # guess from the first field of the sample_id the clone of origin
@@ -80,9 +84,9 @@ def reads_to_molecules(sample_id: str,
         pc_offt = rdf.filter(~pl.col("valid_ibar")).shape[0]/rdf.shape[0]
         tot_umis = rdf.select('umi').n_unique()
 
-        print(f'{pc_offt=:.2%}')
-        print(f'{tot_umis=}')
-        print(f'{tot_reads=}')
+        logger.info(f'{pc_offt=:.2%}')
+        logger.info(f'{tot_umis=}')
+        logger.info(f'{tot_reads=}')
 
         rdf = (rdf
                .filter(pl.col('raw_ibar').is_not_null())
@@ -98,9 +102,6 @@ def reads_to_molecules(sample_id: str,
         # normalize umi counts based on the size of the cell and levels of expression of the ibar
         rdf = normalize(rdf)
         rdf.write_parquet(cache_out)
-    else:
-        print(f'loading from {cache_out}')
-        rdf = pl.read_parquet(cache_out)
     return(rdf)    
 
 def allele_calling(
@@ -187,6 +188,7 @@ def to_compare_top_alleles(df):
           ))
     return(df)
 
+@ogtk.utils.log.call
 def normalize(df):
     ''' normalize umi counts based on the size of the cell and levels of expression of the ibar
     '''
@@ -198,6 +200,7 @@ def normalize(df):
         .with_columns((pl.col('umis_allele')/pl.col('umis_cell')/pl.col('umis_ibar')).prefix('db_norm_'))
     )
 
+@ogtk.utils.log.call
 def qc_stats(df, sample_id, clone, pc_offt, tot_umis, tot_reads):
     ''' helper function that consolidates QC metrics into df
     '''
