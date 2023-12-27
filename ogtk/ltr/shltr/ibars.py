@@ -592,7 +592,7 @@ def convert_df_to_mat(df: pl.DataFrame, ibar_field: str ='raw_ibar') -> pd.DataF
     '''
     mat = (
         df
-        .groupby(['cbc', ibar_field])
+        .group_by(['cbc', ibar_field])
         .agg(pl.col('umi').n_unique().alias("umis"))
         .pivot(values='umis', columns=ibar_field, index='cbc')
         .drop('cbc')
@@ -682,7 +682,7 @@ def load_mol_ibarspl(sample_id, min_reads_umi=2, min_dom_cov=2):
     # calleles = corrected alleles
     alleles = (
         mol_ibars
-        .groupby(['sample_id', 'cell', 'ibar'])
+        .group_by(['sample_id', 'cell', 'ibar'])
         .agg(
             [
                 pl.col('cseq').n_unique().alias('n_calleles'),
@@ -707,8 +707,8 @@ def annotate_ibars(sample_id='h1e1', min_reads_umi=2, min_dom_cov=2):
     uncut = load_mol_ibarspl(sample_id, min_reads_umi, min_dom_cov)
     suncut = uncut.with_columns([
            pl.col('cseq').is_in(wl.spacer.to_list()).alias('wt'), 
-           pl.col('cseq').apply(lambda x: spacer_id.get(x, None)).alias('kalhor'),
-           pl.col('cseq').apply(lambda x: spacer_speed.get(x, None)).alias('speed')
+           pl.col('cseq').map_groups(lambda x: spacer_id.get(x, None)).alias('kalhor'),
+           pl.col('cseq').map_groups(lambda x: spacer_speed.get(x, None)).alias('speed')
         ])
     uncut = uncut.join(wl, left_on='cseq', right_on='spacer', how='left')
 
@@ -716,7 +716,7 @@ def annotate_ibars(sample_id='h1e1', min_reads_umi=2, min_dom_cov=2):
         uncut
         .select(['ibar', 'kalhor_id', 'cseq'])
         .filter(pl.col('kalhor_id').is_not_null())
-        .groupby('ibar')
+        .group_by('ibar')
         .agg(pl.col('cseq').value_counts(sort=True).head(2))
         #.explode('cseq').unnest('cseq').rename({'':'cseq'}) # remove rename
         .explode('cseq').unnest('cseq') # remove rename
@@ -758,7 +758,7 @@ def compute_ibar_table_from_tabix_zombie(tbx_ifn, valid_cells):
                             pl.col('seq').str.extract(anchp, 2).alias('ibar'),
                             ])
             
-            .groupby(['cbc', 'umi', 'ibar'], maintain_order=False)
+            .group_by(['cbc', 'umi', 'ibar'], maintain_order=False)
                 .agg([pl.col('seq').value_counts(sort=True).head(1), pl.col('seq').count().alias('umi_reads')])
                 #.explode('seq').unnest('seq').rename({'':'seq', 'counts':'umi_dom_reads'}) # remove rename
                 .explode('seq').unnest('seq').rename({'counts':'umi_dom_reads'}) # remove rename
@@ -774,7 +774,7 @@ def compute_ibar_table_from_tabix_zombie(tbx_ifn, valid_cells):
 
     al = (
         data
-        .groupby(['cbc', 'ibar'])
+        .group_by(['cbc', 'ibar'])
         .agg(
             [
                 pl.col('seq').n_unique().alias('n_calleles'),
@@ -822,8 +822,8 @@ def annotate_ibars(df: pl.DataFrame):
     uncut = load_mol_ibarspl(sample_id, min_reads_umi, min_dom_cov)
     suncut = uncut.with_columns([
            pl.col('cseq').is_in(wl.spacer.to_list()).alias('wt'), 
-           pl.col('cseq').apply(lambda x: spacer_id.get(x, None)).alias('kalhor'),
-           pl.col('cseq').apply(lambda x: spacer_speed.get(x, None)).alias('speed')
+           pl.col('cseq').map_groups(lambda x: spacer_id.get(x, None)).alias('kalhor'),
+           pl.col('cseq').map_groups(lambda x: spacer_speed.get(x, None)).alias('speed')
         ])
     uncut = uncut.join(wl, left_on='cseq', right_on='spacer', how='left')
 
@@ -831,7 +831,7 @@ def annotate_ibars(df: pl.DataFrame):
         uncut
         .select(['ibar', 'kalhor_id', 'cseq'])
         .filter(pl.col('kalhor_id').is_not_null())
-        .groupby('ibar')
+        .group_by('ibar')
         .agg(pl.col('cseq').value_counts(sort=True).head(2))
         #.explode('cseq').unnest('cseq').rename({'':'cseq'}) # remove rename
         .explode('cseq').unnest('cseq') # remove rename
@@ -918,7 +918,7 @@ def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1, ib
 
     al = (
         rin
-        .groupby(['sample_id', 'cell', 'ibar'])
+        .group_by(['sample_id', 'cell', 'ibar'])
         .agg(
             [
                 pl.col('cseq').n_unique().alias('n_calleles'),
@@ -986,7 +986,7 @@ def return_pibar(imols, ext_pattern = '(.{3})(.{4})(.+)', position=2, min_molecu
         imols
         .filter(pl.col('wt'))    # and uncut
         .with_columns(pl.col('raw_ibar')+ "." + pl.col('can_spacer').str.extract(ext_pattern, position)) # perform the actual encoding of ibar+ext
-        .groupby(['raw_ibar', 'can_spacer'])
+        .group_by(['raw_ibar', 'can_spacer'])
             .agg(pl.col('can_spacer').count().alias('molecules'))
         .sort('molecules', reverse=True)
     )
@@ -997,7 +997,7 @@ def return_pibar(imols, ext_pattern = '(.{3})(.{4})(.+)', position=2, min_molecu
             data.filter(pl.col('molecules')>min_molecules)
             .with_columns(pl.col('raw_ibar')+ "." + pl.col('can_spacer').str.extract(ext_pattern, position))
             .select('raw_ibar').to_series()
-                .apply(lambda x: ogtk.UM.compare_umi_to_pool((x, (0, valid)))).to_list()
+                .map_groups(lambda x: ogtk.UM.compare_umi_to_pool((x, (0, valid)))).to_list()
     )
     hvalids = np.array(hvalids)
     #sns.clustermap(hvalids, method='ward', figsize=(10,10), row_cluster=False, col_cluster=False, vmax=3, )
@@ -1035,7 +1035,7 @@ def pl_fastq_to_df(fastq_ifn, rc=False, end = None, export = False):
     df = (
             df.with_columns(
             (pl.arange(0, pl.count()) // step).alias("step")
-            ).groupby("step", maintain_order=True)
+            ).group_by("step", maintain_order=True)
         .agg([
         pl.col("column_1").take(i).alias(name) for i, name in enumerate(fastq_fields)
         ])
@@ -1215,7 +1215,7 @@ def extract_read_grammar(
         .lazy()
         .with_columns(pl.col('seq').alias('oseq'))
         .with_columns(pl.col('seq').str.extract(f'({wts})', 1).alias('spacer'))
-        .with_columns(pl.when(pl.col('spacer').is_null()).then(False).otherwise(True).alias('WT'))
+        .with_columns(pl.when(pl.col('spacer').is_null()).then(False).otherwise(True).alias('WT')) #TODO
         #.with_columns(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
         .with_columns(pl.col('seq').str.replace_all(f'.*?({fuzzy_tso})', '[···TSO···]'))
         .with_columns(pl.col('seq').str.replace_all(f'.*({fuzzy_u6})', '[···U6···]'))
@@ -1246,29 +1246,29 @@ def extract_read_grammar(
         .drop([i for i in ['qual',  'readid', 'start', 'end', 'xspacer'] if i in df.columns])
   #      .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
     ).collect()
-    rich.print(f'[green]done')
+    rich.print(f'[green] done')
 
     return(df)
 
 def empirical_kalhor_annotation(df: pl.DataFrame, drop_counts: bool=True)->pl.DataFrame:
     ''' Determines the kalhor ids (and the metadata associated to each) to a given ibar-spacer pair.
         This function should be run on samples that have not been induced.
-        Optionally show the evidence for a given spacer-ibar match.
+        Optionally (``drop_counts``) show the evidence for a given spacer-ibar match.
     '''
 
     wl = load_wl(True).drop('clone')
     # determine the top spacer per raw_ibar
     tsp_df = (df
-            .groupby(['clone', 'raw_ibar'])
+            .group_by(['clone', 'raw_ibar'])
             .agg(pl.col('spacer').value_counts(sort=True).head(1))
             .explode('spacer')
             .unnest('spacer')
              #.rename({'':'spacer', 'counts':'spacer_ibar_mols'}) # remove rename
-            .rename({'counts':'spacer_ibar_mols'}) # remove rename
+            .rename({'counts':'spacer-ibar_mols'}) # remove rename
             .join(wl, right_on='spacer', left_on='spacer', how='inner')
         )
     if drop_counts:
-        tsp_df = tsp_df.drop('spacer_ibar_mols')
+        tsp_df = tsp_df.drop('spacer-ibar_mols')
     return(tsp_df)
 
 
@@ -1331,7 +1331,7 @@ def ibar_reads_to_molecules(
     df = (
         df 
         .lazy()
-        .groupby(groups)
+        .group_by(groups)
             .agg([
                 pl.col('oseq').value_counts(sort=True).head(top_n), 
                 # TODO change this for a filter where we keep the top one and then force the other
@@ -1484,7 +1484,10 @@ def mask_wt(df: pl.DataFrame) -> pl.DataFrame:
      )
     return df
 
-def create_rectangle_patches(data: pl.DataFrame, rects: List[patches.Rectangle], x_delta: float = 0.0) -> List[patches.Rectangle]:
+def create_rectangle_patches(
+        data: pl.DataFrame,
+        rects: List[patches.Rectangle],
+        x_delta: float = 0.0) -> List[patches.Rectangle]:
     """
     Create rectangle patches to be plotted based on the input DataFrame.
     
@@ -1506,7 +1509,10 @@ def create_rectangle_patches(data: pl.DataFrame, rects: List[patches.Rectangle],
         rects.append(rect)
     return rects
 
-def plot_stacked_rectangles(rects: List[patches.Rectangle], title: str, groups: List[str]) -> None:
+def plot_stacked_rectangles(
+        rects: List[patches.Rectangle],
+        title: str,
+        groups: List[str]) -> None:
     """
     Plot stacked rectangles on a plot.
     
@@ -1525,7 +1531,15 @@ def plot_stacked_rectangles(rects: List[patches.Rectangle], title: str, groups: 
     ax.set_xticklabels(groups, rotation=90)
     plt.show()
 
-def prepare_stacked_df(df: pl.DataFrame, element: str, grouping_field: str, grouping_value: str, n_top: int, element_field: str='raw_ibar', x: float =0.5, bc='seq') -> pl.DataFrame:
+def prepare_stacked_df(
+        df: pl.DataFrame,
+        element: str,
+        grouping_field: str,
+        grouping_value: str,
+        n_top: int,
+        element_field: str='raw_ibar',
+        x: float =0.5,
+        bc='seq') -> pl.DataFrame:
     """
     Prepare a DataFrame to be plotted as stacked rectangles.
     
@@ -1551,7 +1565,7 @@ def prepare_stacked_df(df: pl.DataFrame, element: str, grouping_field: str, grou
         df
         .filter(pl.col(element_field)==element)
         .filter(pl.col(grouping_field)==grouping_value)
-        .groupby([element_field, bc, 'wts']).count()
+        .group_by([element_field, bc, 'wts']).count()
         .sort(['count', bc], descending=True)
         .head(n_top)
     )
@@ -1569,7 +1583,13 @@ def prepare_stacked_df(df: pl.DataFrame, element: str, grouping_field: str, grou
     )
     return data
 
-def plot_indel_stacked_fractions(element: str, df: pl.DataFrame, groups: List[str], element_field: str='raw_ibar', grouping_field: str ='sample_id', n_top: int =10, bc: str='seq') -> None:
+def plot_indel_stacked_fractions(element: str,
+        df: pl.DataFrame,
+        groups: List[str],
+        element_field: str='raw_ibar',
+        grouping_field: str ='sample_id',
+        n_top: int =10,
+        bc: str='seq') -> None:
     """
     Plot indel stacked fractions based on the input DataFrame and groups.
     
@@ -1584,23 +1604,40 @@ def plot_indel_stacked_fractions(element: str, df: pl.DataFrame, groups: List[st
     """
     rects = []
     for idx, grouping_value in enumerate(groups):
-        data = prepare_stacked_df(df, element, element_field=element_field, grouping_field = grouping_field, grouping_value=grouping_value, n_top=n_top, x = idx, bc=bc)
+        data = prepare_stacked_df(
+               df,
+               element,
+               element_field=element_field,
+               grouping_field = grouping_field,
+               grouping_value=grouping_value,
+               n_top=n_top,
+               x = idx,
+               bc=bc)
         rects = create_rectangle_patches(data, rects)
 
     plot_stacked_rectangles(rects, title=f'{element_field} {element} {bc}', groups=groups)
 
 def return_aligned_alleles(
-                           df,
-                           lim=50,
-                           correct_tss_coord: None|int = 18,
-                           keep_intermediate=False,
-                           min_group_size=100
-                           )->pl.DataFrame:
+    df,
+    lim=50,
+    correct_tss_coord: None|int = 18,
+    keep_intermediate=True,
+    min_group_size=100,
+    verbose=True,
+    )->pl.DataFrame:
     '''
     Requires a data frame that:
     - belongs to a single ibar
     - belongs to a single sample
     - is annotated with a 'kalhor_id' 
+
+    E.g.
+    df_alg = (
+            df
+            .sample(int(1e5))
+            .group_by('raw_ibar','sample_id')
+            .map_groups(ogtk.shltr.ibars.return_aligned_alleles)
+    )
 
     Returns the original data frame with additional fields that contain a an aligned version of the original sequence
      = position-specific code:
@@ -1616,9 +1653,9 @@ def return_aligned_alleles(
     
     assert correct_tss_coord is None or isinstance(correct_tss_coord, int), "correct_tss_coords must be None or an integer that defines the correction coordinate"
 
-    assert df['sample_id'].n_unique() == 1, "Please provide a data frame pre-filtered with a single sample_id. Best when this function is called within a groupby"
+    assert df['sample_id'].n_unique() == 1, "Please provide a data frame pre-filtered with a single sample_id. Best when this function is called within a group_by"
 
-    assert df['raw_ibar'].n_unique() == 1, "Please provide a data frame pre-filtered with a single ibar. Best when this function is called within a groupby"
+    assert df['raw_ibar'].n_unique() == 1, "Please provide a data frame pre-filtered with a single ibar. Best when this function is called within a group_by"
 
     foc_sample = df['sample_id'][0]
     foc_ibar= df['raw_ibar'][0]
@@ -1685,7 +1722,17 @@ def return_aligned_alleles(
 
     coord_bins = range(lim)
 
-    alignment_tuples = alignpw_ibar(raw_fasta_entries, foc_sample, foc_ibar, foc_ref, keep_intermediate)
+    # perform the alignment
+    alignment_tuples = alignpw_ibar(
+            raw_fasta_entries=raw_fasta_entries,
+            foc_sample = foc_sample,
+            foc_ibar =  foc_ibar,
+            foc_ref =  foc_ref,
+            verbose = verbose,
+            keep_intermediate =  keep_intermediate)
+
+    
+    # create alignment data frame
     alg_df = []
 
     for ((ref_name, read_name), (ref_seq, aligned_seq)) in alignment_tuples:
@@ -1751,8 +1798,14 @@ def alignpw_ibar(
         foc_ibar:str,
         foc_sample:int,
         foc_ref:str,
-        keep_intermediate=False)-> Sequence:
+        keep_intermediate:bool=False,
+        verbose:bool=False,
+        conda_prefix:str = "conda run -n emboss")-> Sequence:
     '''
+    Assumes a conda env named emboss which contains the emboss suite
+
+    To create one:
+        conda create -n emboss -y -c bioconda  emboss
     '''
     with tempfile.TemporaryDirectory() as temp_dir:
         run_id = f'{foc_sample}_{foc_ibar}'
@@ -1771,6 +1824,8 @@ def alignpw_ibar(
                 fa_ofn=final_alignment, 
                 ref_path=ref_fa, 
                 ref_name='ref', 
+                conda_prefix=conda_prefix,
+                verbose=verbose,
                 wd=temp_dir)
 
         #TODO clean the messy paths related to the temp_dir
