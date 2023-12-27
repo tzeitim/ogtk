@@ -318,7 +318,12 @@ def run_bcl2fq(xp, force=False, dry=False, **args):
         return(p1)
     else:
        return(0)
-    
+import os
+import subprocess
+import hashlib
+
+
+
 def tabulate_xp(xp, force=False):
     ''' 
     Tabulates paired fastq of umified reads (R1:UMI:CB, R2:RNA) into the
@@ -374,8 +379,5 @@ def print_template(conf_fn: str = '/home/polivar/src/artnilet/conf/xps/template.
     '''
     conf_dict = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
     rich.print(conf_dict)
-
-
-
 
 
