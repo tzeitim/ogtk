@@ -28,8 +28,6 @@ class SGE_JOB:
 
         self.live = Live(console=console) if console else None
 
-        self.live = Live(console=console) if console else None
-
         #if exp is not None:
         #    self.generate_hash(exp)
         #elif self.id != "test":
