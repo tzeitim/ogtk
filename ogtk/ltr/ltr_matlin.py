@@ -335,14 +335,14 @@ class matlin():
     def ingest_ibars_pl(self, 
             df, 
             encode_mat=True, 
-            subset=['kalhor_id', 'nspeed', 'raw_ibar'],
+            sort_by=['kalhor_id', 'nspeed', 'raw_ibar'],
             ):
 
         '''Direct convertion of a polars data frame into the character matrix
         of self.matlin object 
         '''
             
-        df = df.sort(subset)
+        df = df.sort(sort_by)
                 
         df =(df
             .with_columns(pl.when(~pl.col('wt'))
