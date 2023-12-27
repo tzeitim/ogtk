@@ -92,7 +92,9 @@ def reads_to_molecules(sample_id: str,
                              # ^- this feels too high for my taste??
                .with_columns(pl.col('seq').n_unique().over(['cbc', 'raw_ibar']).alias('n_sib'))
                )
+        # consolidates QC metrics into df
         rdf = qc_stats(rdf, sample_id, clone, pc_offt, tot_umis, tot_reads)
+
         # normalize umi counts based on the size of the cell and levels of expression of the ibar
         rdf = normalize(rdf)
         rdf.write_parquet(cache_out)
@@ -128,7 +130,7 @@ def allele_calling(
         # https://github.com/pola-rs/polars/issues/10054
         .head(1) # <- this is it! # change to .first() or .top_k()
         .select(['cbc', 'raw_ibar', 'seq', 'wt', 'umi_reads',\
-                'umis_allele', 'umis_cell', 'cs_norm_umis_allele', 'ib_norm_umis_allele', 'db_norm_umis_allele',\
+                'umis_allele', 'umis_cell', 'umis_ibar', 'cs_norm_umis_allele', 'ib_norm_umis_allele', 'db_norm_umis_allele',\
                 'cluster', 'sample_id', 'valid_ibar'])
         .with_columns(pl.col('raw_ibar').n_unique().over('cbc').alias('cov'))
     )
@@ -367,33 +369,45 @@ def basure():
     return(data)
 
 def compute_clonal_composition(
-       df, 
-       clone_dict: dict | None=None,
+       df: pl.DataFrame, 
+       clone_dict: dict|None = None,
        normalize_cluster_size=False,
        )->pl.DataFrame:
-    ''' Provided a chimera data set (cells from two cell lines), assign
+    ''' Provided a chimera (cells from more than one cell line) ibar mols data frame, assign
         (per-cell) the normalized|total molecule counts mapping to cell line-specific
         integrations. 
-        df is a mol-level data frame
+
+        df: is an ibar mol-level pl data frame (usually exp.mols)
         the normalization corresponds to the size of the ibar cluster
     '''
 
-    if clone_dict is None:
-        print("using hardcoded clone dict")
-        clone_dict = {3:"g10", 0:"g10", 1:"h1", -1:"h1", 2:"h1"}
     
-    cell_size = 'ib_norm_umis_allele' if normalize else 'umis_cell'
-    values = "ncounts" if normalize else 'counts'
+    #normalize counts per cluster size - not implemented
+    #cell_size = 'ib_norm_umis_allele' if normalize_cluster_size else 'umis_cell'
+    #values = "ncounts" if normalize_cluster_size else 'counts'
+    values = 'counts'
 
+    if clone_dict is not None:
+        df = df.with_columns(pl.col('cluster').map_dict(clone_dict))
+
+    index = ['cbc', 'umis_cell']
     per_cell_clonal_composition = (
         df
          .filter(pl.col('cluster').is_not_null())
-         .with_columns(pl.col('cluster').map_dict(clone_dict))
          .with_columns(pl.col('raw_ibar').n_unique().over(['cluster']).alias('cluster_size'))
          .groupby(['cbc', 'cluster_size', 'umis_cell'])
-         .agg(pl.col('cluster').value_counts()).explode('cluster').unnest('cluster').rename({"cluster":"clone_score"})
-         .with_columns((pl.col('counts')/pl.col('cluster_size')).prefix('n'))
-         .pivot(index=['cbc', 'umis_cell'], columns='clone_score', values=values).sort('cbc')   
-         .fill_nan(0).fill_null(0)
+            .agg(pl.col('cluster').value_counts()).explode('cluster').unnest('cluster').rename({"cluster":"clone_score"})
+         #normalize counts per cluster size - not implemented
+         #.with_columns((pl.col('counts')/pl.col('cluster_size')).prefix('n'))
+         #.pivot(index=['cbc', 'umis_cell'], columns='clone_score', values=values, aggregate_function='sum')
+         .pivot(index=index, columns='clone_score', values=values)
+         .sort('cbc')   
+         .fill_nan(0)
+         .fill_null(0)
         )
+    # Add ibar_cluster prefix to the pivoted columns
+    prefix = "ibc_"
+    per_cell_clonal_composition.columns = [prefix + col if col not in index else col 
+                                           for col in per_cell_clonal_composition.columns]
+
     return(per_cell_clonal_composition)

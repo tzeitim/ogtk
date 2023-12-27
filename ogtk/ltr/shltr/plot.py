@@ -529,7 +529,6 @@ def plot_sibling_noise(df):
     #sns.displot(data = data.sort('umis_seq', True).groupby(['cbc', 'raw_ibar'], maintain_order=True).head(1).to_pandas()['wt'])
 
 def hmap_grid(data, **kwargs):
-
     ''' 
     This is a very sensitive visualization since it shows all individual
     alignments in the provided data frame. It's supposed to be share a common
@@ -555,5 +554,4 @@ def hmap_grid_sum(data, **kwargs):
     mat = (mm.select(pl.col('^pos.+$')).to_numpy()[:,0:50]/weight)
     map = plt.pcolormesh(mat, cmap='Spectral_r', vmin=0, vmax=2)
     #print(pl.Series(np.hstack(mat)).max())
-    
     return map
