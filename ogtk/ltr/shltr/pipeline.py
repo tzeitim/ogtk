@@ -52,8 +52,9 @@ def _check_required_attributes(self, case):
 def _cassit(exp, 
             alleles, 
             clusters=List, 
-            allele_rep_thresh = 0.9,
-            solver:str='vanilla',
+            allele_rep_thresh = 1.0,
+            solver:str='nj',
+            threads=66,
             collapse_mutationless_edges=False,
 ) -> None:
     '''
@@ -71,6 +72,8 @@ def _cassit(exp,
             'umi_reads':'readCount',
             'umis_allele':'UMI',
            }
+
+    oalleles = alleles.clone()
 
     if 'cellBC' in alleles:
         alleles = alleles.drop('cellBC')
@@ -91,6 +94,9 @@ def _cassit(exp,
             .to_pandas()
     )
 
+    intree = set(allele_table.reset_index()['cellBC'].unique())
+
+
     indel_priors = cas.pp.compute_empirical_indel_priors(
             allele_table, 
             grouping_variables=['intBC', 'LineageGroup'])
@@ -102,7 +108,10 @@ def _cassit(exp,
             allele_rep_thresh = allele_rep_thresh,
             mutation_priors = indel_priors) 
     
+    intree2 = set(character_matrix.reset_index()['index'].unique())
+
     cas_tree = cas.data.CassiopeiaTree(character_matrix=character_matrix, priors=priors)
+
 
     agg_dict ={"intBC": 'nunique', 
                'UMI': 'sum', 
@@ -123,6 +132,7 @@ def _cassit(exp,
     cas_tree.cell_meta = cell_meta
     cas_tree.character_meta = character_meta
     
+
     if solver == 'vanilla':
         # create a basic vanilla greedy solver
         vanilla_greedy = cas.solver.VanillaGreedySolver()
@@ -147,7 +157,7 @@ def _cassit(exp,
         hybrid_solver = cas.solver.HybridSolver(top_solver=vanilla_greedy, 
                                                 bottom_solver=ilp_solver, 
                                                 cell_cutoff=40, 
-                                                threads=10)
+                                                threads=threads)
         hybrid_solver.solve(cas_tree, logfile=f'{exp.path_trees}/example_hybrid.log')
 
     if solver == 'nj':
@@ -165,6 +175,7 @@ def _cassit(exp,
 
     column_iset = list(set(exp.tree.cell_meta.columns).difference(exp.scs.obs.columns))
 
+
     exp.tree.cell_meta = (
             exp.tree.cell_meta.loc[:, column_iset].merge(
                 exp.scs.obs,
@@ -174,26 +185,33 @@ def _cassit(exp,
             )
 
     if exp.mc_ann is not None:
-        _cas_annotate_mc(exp.tree.cell_meta, mc_ann=exp.mc_ann)
+        _pd_annotate_mc(exp.tree.cell_meta, mc_ann=exp.mc_ann)
+
 
 def _cas_update_mc_ann(exp, mc_ann: pl.DataFrame):
-    exp.load_mc_ann(mc_ann)
-    exp.tree.cell_meta = _cas_annotate_mc(exp.tree.cell_meta, mc_ann=exp.mc_ann)
-
-def _cas_annotate_mc(cell_meta, mc_ann: pl.DataFrame, 
-                     left_on='metacell_name', 
-                     right_on='metacell'):
     ''' Annotates a cassiopeia tree cell metadata with a meta cell annotation from MCview
     '''
-    column_iset = list(set(cell_meta.columns).intersection(mc_ann.columns))
+    exp.load_mc_ann(mc_ann)
+    exp.tree.cell_meta = _pd_annotate_mc(exp.tree.cell_meta, mc_ann=exp.mc_ann)
+    
+
+def _pd_annotate_mc(df ,
+                    mc_ann: pl.DataFrame, 
+                    left_on='metacell_name', 
+                    right_on='metacell'
+                    ):
+    ''' Annotates a cassiopeia tree cell metadata with a meta cell annotation from MCview
+    '''
+    column_iset = list(set(df.columns).intersection(mc_ann.columns))
+    index_name = df.index.name
     
     if left_on in column_iset:
         column_iset.remove(left_on)
         
-    cell_meta = cell_meta.loc[:, cell_meta.columns.difference(column_iset)]
+    df = df.loc[:, df.columns.difference(column_iset)]
 
-    cell_meta =(
-            cell_meta.reset_index()
+    df =(
+            df.reset_index()
             .merge(
                 mc_ann.to_pandas(),
                 left_on=left_on,
@@ -201,10 +219,14 @@ def _cas_annotate_mc(cell_meta, mc_ann: pl.DataFrame,
                 how='left')
             )
 
-    cell_meta['cell_type'] = cell_meta['cell_type'].astype(str)
-    cell_meta = cell_meta.set_index('cellBC')
+    df['cell_type'] = df['cell_type'].astype(str)
 
-    return cell_meta
+    if index_name not in df.columns:
+        df = df.set_index('index')
+    else:
+        df = df.set_index(index_name)
+
+    return df
 
 def _cas_return_colors(clone_allele_table, csp='hsv', do_plot=False):
     '''
@@ -240,11 +262,11 @@ def _cas_return_colors(clone_allele_table, csp='hsv', do_plot=False):
 def _plot_cc(exp, 
     max_cell_size = 1.22e4,
     tmax_cell_size = 1000,
-    lim= 2.5,
+    lim= (-2.5 , 2.5),
     cell_size_metric = "n_genes_by_counts",
     vmax=100,
     cluster_suffix='',
-    pseudo_counts=0,
+    pseudo_counts=1,
     clone_numerator='h1',
     clone_denominator='g10',
     expr = None,
@@ -255,13 +277,16 @@ def _plot_cc(exp,
     import seaborn as sns
     import numpy as np
     
+    if 'total_counts' not in exp.scs.obs.columns:
+        sc.pp.calculate_qc_metrics(exp.scs, inplace=True)
+
     cn = clone_numerator
     cd = clone_denominator
     a = pseudo_counts
     
     data = (pl.DataFrame(exp.scs.obs)
             .with_columns(pl.col('total_counts').fill_null(0))
-            .with_columns(((a+pl.col(cn))/(a+pl.col(cd))).log10().alias('log_ratio'))
+            .with_columns(((a+pl.col(cn))/(a+pl.col(cd))).log(base=2).alias('log_ratio'))
             )
 
     if expr is not None:
@@ -269,7 +294,7 @@ def _plot_cc(exp,
 
     data = data.filter(pl.col('total_counts')<max_cell_size)
     data = data.filter(pl.col('umis_cell')<tmax_cell_size)
-    data = data.filter(pl.col('log_ratio')<=lim).filter(pl.col('log_ratio')>=-lim)
+    data = data.filter(pl.col('log_ratio')<=lim[1]).filter(pl.col('log_ratio')>=lim[0])
 
 
     #data = data.filter(pl.col('total_counts')>1e3)
@@ -287,7 +312,7 @@ def _plot_cc(exp,
 
 
     #ax.set_xlim((0, max_cell_size))
-    ax.set_ylim((-lim, lim))
+    ax.set_ylim(lim)
     ax.grid()
     ax.set_ylabel('H1/G10')
 
@@ -297,7 +322,7 @@ def _plot_cc(exp,
                  bins=100, ax= ax2, cmap='RdYlBu_r', vmax=vmax)
 
     ax2.set_xlim((0, tmax_cell_size))
-    ax2.set_ylim((-lim, lim))
+    ax2.set_ylim(lim)
     ax2.grid()
 
     #ax.set_ylim((0, 500))
@@ -313,15 +338,54 @@ def _plot_cc(exp,
     plt.show()
     plt.figure()
 
-    sns.displot(data=data.to_pandas(),
-                x=cell_size_metric,
-                y='log_ratio',
-                bins=100,
-                log_scale=(False, False),
-                col=f'leiden{cluster_suffix}', 
-                col_wrap=6, 
-                cmap='RdYlBu_r', 
-                vmax=50)
+    if 'leiden' in exp.scs.obs:
+        sns.displot(data=data.to_pandas(),
+                    x=cell_size_metric,
+                    y='log_ratio',
+                    bins=100,
+                    log_scale=(False, False),
+                    col=f'leiden{cluster_suffix}', 
+                    col_wrap=6, 
+                    cmap='RdYlBu_r', 
+                    vmax=50)
+def _color_hist(data, vmax=None, vmin=None, bins=25, edge_line=0.77, ax=None, xlim=(-10, 10), cmap='bwr'):
+    from matplotlib import colors as mcolors
+    from matplotlib import colormaps as cmaps
+    import matplotlib.pyplot as plt
+
+    # Set vmax and vmin
+    vmax = max(data) if vmax is None else vmax
+    vmin = min(data) if vmin is None else vmin
+
+    # Get the 'bwr' colormap
+    cm = cmaps.get_cmap(cmap)
+
+    # Create a Normalize object with your chosen vmin and vmax
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+
+    # Create figure and axis if not provided
+    if ax is None:
+        fig, ax = plt.subplots(1,1, figsize=(14,7))
+        ax.set_xlim(xlim)
+
+
+    # Plot histogram and get bins and patches
+    n, bins, patches = ax.hist(data, bins, color='green')
+
+    # Apply colormap and set border properties to each patch (bar)
+    for bin, patch in zip(bins, patches):
+        # Normalize bin value
+        bin_norm = norm(bin)
+        # Set color for each patch
+        patch.set_facecolor(cm(bin_norm))
+        # Set border color and thickness of the patch
+        patch.set_edgecolor('black')
+        patch.set_linewidth(edge_line)
+
+    # Show the plot if the axis was not passed
+    if ax is None:
+        plt.show()
+
 
 class Xp(db.Xp):
     def __init__(self, *args, **kwargs):
@@ -330,7 +394,7 @@ class Xp(db.Xp):
         self.explored = False
         
         self.raw_adata = None
-        self.scs = None
+        self.scs: AnnData|None = None
         self.mcs = None
         self.batch_map = None
         self.mols = None
@@ -352,6 +416,9 @@ class Xp(db.Xp):
 
         # lineage
         self.tree:None|cas.data.CassiopeiaTree.CassiopeiaTree = None
+
+        # sge TODO remove my credentials
+        self.sge_conf = ut.sge.SGE_CONF(user='polivar', host='max-login2')
 
     def init_wd(self):
         '''
@@ -461,7 +528,7 @@ class Xp(db.Xp):
                   valid_ibars: Sequence,
                   clone: str, 
                   suffix: str='shrna',
-                  ibar_ann: str|None=None,
+                  ibar_ann: str|None='empirical',
                   min_cell_size: int=0,
                   min_reads: int=2,
                   downsample: str|None=None,
@@ -488,37 +555,70 @@ class Xp(db.Xp):
                                          pattern=pattern)
 
         # annotate .mols
+        if ibar_ann == 'empirical':
+            ibar_ann = self.cluster_ibars(mols=mols)
+
         mols = self.annotate_ibars(mols=mols, ibar_ann=ibar_ann)
 
         # store .mols
         setattr(self, self.attr_d[suffix], mols)
 
-        if self.is_chimera:
-            self.score_clone(min_cell_size=min_cell_size)
+        #if self.is_chimera:
+        #    self.score_clone(min_cell_size=min_cell_size)
+
+    
+    def cluster_ibars(
+            self,
+            mols,
+            min_cov_log10=2,
+            plot = False)->pl.DataFrame:
+        ''' Empirical annotation of ibars.
+            
+            Invokes ogtk.shlter.cluster_ibars
+        '''
+        self.print("Clustering ibars based current mols")
+        clustered_ibars = shltr.cluster.cluster_ibars(
+                df=mols, 
+                plot=plot, 
+                min_cov_log10=min_cov_log10, 
+                umap=False, 
+                write_parquets=False
+                )
+
+        self.print(clustered_ibars['cluster'].value_counts())
+        return clustered_ibars
 
     def annotate_ibars(
             self, 
             mols,
-            ibar_ann: str|None=None,
+            ibar_ann: str|None|pl.DataFrame=None,
             ):
         '''
         applies a `.join` to a specified cluster-annotated ibar table.
 
         '''
+        dfc = None
 
+        # load a pre-computed annotation
         ibar_ann = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_clusters.parquet' if ibar_ann is None else ibar_ann
 
-        dfc = (pl.scan_parquet(ibar_ann)
-               .drop('clone')
-               .collect()
-            )
+        if isinstance(ibar_ann, str):
+            dfc = (pl.scan_parquet(ibar_ann)
+                   .drop('clone')
+                   .collect()
+                )
 
-        dfc = (mols.join(
+        if isinstance(ibar_ann, pl.DataFrame):
+            dfc = ibar_ann.drop('clone').unique()
+
+        dfc = (mols
+               .drop(['cluster'])
+               .join(
                     dfc, 
                     left_on=['raw_ibar'], 
                     right_on=['raw_ibar'], 
                     how='left')
-                    )
+              )
         return(dfc)
 
     def init_adata_std(self, kind, attr='raw_adata'):
@@ -528,6 +628,11 @@ class Xp(db.Xp):
         if kind == 'dedoublets_scs_ad_path':
             adata.obs['excluded_cell']  = adata.obs.doublet_prediction != 'singlet'
             adata.obs['sample_id'] = self.sample_id
+
+            print(adata.obs.excluded_cell.mean())
+            print(adata.obs.doublet_prediction.value_counts())
+            print("excluding doublets\n")
+
             adata = adata[adata.obs.doublet_prediction == 'singlet'].copy()
 
         setattr(self, attr, adata)
@@ -574,24 +679,7 @@ class Xp(db.Xp):
 
         self.is_supported('scvi_solo')
 
-        input_cells_path = input_cells_path if input_cells_path is not None else f'{self.path_cr_outs}/raw_feature_bc_matrix.h5'
-
-
-        dedoublets_scs_ad_path = self.return_path("dedoublets_scs_ad_path") 
-
-        if os.path.exists(dedoublets_scs_ad_path):
-            if force:
-                print('Removed')
-                os.remove(dedoublets_scs_ad_path)
-            else:
-                self.print(f"previous computation found. loading {dedoublets_scs_ad_path}")
-                self.print(f"Change force=True to re-run")
-                self.raw_adata = sc.read_h5ad(dedoublets_scs_ad_path)
-                return
-
-
-        # TODO remove my credentials
-        sge_conf = ut.sge.SGE_CONF(user='polivar', host='max-login2')
+        sge_conf = self.sge_conf
 
         self.job_scvi_solo = ut.sge.SGE_JOB(
              job_template_path = self.path_scvi_solo_sge, 
@@ -599,13 +687,29 @@ class Xp(db.Xp):
              wd = self.wd_sge, 
              sge_conf=sge_conf,
              console=self.console)
-
         job = self.job_scvi_solo
+
+        input_cells_path = input_cells_path if input_cells_path is not None else f'{self.path_cr_outs}/raw_feature_bc_matrix.h5'
+
+
+        dedoublets_scs_ad_path = self.return_path("dedoublets_scs_ad_path") 
+
+        if os.path.exists(dedoublets_scs_ad_path):
+            if force:
+                print(f'Removed {job.wd}')
+                subprocess.run(["rm", "-fr", job.wd])
+            else:
+                self.print(f"previous computation found. loading {dedoublets_scs_ad_path}")
+                self.print(f"Change force=True to re-run")
+                self.raw_adata = sc.read_h5ad(dedoublets_scs_ad_path)
+                return
+
+
         done_file = f'{job.wd}/adata_scvi_solo.h5ad'
 
         job.fill_job_template({
             'SCRIPT': 'run_scvi_solo.py', 
-            'INPUT_H5': f'raw_feature_bc_matrix.h5', 
+            'INPUT_H5': input_cells_path,
             'MIN_COUNTS': str(min_counts), 
             'MIN_CELLS': str(min_cells_gene), 
         })
@@ -621,6 +725,7 @@ class Xp(db.Xp):
         job.set_use_console(use_console)
         job.submit_job(files=files)
                 
+        self.print(f"Processing {input_cells_path}")
         start_time = time.time()
         while not os.path.exists(done_file):
             if timeout is not None and time.time() - start_time > timeout:
@@ -641,6 +746,7 @@ class Xp(db.Xp):
         adata.obs['sample_id'] = self.sample_id
         adata.obs['excluded_cell']  = adata.obs.doublet_prediction != 'singlet'
         adata.obs['sample_id'] = self.sample_id
+
         self.raw_adata = adata[adata.obs.doublet_prediction == 'singlet'].copy()
 
 
@@ -658,7 +764,7 @@ class Xp(db.Xp):
         db.run_cranger(self, *args, **kwargs)
     
     @wraps(shltr.sc.compute_clonal_composition)
-    def score_clone(self, min_cell_size=0, *args, **kwargs):
+    def score_clone(self, min_cell_size=0, clone_dict:dict|None=None, *args, **kwargs):
         ''' Compute clonal composition 
 
             1. Invoques ``shltr.sc.compute_clonal_composition`` applying the
@@ -670,7 +776,6 @@ class Xp(db.Xp):
 
         '''
 
-        # when computing clonal composition directly merge this information to the scs.obs 
         fn = shltr.sc.compute_clonal_composition
 
         cc = fn(self.mols.filter(pl.col('umis_cell')>min_cell_size), *args, **kwargs)
@@ -681,8 +786,10 @@ class Xp(db.Xp):
         #cc = cc.with_columns((pl.col('cbc') + '-1')).rename({'cbc':'index'}).to_pandas().set_index('index')
         cc = cc.rename({'cbc':'index'}).to_pandas().set_index('index')
 
+        # annotate cells taking care of not repeating columns of ibar clusters
         self.scs.obs = (
-                self.scs.obs.merge(
+                self.scs.obs[[i for i in self.scs.obs.columns if i not in cc.columns]]
+                    .merge(
                     right=cc,
                     left_index=True,
                     right_index=True,
@@ -708,6 +815,7 @@ class Xp(db.Xp):
             db.run_cranger(self, localcores=75, uiport=uiport)
 
         if self.raw_adata is None and self.scs is None:
+            self.print("No pre-populated cells found. Looking on disk")
             #self.init_adata()
             self.load_latest_ad(forced_pattern=forced_pattern, kind=kind)
 
@@ -1095,6 +1203,10 @@ class Xp(db.Xp):
         self.mc_compute_next_iteration(iteration, cores=cores)
         self.mc_finalize_next_iteration(iteration, with_types=False, cores=cores)
 
+    @wraps(_color_hist)
+    def color_hist(self, *args, **kwargs):
+        _color_hist(*args, **kwargs)
+
     @wraps(ut.sc.mc_plot_umap)
     def mc_plot_umap(self, type_annotation: str|None = None) -> None:
         ut.sc.mc_plot_umap(self.mcs, type_annotation)
@@ -1226,13 +1338,14 @@ class Xp(db.Xp):
                         )
 
         # merge with scs.obs
-        # TODO a bug lurches here
+        # TODO a bug lurks here
         strip_pattern = '(.+?)-(.)' if self.batch_map is not None else '(.+)'
         strip_pattern = '(.+)'
         self.print(f'{strip_pattern=}', style='bold #00ff00')
 
         # the majority of the raw cell barcodes do not belong to any real cell so we constrain the merge to the scs
         # how='outer'
+        # adobs_pd_to_df Converts an adata.obs pd data frame to a pl data frame...
         alleles = alleles.join(
                 ut.sc.adobs_pd_to_df(self.scs, strip_pattern), 
                 left_on='cbc', 
@@ -1244,17 +1357,26 @@ class Xp(db.Xp):
         #alleles = alleles.filter(pl.col('umis_cell').is_not_null())
 
         setattr(self, suffix[0]+'alleles', alleles)
-        if self.is_chimera:
-            # TODO clean this block, e.g. log2 or 10?
-            # the chimera flag should be complemented by the definition of which clones comprise it
-            # and its corresponding annotation functions, e.g. fiels h1 and g10 in the following lines
-            self.salleles = self.salleles.with_columns((pl.col('h1')/pl.col('g10')).log(base=10).alias('cs'))
-            self.salleles = self.salleles.with_columns(pl.col(pl.Categorical).cast(pl.Utf8))
+        #if self.is_chimera:
+        #    # TODO clean this block, e.g. log2 or 10?
+        #    # the chimera flag should be complemented by the definition of which clones comprise it
+        #    # and its corresponding annotation functions, e.g. fiels h1 and g10 in the following lines
+        #    self.salleles = self.salleles.with_columns((pl.col('h1')/pl.col('g10')).log(base=10).alias('cs'))
+        #    self.salleles = self.salleles.with_columns(pl.col(pl.Categorical).cast(pl.Utf8))
 
-            self.scs.obs['cs'] = np.log10(self.scs.obs['g10']/self.scs.obs['h1'])
+        #    self.scs.obs['cs'] = np.log10(self.scs.obs['g10']/self.scs.obs['h1'])
 
         if ann_source is not None:
             self.annotate_alleles(ann_source)
+
+    @wraps(_cas_update_mc_ann)
+    def update_scs_from_mc_ann(self, mc_ann=None):
+        ''' Imports MCView output into .scs
+        ''' 
+        if mc_ann is not None:
+            self.load_mc_ann(mc_ann)
+        self.scs.obs = _pd_annotate_mc(df=self.scs.obs, mc_ann=self.mc_ann)
+
 
     @wraps(shltr.sc.to_matlin)
     def init_matlin(self, do_cluster = False, sort_by=['cluster', 'raw_ibar'], cells= 100, cores=4, *args, **kwargs):
@@ -1307,6 +1429,7 @@ class Xp(db.Xp):
             raise ValueError("The field 'excluded_cell' is not present in some adatas.obs columns. Please include (the metacell scripts do it automatically).")
 
         adata = ad.concat(adatas, join='outer', label='batch_id', index_unique="_")
+        print(adata.obs.excluded_cell.value_counts())
         adata = adata[~adata.obs['excluded_cell'], ].copy()
         adata.var = adata.var.drop(adata.var.columns[2:].to_list(), axis='columns')
         adata.obs = adata.obs[['sample_id', 'batch_id']].copy()
@@ -1358,11 +1481,6 @@ class Xp(db.Xp):
         if key =='mols':
             assert suffix is not None, "A suffix for the type of molecule is needed, e.g., 'shrna', 'zhrna'"
             return f'{self.wd_samplewd}/{suffix}/'
-
-    @wraps(cluster.cluster_ibars)
-    def cluster_ibars(self, *args, **kwargs):
-        loc_cluster = cluster.cluster_ibars(df=self.mols, write_parquets=False, *args, **kwargs)
-        return loc_cluster
 
 
     @wraps(_cassit)
