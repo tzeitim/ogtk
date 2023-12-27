@@ -802,132 +802,6 @@ def annotate_ibars(df: pl.DataFrame):
     wl = load_wl(True)
     df = df.join(wl, left_on='spacer', right_on='spacer', how='left') # <<< kalhor annotate
     return(df)
-##################################
-    ## annotate with kalhor db
-    print('annotate with kalhor db')
-    kalhor_map = (data.filter(pl.col('wt'))
-                .select(['raw_ibar', 'spacer']).unique()
-                .join(wl, left_on='spacer', right_on='spacer', how='left')
-            )       
-    data = (data
-            .join(kalhor_map, left_on='raw_ibar', right_on='raw_ibar', how='left')
-            .drop('spacer_right')
-            ) # <<< kalhor annotate
-    
-##################################
-    wl = pl.DataFrame(load_wl())
-    spacer_id = dict([(i,ii) for i,ii in zip(wl.spacer, wl.kalhor_id)])
-    spacer_speed = dict([(i,ii) for i,ii in zip(wl.spacer, wl.speed)])
-
-    uncut = load_mol_ibarspl(sample_id, min_reads_umi, min_dom_cov)
-    suncut = uncut.with_columns([
-           pl.col('cseq').is_in(wl.spacer.to_list()).alias('wt'), 
-           pl.col('cseq').map_groups(lambda x: spacer_id.get(x, None)).alias('kalhor'),
-           pl.col('cseq').map_groups(lambda x: spacer_speed.get(x, None)).alias('speed')
-        ])
-    uncut = uncut.join(wl, left_on='cseq', right_on='spacer', how='left')
-
-    ss = (
-        uncut
-        .select(['ibar', 'kalhor_id', 'cseq'])
-        .filter(pl.col('kalhor_id').is_not_null())
-        .group_by('ibar')
-        .agg(pl.col('cseq').value_counts(sort=True).head(2))
-        #.explode('cseq').unnest('cseq').rename({'':'cseq'}) # remove rename
-        .explode('cseq').unnest('cseq') # remove rename
-        .sort(['ibar','counts'], reverse=True)
-        .join(wl, left_on='cseq', right_on='spacer', how='left')
-    )
-
-    print([format(i, '.2f') for i in np.quantile(ss.counts.to_list(), np.arange(0,1, 0.1,))])
-    break_point = np.quantile(ss.counts.to_list(), 0.55)
-    ss = ss.filter(pl.col('counts')>break_point)
-    return(dict(zip(*ss.select(['ibar', 'kalhor_id']))))
-    
-
-def compute_ibar_table(sample_id ='h1e11', min_dom_cov = 1, min_umi_reads =1, ibar_ifn = None):
-    ''' Expects filtered ibar tabulated file
-        e.g:\n '/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv'
-    Polars 
-    '''
-    if ibar_ifn is None:
-        ibar_ifn = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv'
-    tso='TTTCTTATATGGG'
-
-    wl = load_wl(True)
-
-    fuzzy_tso = fuzzy_match_str(tso)
-    #fuzzy_tso = f'({fuzzy_tso})(.+)'
-
-    mol_ibars = (
-            pl.scan_csv(ibar_ifn, sep='\t')
-            .filter(pl.col('ibar')!='no_ibar')
-            .filter(pl.col('sample_id')==sample_id)
-            .filter(pl.col('umi_reads')>=min_umi_reads)
-            .filter(pl.col('umi_dom_reads')>=min_dom_cov)
-            .with_columns(pl.col('seq').str.extract("(G{1,2}T)(.+)(GGGTTAGA.+)", 2).str.replace("^", "GGT").alias('cseq'))
-            .with_columns(pl.col("cseq").str.replace("GGGTTAGA", "").alias('can_spacer'))
-            .with_columns(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias("wt"))
-            .with_columns((pl.col('cell') + pl.col('umi')).alias('cbcumi'))
-            .collect()
-                )
-    print(f'{mol_ibars.shape[0]=}')
-    ibars_detected = mol_ibars.ibar.unique().to_list()
-    ibars_detected.append('CAGTGC') # <- ibar unique to h1 that has mutation in scaffold
-    ibars_detected.append('ACAATG') # <- meh?
-    ibars_detected.append('TTTATA') # <- meh
-    ibar_str0 = "|".join([f'{i}' for i in ibars_detected])
-    ibar_str = f"({fuzzy_tso})(.+)("+"|".join([f'A{i}A' for i in ibars_detected])+")"
-
-    gg=mol_ibars.cbcumi.unique()
-    mol_noibars = (
-            pl.scan_csv('/local/users/polivar/src/artnilet/workdir/scv2/ibar_all_filtered.csv', sep='\t')
-            .filter((pl.col('ibar')=='no_ibar'))
-            .filter((pl.col("sample_id")==sample_id))
-            .filter(pl.col('umi_reads')>=min_umi_reads)
-            .filter(pl.col('umi_dom_reads')>=min_dom_cov)
-            .with_columns(pl.col('seq').str.contains(fuzzy_tso).alias('tso'))
-            .filter(pl.col('tso'))
-            .with_columns([
-                    pl.col("seq").str.contains(ibar_str).alias("resc"),
-                    pl.col("seq").str.extract(ibar_str, 2).alias("cseq"),
-                    pl.col("seq").str.extract(ibar_str, 3).str.slice(1,6).alias("ibar")
-                ])
-            #.filter(pl.col('resc'))
-            .with_columns(pl.col('cseq').str.extract("(G{1,2}T)(.+)", 2).str.replace("^", "GGT")) # correct for TSS
-            .with_columns(pl.col('cseq').str.extract("(.+)(GAGC.+)", 1).str.replace("GGGTTA", "").alias('can_spacer'))
-            .with_columns(pl.col('can_spacer').is_in(wl.spacer.to_list()).alias('wt'))
-            .with_columns((pl.col('cell') + pl.col('umi')).alias('cbcumi'))
-            .with_columns(pl.col('cbcumi').is_in(gg).alias('seen'))
-            .collect()
-                )
-    ggg=mol_noibars.cbcumi.unique().is_in(gg).mean()
-
-    print(f'fraction of ibar+ cbc:umi  in ibar- {ggg}')
-
-    mol_ibars = mol_ibars.with_columns(pl.lit(True).alias('clear'))
-    mol_noibars = mol_noibars.with_columns(pl.lit(False).alias('clear'))
-    print(f'{mol_noibars.shape[0]=}')
-
-    return((mol_ibars, mol_noibars))#.filter(pl.col('can_spacer').is_null()))
-    common_fields = ['sample_id', 'wt', 'can_spacer', 'cseq', 'ibar', 'cell']
-    rin = pl.concat([
-        mol_ibars.select(common_fields),
-        mol_noibars.select(common_fields)]
-    ).join(wl, left_on='can_spacer', right_on='spacer', how='left') # <<< kalhor annotate
-
-    al = (
-        rin
-        .group_by(['sample_id', 'cell', 'ibar'])
-        .agg(
-            [
-                pl.col('cseq').n_unique().alias('n_calleles'),
-            ])
-        )
-
-    cfs =['sample_id', 'cell', 'ibar'] 
-    rin =  rin.join(al, left_on=cfs, right_on=cfs, how='left')# <<<  annotate corrected alleles 
-    return(rin)
 
 def export_ibar_mols_to_matlin(rin, sample_id ='h1e11'):
     ''' ``rin`` should the output of a cured ibar table e.g. ``compute_ibar_table()`` 
@@ -1274,7 +1148,7 @@ def empirical_kalhor_annotation(df: pl.DataFrame, drop_counts: bool=True)->pl.Da
 
 
 def count_essential_patterns(df: pl.DataFrame, seq_col: str = 'seq') -> pl.DataFrame:
-    ''' Count appearances of expected patterns in encoded seqs, for example TSOs, U6s, cannonical scaffols, uncut matches
+    ''' Count appearances of expected patterns in encoded seqs, for example TSOs, U6s, cannonical scaffolds, uncut matches
     '''
     # count matches for a series of patterns
     df = (
