@@ -603,7 +603,8 @@ def mltbc_align_reads_to_ref(
             cmd_template = f"{conda_prefix} {cmd_template}"
 
         cmd_needleman = f'{cmd_template} -aformat3 fasta -outfile {pwalg_out}'
-
+        # TODO change the three invokations for seqret instead ?
+        # needleall -asequence seq1.fasta -bsequence seq2.fasta -outfile alignment.needle
 
         if verbose: print(cmd_needleman) 
 
