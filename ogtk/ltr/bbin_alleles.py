@@ -315,9 +315,10 @@ def _bulk_bin_alleles(conf_fn, conf, **kwargs):
                                  gapextend = alg_gapextend)
 
 
-# TODO PO verify if we need a list of corrected umis of whether they had been deleted 
+    # TODO PO verify if we need a list of corrected umis of whether they had been deleted 
     rs1c = list(rs1.umis.keys())
     rs2c = list(rs2.umis.keys())
+
     umi_whitelist = list(set(rs1c).intersection(set(rs2c)))
 
     print("whitelist:", len(umi_whitelist))
