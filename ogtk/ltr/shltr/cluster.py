@@ -68,13 +68,21 @@ def cluster_ibars(
         write_parquets=False,
         umap=False, 
         out_parquet = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_clusters.parquet',
-        out_valid_ibars = '/local/users/polivar/src/artnilet/conf/valid_ibars.csv')->pl.DataFrame:
+        out_valid_ibars = '/local/users/polivar/src/artnilet/conf/valid_ibars.csv'
+        )->pl.DataFrame:
     '''
+    Runs HDBSCAN in order to cluster integrations based in the correlation matrix of individual integrations and their molecule counts. 
+
+    Input: Either a parquet file path or a polars data frame of single cell data, at the molecule level.
+
+
+    Output: Returns 
     '''
     assert not (mols_parquet is None and df is None), "You need to specify mols_parque or df"
 
     if df is None:
         df =pl.scan_parquet(mols_parquet)
+
     df = load_parquet_for_analysis(df, plot, min_cov_log10)
 
     zz = (df
@@ -130,6 +138,7 @@ def cluster_ibars(
     if umap:
         visualize_clusters(df, zz, zn, clusterer)
 
+    # TODO in some cases it is desirable to remove the 'clone' and unique the results
     return final_df
 
 
