@@ -68,11 +68,13 @@ def format_value(value):
 def call(func):
     def wrapper(*args, **kwargs):
         logger = Rlogger().get_logger()
+        logger.step(f"{func.__name}")
+
         bound_args = inspect.signature(func).bind(*args, **kwargs)
         bound_args.apply_defaults()
         args_str = ',\n'.join([f"{k}={format_arg(v)}" for k, v in bound_args.arguments.items()])
-        logger.step(f"Calling [bold red]{func.__name__}[/] with args:\n{args_str}", extra={"markup": True})
+        logger.debug(f"Calling [bold red]{func.__name__}[/] with args:\n{args_str}", extra={"markup": True})
         value = func(*args, **kwargs)
-        logger.step(f"{func.__name__} returned:\n{format_value(value)}")
+        logger.debug(f"{func.__name__} returned:\n{format_value(value)}")
         return value
     return wrapper
