@@ -110,7 +110,8 @@ def reads_to_molecules(sample_id: str,
         rdf = qc_stats(rdf, sample_id, clone, tot_umis, tot_reads)
 
         # normalize umi counts based on the size of the cell and levels of expression of the ibar
-        rdf = normalize(rdf)
+        #rdf = normalize(rdf)
+
         rdf.write_parquet(cache_out)
     return(rdf)    
 
@@ -128,35 +129,40 @@ def allele_calling(
         - 'ib_norm_umis_allele'
         - 'db_norm_umis_allele'  
     '''
-    # major collapse event where the top ranking sequence as the final allele is selected.
+    alleles = (mols
+        .lazy()
+        #.filter(pl.col('doublet_prediction')=='singlet')
+        .with_columns(pl.count().over('cbc', 'raw_ibar', 'seq').alias('umis_allele'))
+        .group_by([ 'doublet_prediction', 'cbc', 'raw_ibar',])
+        .agg(
+            ties = ((pl.col('umis_allele') == pl.col('umis_allele').max()).sum()/pl.col('umis_allele').max())-1,
+        
+            umis_per_ibar = pl.count(),
+            umis_top_allele = pl.col('umis_allele').max(),
+            siblings = pl.col('seq').n_unique(),
+            
+            norm_counts = pl.col('cat_db_norm_umis_allele').min(),
+            norm_counts_acc_raw = pl.col('cat_db_norm_umis_allele').gather(pl.col('umis_allele').arg_max()),
+            
+            raw_counts = pl.col('umis_allele').max(),
+            
+            top_allele_raw = pl.col('seq').gather(pl.col('umis_allele').arg_max()),
+            top_allele_norm = pl.col('seq').gather(pl.col('cat_db_norm_umis_allele').arg_min()),
+            #seq_raw = pl.col('seq').gather(pl.col('umis_allele').arg_max()),
+                          
+            umi_dom_reads = pl.col('umi_dom_reads').max(),
+            umi_reads = pl.col('umi_reads').max(),
 
-    df = (
-        mols
-        #.filter(pl.col('wt').is_not())
-        .sort(by, descending=descending) # we give priority to non-wt
-        #.sort('db_norm_umis_allele', descending=False) # we give priority to non-wt
-        #.sort(['umis_allele', 'wt'], [True, False]) # we give priority to non-wt
-        #.filter(pl.col('umis_allele')>=2)
-        .groupby(['cbc', 'raw_ibar'], maintain_order=True)
-        # https://github.com/pola-rs/polars/issues/10054
-        .head(1) # <- this is it! # change to .first() or .top_k()
-        .select(['cbc', 'raw_ibar', 'seq', 'wt', 'umi_reads', 'umis_allele',\
-                 'umis_cell', 'umis_ibar', 'cs_norm_umis_allele', \
-                 'ib_norm_umis_allele', 'db_norm_umis_allele', 'cluster', \
-                 'sample_id'])
-        .with_columns(pl.col('raw_ibar').n_unique().over('cbc').alias('cov'))
+        )
+        .with_columns(pl.col('raw_ibar').n_unique().over('cbc').alias('cells_per_ibar'))
+        .explode('top_allele_raw')
+        .explode('top_allele_norm')
+        .explode('norm_counts_acc_raw')
+        #.explode('seq_raw')
+        .collect()
     )
 
-    return(df)
-    df =  (
-            df
-            #.filter(pl.col('wt').is_not())
-            .sort('umis_allele', True) # we give priority to non-wt
-            #.sort(['umis_allele', 'wt'], [True, False]) # we give priority to non-wt
-            .filter(pl.col('umis_allele')>=min_umis_allele)
-            .groupby(['cbc', 'raw_ibar'], maintain_order=True)
-            .head(1) # <- this is it!
-    )
+    return(alleles)
 
 def to_matlin(df, expr: None | pl.Expr, sort_by='cluster', cells=100):
     ''' Returns a matlin object from an allele-called (e.g. `allele_calling()`)
@@ -199,17 +205,31 @@ def to_compare_top_alleles(df):
     return(df)
 
 @ogtk.utils.log.call
-def normalize(df):
+def normalize(df:pl.DataFrame, over_cells:List=['cbc'], over_ibars:List=['raw_ibar'], prefix:str='', expr_cells:None|pl.Expr=None):
     ''' normalize umi counts based on the size of the cell and levels of expression of the ibar
     '''
+    if expr_cells is None:
+        expr_cells = pl.lit(True)
     return(df
-        .with_columns(pl.count().over('cbc').alias('umis_cell'))
-        .with_columns(pl.count().over('raw_ibar').alias('umis_ibar'))
-        .with_columns((pl.col('umis_allele')/pl.col('umis_cell')).prefix('cs_norm_'))
-        .with_columns((pl.col('umis_allele')/pl.col('umis_ibar')).prefix('ib_norm_'))
-        .with_columns((pl.col('umis_allele')/(pl.col('umis_cell')*pl.col('umis_ibar'))).prefix('db_norm_'))
+        .with_columns(pl.count().over(over_cells).alias(prefix+'umis_cell'))
+       # .with_columns(pl.count().over(over_ibars).alias(prefix+'umis_ibar'))
+           .with_columns(pl.when(
+                            expr_cells is None
+                         )
+                         .then(
+                            pl.count().over(over_ibars)
+                         )
+                         .otherwise(
+                            pl.col('raw_ibar').count()/pl.col('cbc').filter(expr_cells).count()                             
+                         )
+                        .alias(prefix+'umis_ibar'))
+        .with_columns((pl.col('umis_allele')/pl.col(prefix+'umis_cell')).name.prefix(prefix+'cs_norm_'))
+        .with_columns((pl.col('umis_allele')/pl.col(prefix+'umis_ibar')).name.prefix(prefix+'ib_norm_'))
+        .with_columns((pl.col('umis_allele')/(pl.col(prefix+'umis_cell')*pl.col(prefix+'umis_ibar'))).name.prefix(prefix+'db_norm_'))
+           .with_columns(pl.col(prefix+'cs_norm_umis_allele').log10() * -1 )
+           .with_columns(pl.col(prefix+'ib_norm_umis_allele').log10() * -1 )
+           .with_columns(pl.col(prefix+'db_norm_umis_allele').log10() * -1 )
     )
-
 @ogtk.utils.log.call
 def qc_stats(df, sample_id, clone, tot_umis, tot_reads):
     ''' helper function that consolidates QC metrics into df
