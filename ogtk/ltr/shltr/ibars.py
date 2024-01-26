@@ -727,13 +727,13 @@ def annotate_ibars(sample_id='h1e1', min_reads_umi=2, min_dom_cov=2):
         .agg(pl.col('cseq').value_counts(sort=True).head(2))
         #.explode('cseq').unnest('cseq').rename({'':'cseq'}) # remove rename
         .explode('cseq').unnest('cseq') # remove rename
-        .sort(['ibar','counts'], reverse=True)
+        .sort(['ibar','count'], reverse=True)
         .join(wl, left_on='cseq', right_on='spacer', how='left')
     )
 
     print([format(i, '.2f') for i in np.quantile(ss.counts.to_list(), np.arange(0,1, 0.1,))])
     break_point = np.quantile(ss.counts.to_list(), 0.55)
-    ss = ss.filter(pl.col('counts')>break_point)
+    ss = ss.filter(pl.col('count')>break_point)
     return(dict(zip(*ss.select(['ibar', 'kalhor_id']))))
 
 def compute_ibar_table_from_tabix_zombie(tbx_ifn, valid_cells):
@@ -998,7 +998,7 @@ def return_feature_string(key: str):
     return(features_dict[key])
 
 @ogtk.utils.log.call
-def extract_read_grammar(
+def encode_reads_with_dummies(
             batch: str,
             parquet_ifn: str| None = None,
             df: pl.DataFrame | None = None,
@@ -1052,6 +1052,7 @@ def extract_read_grammar(
     
     drop = ['readid', 'qual' , 'start', 'end']
 
+    @ogtk.utils.log.call
     def return_parquets_scan(parquet_ifns, sample=False):
         '''
         '''
@@ -1075,7 +1076,9 @@ def extract_read_grammar(
                     .collect() 
                     for i in parquet_ifns
                     )
-
+    # TODO check whether this splitting of the function is still needed 
+    # https://github.com/pola-rs/polars/issues/8338
+    @ogtk.utils.log.call
     def return_parquets_read(parquet_ifns, sample=False, use_pyarrow=True):
         '''
         '''
@@ -1118,7 +1121,6 @@ def extract_read_grammar(
         df
         .lazy()
         .with_columns(pl.col('seq').alias('oseq'))
-        .with_columns(pl.col('seq').str.extract(f'({wts})', 1).alias('spacer'))
         #.with_columns(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
         .with_columns(pl.col('seq').str.replace_all(f'.*?({fuzzy_tso})', '[···TSO···]'))
         .with_columns(pl.col('seq').str.replace_all(f'.*({fuzzy_u6})', '[···U6···]'))
@@ -1137,16 +1139,8 @@ def extract_read_grammar(
         .with_columns(pl.col('seq').str.replace_all(r'\[···U6···\]', '[···TSO···]'))
         .with_columns(pl.col('seq').str.replace_all(r'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
 
-        #purify spacer sequence    
-        .with_columns(pl.col('seq').str.replace(r'CTAGA.+?$', '').alias('xspacer'))
-        .with_columns(pl.col('xspacer').str.replace(r'\[···TSO···\]', ''))
-        .with_columns(pl.col('xspacer').str.replace(r'\[···CNSCFL···\]', ''))
-        .with_columns(pl.col('xspacer').str.replace(r'\[···bU6···\]', ''))
 
-        .with_columns(pl.when(pl.col('spacer').is_null()).then(pl.col('xspacer')).otherwise(pl.col('spacer')).alias('spacer'))
-        .with_columns(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
-
-        .drop([i for i in ['qual',  'readid', 'start', 'end', 'xspacer'] if i in df.columns])
+        .drop([i for i in ['qual',  'readid', 'start', 'end'] if i in df.columns])
   #      .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
     ).collect()
     logger.step(f'[green] done[/]', extra={"markup": True})
@@ -1167,7 +1161,7 @@ def empirical_kalhor_annotation(df: pl.DataFrame, drop_counts: bool=True)->pl.Da
             .explode('spacer')
             .unnest('spacer')
              #.rename({'':'spacer', 'counts':'spacer_ibar_mols'}) # remove rename
-            .rename({'counts':'spacer-ibar_mols'}) # remove rename
+            .rename({'count':'spacer-ibar_mols'}) # remove rename
             .join(wl, right_on='spacer', left_on='spacer', how='inner')
         )
     if drop_counts:
@@ -1186,13 +1180,13 @@ def count_essential_patterns(df: pl.DataFrame, seq_col: str = 'seq') -> pl.DataF
         df
         .lazy()
         .with_columns([
-            pl.col(seq_col).str.count_match('TSO').alias('tsos'),
-            pl.col(seq_col).str.count_match('SCF1').alias('dss'),
-            pl.col(seq_col).str.count_match('XXX').alias('sts'),
-            pl.col(seq_col).str.count_match('·U6·').alias('u6s'),
-            pl.col(seq_col).str.count_match('bU6').alias('bu6s'),
-            pl.col(seq_col).str.count_match('CNSCFL').alias('can'),
-            pl.col(seq_col).str.count_match('WT').alias('wts'),
+            pl.col(seq_col).str.count_match('TSO').alias('np_tsos'),
+            pl.col(seq_col).str.count_match('SCF1').alias('np_dss'),
+            pl.col(seq_col).str.count_match('XXX').alias('np_sts'),
+            pl.col(seq_col).str.count_match('·U6·').alias('np_u6s'),
+            pl.col(seq_col).str.count_match('bU6').alias('np_bu6s'),
+            pl.col(seq_col).str.count_match('CNSCFL').alias('np_can'),
+            pl.col(seq_col).str.count_match('WT').alias('np_wts'),
             pl.col('spacer'),
         ])
         .collect()
@@ -1226,41 +1220,46 @@ def ibar_reads_to_molecules(
         Additionally, top representative encoded sequences and original sequences are kept
     '''
     # collapse reads into molecules
-    # top_n should always be == 1
-    top_n = 1
-    groups =['cbc', 'umi', 'raw_ibar', 'spacer', 'wt'] 
+    groups =['cbc', 'umi', 'raw_ibar', 'seq'] 
 
     if modality =='single-molecule':
         groups = groups[1:]
+
     df = (
-        df 
+        df
         .lazy()
-        .group_by(groups)
-            .agg([
-                pl.col('oseq').value_counts(sort=True).head(top_n), 
-                # TODO change this for a filter where we keep the top one and then force the other
-                pl.col('seq').value_counts(sort=True).head(top_n), 
-                pl.col('seq').count().alias('umi_reads') 
-                ])
+        .filter(pl.col('raw_ibar').is_not_null())
+        .with_columns(pl.count('seq').over(groups).alias('seq_counts'))
+        .group_by(groups[:-1]) #type: ignore
+            .agg(
+                umi_reads = pl.count(),
+                has_ties = (pl.col('seq_counts') == pl.col('seq_counts').max()).sum() # perhaps can be simplified with .unique_counts ?
+                            != pl.col('seq_counts').max(),
+                umi_dom_reads =  pl.col('seq_counts').max(),
+                seq =  pl.col('seq').take(pl.col('seq_counts').arg_max()),
+                oseq = pl.col('oseq').take(pl.col('seq_counts').arg_max())
+            )
         .collect()
-        .explode('seq').unnest('seq').rename({'counts':'umi_dom_reads'})
-        .explode('oseq').unnest('oseq').drop('counts')
+        .explode('seq')
+        .explode('oseq')
     )
 
-    return(df)
+    logger.info(f'filtering {df["has_ties"].sum()} ties {df["has_ties"].mean():.2%}')
+
+    return df.filter(pl.col('has_ties').is_not()).drop('has_ties')
 
 @ogtk.utils.log.call
 def noise_spectrum(batch: str,
                    df: pl.DataFrame,
                    columns: str | Sequence = 'wts',
-                   index: Sequence= ['sts', 'u6s', 'can', 'dss'],
+                   index: Sequence= ['np_sts', 'np_u6s', 'np_can', 'np_dss'],
+                   do_plot:bool=False,
                    out_fn: str| None= None) -> None:
     '''
     Generate the complex heatmaps that encode noise according to features
     '''
+    #TODO improve this function
     df = count_essential_patterns(df)
-    #index =['u6s', 'sts', 'dss', 'can'] 
-    #columns = 'wts'
     xxx = df.pivot(index=index, 
                    columns=columns, 
                    values='umi', 
@@ -1276,7 +1275,8 @@ def noise_spectrum(batch: str,
         .apply(lambda x: 100*x/(df.shape[0]/1.0))
         .fillna(0)
         )
-    print(xxxp.apply(sum))
+
+    logger.info(xxxp.apply(sum))
     xxx = (
         xxx.rename(rename_d)
         .to_pandas()
@@ -1286,27 +1286,30 @@ def noise_spectrum(batch: str,
     )    
     
 
-    fig, axes = plt.subplots(2,1, dpi=60, figsize=(12, 6*len(index)))
-    
-    sns.heatmap(xxxp, annot=True, fmt='.1f', ax=axes[0], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
-    axes[0].set_title(batch)
-    axes[0].set_yticklabels(axes[0].get_yticklabels(), rotation=0)
-    
-    sns.heatmap(xxx, annot=True, fmt='.1f', ax=axes[1], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
-    axes[1].set_title(batch)
-    axes[1].set_yticklabels(axes[1].get_yticklabels(), rotation=0)
-    
-    plt.tight_layout()
-    if out_fn is not None:
-        fig.savefig(out_fn)
-    
-    plt.show()
+    if do_plot:
+        fig, axes = plt.subplots(2,1, dpi=60, figsize=(12, 6*len(index)))
+        
+        sns.heatmap(xxxp, annot=True, fmt='.1f', ax=axes[0], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
+        axes[0].set_title(batch)
+        axes[0].set_yticklabels(axes[0].get_yticklabels(), rotation=0)
+        
+        sns.heatmap(xxx, annot=True, fmt='.1f', ax=axes[1], annot_kws={"fontsize":16}, cmap="RdYlBu_r")
+        axes[1].set_title(batch)
+        axes[1].set_yticklabels(axes[1].get_yticklabels(), rotation=0)
+        
+        plt.tight_layout()
+        if out_fn is not None:
+            fig.savefig(out_fn)
+        
+        plt.show()
+
+    return((pl.DataFrame(xxx),pl.DataFrame(xxxp)))
 
 @ogtk.utils.log.call
-def filter_ibars(
+def mask_valid_ibars(
         df: pl.DataFrame,
         valid_ibars: Sequence | None=None,
-        min_mols_per_ibar: int=100,
+        min_mols_per_ibar: int=1000,
         min_cells_per_ibar: int | None =1000,
         fraction_cells_ibar: float= 0.2
         )->pl.DataFrame:
@@ -1326,14 +1329,11 @@ def filter_ibars(
         else:
             logger.info(f'{min_cells_per_ibar=} ')
 
-
         valid_ibars = guess_ibars_df(
                 df, 
-                min_cells_per_ibar = min_cells_per_ibar,
+                min_cells_per_ibar = min_cells_per_ibar, #type: ignore
                 min_mols_per_ibar=min_mols_per_ibar)
-
     else:
-        # they are provided:
         logger.info('using provided valid ibars')
     
     logger.info(f'{len(valid_ibars)=}')
@@ -1341,11 +1341,39 @@ def filter_ibars(
     df = df.with_columns(pl.col('raw_ibar').is_in(valid_ibars).alias('valid_ibar'))
     return(df)
 
+@ogtk.utils.log.call 
+def extract_spacer(df: pl.DataFrame, spacers:List|pl.Series) -> pl.DataFrame:
+    ''' Adds 'spacer' field to data frame based on a list of spacers
+    '''
+    spacers_regex = '|'.join(spacers)
+    return (
+        df
+        .with_columns(pl.col('seq').str.extract(f'({spacers_regex})', 1).alias('spacer'))
+        #purify spacer sequence    
+        .with_columns(pl.col('seq').str.replace(r'CTAGA.+?$', '').alias('xspacer'))
+        .with_columns(pl.col('xspacer').str.replace(r'\[···TSO···\]', ''))
+        .with_columns(pl.col('xspacer').str.replace(r'\[···CNSCFL···\]', ''))
+        .with_columns(pl.col('xspacer').str.replace(r'\[···bU6···\]', ''))
+        .with_columns(pl.when(pl.col('spacer').is_null()).then(pl.col('xspacer')).otherwise(pl.col('spacer')).alias('spacer'))
+        .drop('xspacer')
+        #.with_columns(pl.col('seq').str.replace_all(f'({wts})', f'[···WT···]'))
+    )
+
+@ogtk.utils.log.call
+def encode_wt(df: pl.DataFrame, spacers:List) -> pl.DataFrame:
+    ''' Simplifies the 'seq' field by replacing an uncut spacer for the string [···WT···]
+    '''
+    spacers_regex = '|'.join(spacers)
+    return (
+        df
+        .with_columns(pl.col('seq').str.replace_all(f'({spacers_regex})', f'[···WT···]'))
+    )
 @ogtk.utils.log.call
 def mask_wt(df: pl.DataFrame) -> pl.DataFrame:
     ''' Simple routine to add a boolean field that defines uncut entries
     '''
-    wt_str = '\[···WT···\]\[···CNSCFL···\]'
+    wt_str = r'\[···WT···\]\[···CNSCFL···\]'
+
     df= (df
          .with_columns(
              ((pl.col('seq').str.count_match('WT')==1) 
@@ -1487,7 +1515,7 @@ def plot_indel_stacked_fractions(element: str,
 
     plot_stacked_rectangles(rects, title=f'{element_field} {element} {bc}', groups=groups)
 
-def return_aligned_alleles(
+def return_aligned_alleles_emboss(
     df,
     lim=50,
     correct_tss_coord: None|int = 18,
@@ -1527,6 +1555,8 @@ def return_aligned_alleles(
 
     assert df['raw_ibar'].n_unique() == 1, "Please provide a data frame pre-filtered with a single ibar. Best when this function is called within a group_by"
 
+    assert 'kalhor_id' in df.columns, "Missing field: kalhor_id"
+
     foc_sample = df['sample_id'][0]
     foc_ibar= df['raw_ibar'][0]
 
@@ -1534,10 +1564,14 @@ def return_aligned_alleles(
     if df.shape[0]<min_group_size:
         return pl.DataFrame(schema=merged_schema)
 
+    # we reduce the size of the tso sequence to reduce the specificity of the match
+    tso_string = return_feature_string("tso")
+    fuzzy_tso = fuzzy_match_str(tso_string[5:], wildcard=".{0,1}")
     raw_fasta_entries = (
             df
             .with_columns(
-                pl.col('oseq').str.replace(f'.+?{return_feature_string("tso")}', return_feature_string("tso"))
+                # a parenthesis is needed for the fuzzy pattern to include the wildcards at the beginning
+                pl.col('oseq').str.replace(f'^.+?({fuzzy_tso})', tso_string)
                 .alias('seq_trim')
             )
             .with_columns(
@@ -1545,7 +1579,7 @@ def return_aligned_alleles(
                 .alias('sweight')
             )
             .with_columns(
-                [pl.col(i).rank().cast(pl.Int64).suffix('_encoded') for i in ['seq_trim',]]
+                [pl.col(i).rank().cast(pl.Int64).name.suffix('_encoded') for i in ['seq_trim',]]
             )
             .with_row_count(name='id')
             .with_columns(
@@ -1576,7 +1610,7 @@ def return_aligned_alleles(
             raw_fasta_entries
             .filter(pl.col('wt'))['spacer']
             .value_counts()
-            .sort('counts', descending=True)
+            .sort('count', descending=True)
             )
     #TODO change to use a defined spacer db
     if foc_spacer.shape[0]==0:
@@ -1717,7 +1751,7 @@ def to_intervals(pos_array, sample_id, lim=50):
             pl.Series(pos_array, dtype=pl.Float64)
             .append(pl.Series(range(lim)).cast(pl.Float64))
             .value_counts()
-            .with_columns(pl.col('counts')-1)
+            .with_columns(pl.col('count')-1)
             .rename({'':'pos', "counts":sample_id})
             .with_columns(pl.col("pos").cast(pl.Float64))
             .with_columns(pl.col(sample_id)/len(pos_array))
