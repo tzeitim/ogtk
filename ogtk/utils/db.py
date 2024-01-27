@@ -5,6 +5,14 @@ from rich.console import Console
 from rich.text import Text
 import polars as pl
 
+from ogtk.utils.log import Rlogger
+logger = Rlogger().get_logger()
+
+def init_logger(self):
+    from ogtk.utils.log import Rlogger
+    self.logger = Rlogger()
+    #logger.set_level("DEBUG")
+
 class Xp():
     ''' Imports a yaml file into an instance of the class xp (experiment). Attributes are directly assigned via the yaml file
     '''
@@ -13,6 +21,8 @@ class Xp():
         self.consolidated = False
         self.console = Console(width=800)
         self.quiet = quiet
+
+        init_logger(self)
 
         if conf_fn is not None:
             conf_dict = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
@@ -67,18 +77,18 @@ class Xp():
                     if k not in vars(self):
                         setattr(self, k, eval(xp_template[k]))
                     else:
-                        self.print(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
+                        logger.debug(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
                 else:
                     # direct assignment
                     if k not in vars(self):
                         setattr(self, k, xp_template[k])
                     else:
-                        self.print(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
+                        logger.debug(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
 
 
             setattr(self, "consolidated", True)
         else:
-            print('an experiment template is needed')
+            logger.debug('an experiment template is needed')
 
     def init_workdir(self):
         ''' create dir tree for a given experiment
@@ -90,15 +100,15 @@ class Xp():
             wd_dir = getattr(self, i)
             if not os.path.exists(wd_dir):
                 os.system(f"mkdir -p {wd_dir}")
-                self.print(f":construction:\t{wd_dir}")
+                logger.debug(f":construction:\t{wd_dir}", extra={"markup": True})
             else:
-                self.print(f":mag:\t{wd_dir}")
+                logger.debug(f":mag:\t{wd_dir}", extra={"markup": True})
 
     def reset_done(self, pattern='*'):
         ''' patterns can be: "cr", "bcl2fq", ""
         '''
         cmd = f'rm {self.wd_logs}/.{pattern}_done'
-        print(cmd)
+        logger.debug(cmd)
         os.system(cmd)
 
     def print(self, text, style="bold magenta", force=False, *args, **kwargs):
@@ -118,7 +128,7 @@ class Xp():
             out_dir = f'{self.wd_samplewd}'
 
         out_fn = f'{out_dir}/{out_fn}'
-        self.print(f'Saving xp conf to {out_fn}')
+        logger.io(f'Saving xp conf to {out_fn}')
 
         if xp_conf_keys is None:
             xp_conf_keys = vars(self).keys()
@@ -199,7 +209,7 @@ def run_cranger(xp, force=False, dry=False, **args):
             
     for k in cr.keys() & cr_g.keys():
         cr_g[k] = cr[k]
-        xp.print(f'setting {k}\t-->\t{cr_g[k]}', 'yellow')
+        logger.debug(f'setting {k}\t-->\t{cr_g[k]}')
 
     # populate command
     # sanitize types
@@ -210,8 +220,8 @@ def run_cranger(xp, force=False, dry=False, **args):
     for k,v in cr_g.items():
         cr_g[k] = str(v)
 
-    xp.print(cr)
-    xp.print(cr_g)
+    logger.debug(cr)
+    logger.debug(cr_g)
     #cmd: BIN count --uiport=UIPORT --id=SAMPLE_ID --fastqs=FASTQ_DIR --sample=FASTQ_SAMPLE_STR --transcriptome=TRANSCRIPTOME --localcores=LOCAL_CORES --localmem=LOCAL_MEM OPTIONS
     cmd = (
             cr_g['cmd']
@@ -228,8 +238,8 @@ def run_cranger(xp, force=False, dry=False, **args):
 
     done_token = f"{xp.wd_logs}/.cr_done"
 
-    xp.print(cmd)
-    xp.print(f"{xp.wd_logs}/cr.out\n{xp.wd_logs}/cr.err", "green")
+    logger.debug(cmd)
+    logger.debug(f"{xp.wd_logs}/cr.out\n{xp.wd_logs}/cr.err")
     # TODO add a cr entry for the cmd ran
 
     if not dry:
@@ -277,15 +287,15 @@ def run_bcl2fq(xp, force=False, dry=False, **args):
             
     for k in b2fq.keys() & b2fq_g.keys():
         b2fq_g[k] = b2fq[k]
-        xp.print(f'setting {k}\t-->\t{b2fq_g[k]}', 'yellow')
+        logger.debug(f'setting {k}\t-->\t{b2fq_g[k]}')
 
     # populate command
     # sanitize types
     for k,v in b2fq_g.items():
         b2fq_g[k] = str(v)
 
-    xp.print(b2fq)
-    xp.print(b2fq_g)
+    logger.debug(b2fq)
+    logger.debug(b2fq_g)
 
     #bcl2fastq  --processing-threads THREADS --no-lane-splitting --barcode-mismatches BARCODEMM --sample-sheet SAMPLE_SHEET --runfolder-dir RUNDIR --output-dir OUTDIR OPTIONS'}
     cmd = (
@@ -300,8 +310,8 @@ def run_bcl2fq(xp, force=False, dry=False, **args):
     cmd = f"conda run -n {b2fq_g['conda_env']} {cmd}"
     done_token = f"{xp.wd_logs}/.bcl2fq_done"
 
-    xp.print(cmd)
-    xp.print(f"{xp.wd_logs}/bcl2fastq.out\n{xp.wd_logs}/bcl2fastq.err", "green")
+    logger.debug(cmd)
+    logger.debug(f"{xp.wd_logs}/bcl2fastq.out\n{xp.wd_logs}/bcl2fastq.err")
 
     if not dry:
         if os.path.exists(done_token) and not force:
@@ -341,20 +351,20 @@ def tabulate_xp(xp, force=False):
 
     if 'tabulate' in vars(xp):
         for suffix in xp.tabulate.keys():
-            xp.print(f"{suffix}", 'bold #ff0000')
+            logger.debug(f"{suffix}")
 
             path_to_reads = f'{xp.wd_fastq}/{suffix}'
             rev_comp_r2 = xp.tabulate[suffix]
 
-            xp.print("path to reads:")
-            xp.print(path_to_reads, 'bold white')
+            logger.debug("path to reads:")
+            logger.debug(path_to_reads)
 
             pattern =f'{xp.sample_id}*R1*'
-            xp.print(f"pattern={pattern}", 'bold green')
-            xp.print(f"reverse complement r2 ={rev_comp_r2}", 'bold green')
+            logger.debug(f"pattern={pattern}")
+            logger.debug(f"reverse complement r2 ={rev_comp_r2}")
 
             r1 = ut.sfind(path_to_reads, pattern=pattern)
-            print(r1)
+            logger.debug(r1)
 
             if len(r1)==0:
                 raise ValueError(f'No files found under the pattern {pattern}')
@@ -363,7 +373,7 @@ def tabulate_xp(xp, force=False):
                 r1 = [r1]
 
             for found in r1:
-                xp.print(f"tabbing {found}")
+                logger.debug(f"tabbing {found}")
                 outdir = f'{xp.wd_samplewd}/{suffix}'
                 ut.tabulate_paired_umified_fastqs(r1=found, 
                                                   force=force, 
@@ -379,5 +389,4 @@ def print_template(conf_fn: str = '/home/polivar/src/artnilet/conf/xps/template.
     '''
     conf_dict = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
     rich.print(conf_dict)
-
 
