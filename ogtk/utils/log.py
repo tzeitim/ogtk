@@ -1,18 +1,21 @@
 from rich.logging import RichHandler
+from rich.console import Console
 from functools import wraps
 import logging
 import inspect
 import polars as pl
 import pandas as pd
 
+# rich logger
 class Rlogger:
     _instance = None
 
     levels = {
-        "INFO": logging.INFO,
-        "CRITICAL": logging.CRITICAL,
-        "DEBUG": logging.DEBUG,
-        "STEP": 25
+        "CRITICAL": logging.CRITICAL, #50
+        "STEP": 25,
+        "INFO": logging.INFO, #20
+        "IO": 19,
+        "DEBUG": logging.DEBUG, #10
     }
 
     def __new__(cls):
@@ -23,18 +26,27 @@ class Rlogger:
 
     def setup_logger(self):
         STEP_LEVEL_NUM = self.levels['STEP']
+        IO_LEVEL_NUM = self.levels['IO']
         
+        def io(self, message, *args, **kws):
+            if self.isEnabledFor(IO_LEVEL_NUM):
+                # Yes, logger takes its '*args' as 'args'.
+                self._log(IO_LEVEL_NUM, message, args, **kws) 
+
         def step(self, message, *args, **kws):
             if self.isEnabledFor(STEP_LEVEL_NUM):
                 # Yes, logger takes its '*args' as 'args'.
                 self._log(STEP_LEVEL_NUM, message, args, **kws) 
 
         logging.addLevelName(STEP_LEVEL_NUM, "STEP")
+        logging.addLevelName(IO_LEVEL_NUM, "IO")
+
         setattr(logging.Logger, "step", step)
+        setattr(logging.Logger, "io", io)
 
         self.logger = logging.getLogger("rich_logger")
         self.logger.setLevel(logging.INFO)
-        handler = RichHandler()
+        handler = RichHandler(console=Console(width=250))
         formatter = logging.Formatter("%(message)s", datefmt="[%X]")
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
@@ -53,22 +65,29 @@ def format_arg(arg):
         return f"pd.DataFrame(shape={arg.shape}, cols={arg.columns!r})"
     if isinstance(arg, pl.DataFrame):
         return f"pl.DataFrame(shape={arg.shape}, cols={arg.columns!r})"
-    else:
-        return repr(arg)
+    return is_iterable(arg)
 
+def is_iterable(obj):
+    try:
+        iter(obj)
+        if isinstance(obj, pl.Series):
+            return f"pl.Series(shape={obj.shape}, values={obj.head(5)!r})"
+        return repr(obj)[0:200]
+    except TypeError:
+        return repr(obj)
 
 def format_value(value):
     if isinstance(value, pd.DataFrame):
         return f"pd.DataFrame(shape={value.shape}, cols={value.columns!r})"
     if isinstance(value, pl.DataFrame):
         return f"pl.DataFrame(shape={value.shape}, cols={value.columns!r})"
-    else:
-        return repr(value)
+    return is_iterable(value)
 
 def call(func):
+    @wraps(func)
     def wrapper(*args, **kwargs):
         logger = Rlogger().get_logger()
-        logger.step(f"{func.__name}")
+        logger.step(f"{func.__name__}")
 
         bound_args = inspect.signature(func).bind(*args, **kwargs)
         bound_args.apply_defaults()
