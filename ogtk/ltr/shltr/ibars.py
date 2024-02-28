@@ -5,21 +5,152 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
+import polars.selectors as cs
 import os
 import regex
 import seaborn as sns
 import tempfile
 import rich 
+from pyseq_align import NeedlemanWunsch, SmithWaterman
+import ngs_tools
 
 import ogtk
 import ogtk.utils as ut
 import ogtk.utils.log as log
 
 from ogtk.ltr import ltr_utils
-from . import plot
+from . import plot as pt
 
 from ogtk.utils.log import Rlogger
 logger = Rlogger().get_logger()
+
+@ogtk.utils.log.call
+def reads_to_molecules(sample_id: str,
+           parquet_ifn: str, 
+           modality: str,
+           corr_dict_fn: str | None= None,
+           min_reads: int=1, 
+           max_reads: int=int(1e6),
+           downsample: int | None=None,
+           min_cells_per_ibar: int | None=1000,
+           clone: str | None=None,
+           columns_ns: str | Sequence='np_tsos',
+           cache_dir: str='/local/users/polivar/src/artnilet/cache',
+           force: bool=False, 
+           ) -> pl.DataFrame:
+    ''' Analytical routine to process UMIfied shRNA from single-cell assays (parquet format).
+        If `clone` is not provided it assumes that can be found as the first element of a dash-splitted `sample_id` string. 
+        Off-targets are defined by reads without an ibar pattern match.
+        UMIs are filtered based on the number of reads
+    '''
+    
+    if modality not in ['single-cell', 'single-molecule']:
+        raise ValueError(f'incorrect modality. please use "single-cell" or "single-molecule"')
+
+    spacers = load_wl(True)['spacer']
+
+    cache_out = f'{cache_dir}/{sample_id}_r2mols.parquet'
+    encoded_reads_parquet = f'{cache_dir}/{sample_id}_encoded_reads.parquet'
+
+    if clone is None:
+        clone = sample_id.split('_')[0]
+
+    if os.path.exists(cache_out) and not force:
+        logger.info(f'loading from cache {cache_out}')
+        rdf = pl.read_parquet(cache_out)
+    else:
+        # generate a reads data frame 
+        if os.path.exists(encoded_reads_parquet) and not force:
+            logger.info(f"loading {encoded_reads_parquet=}")
+            rdf = pl.read_parquet(encoded_reads_parquet)
+        else:
+            rdf = encode_reads_with_dummies(parquet_ifn = parquet_ifn, batch = sample_id, sample = downsample)
+            rdf.write_parquet(encoded_reads_parquet)
+
+        tot_reads = rdf.shape[0]
+        if modality == 'single-cell':
+            rdf = rdf.with_columns(pl.col('cbc')+"-1")
+
+        # correct cbc if path to dictionary is provided
+        #if corr_dict_fn is not None:
+        #    logger.info('correcting with dic')
+        #    rdf = ogtk.utils.cd.correct_cbc_pl(rdf, ogtk.utils.cd.load_corr_dict(corr_dict_fn))
+
+        # CPU-intensive
+        # TODO add thread control
+        
+        rdf = ibar_reads_to_molecules(rdf, modality=modality)
+        rdf = extract_spacer(rdf, spacers) #type: ignore
+        rdf = encode_wt(rdf, spacers) #type: ignore
+        rdf = count_essential_patterns(rdf)
+
+        # plot noise and return noise-related data frames
+        noise_df, noise_df_pc = \
+                noise_spectrum(
+                        sample_id,
+                        rdf,
+                        index = ['np_dss'],
+                        columns=columns_ns)    
+
+        path_noise_out = f'{cache_dir}/{sample_id}_noise_spectrum.parquet'
+        path_noisep_out = f'{cache_dir}/{sample_id}_noise_spectrum_pc.parquet'
+
+        logger.io(f"writing {path_noise_out}")
+        logger.io(f"writing {path_noisep_out}")
+
+        noise_df.write_parquet(path_noise_out)
+        noise_df_pc.write_parquet(path_noisep_out)
+
+        logger.step('dropping noise pattern fields')
+        rdf = rdf.drop(cs.by_name("^np_.+$"))
+
+        rdf = mask_wt(rdf)
+
+        plot = False
+        if plot:
+            pt.plot_sibling_noise(rdf)
+
+        #gather stats
+        # how to determine pc_offt TODO
+        #pc_offt = rdf.filter(~pl.col("valid_ibar")).shape[0]/rdf.shape[0]
+        tot_umis = rdf.select('umi').n_unique()
+
+        #logger.info(f'{pc_offt=:.2%}')
+        logger.info(f'{tot_umis=}')
+        logger.info(f'{tot_reads=}')
+
+        umis_allele_group = ['cbc', 'raw_ibar', 'seq'] if modality == "single-cell" else ['raw_ibar', 'seq']
+        n_sib_group = ['cbc', 'raw_ibar'] if modality == "single-cell" else ['raw_ibar']
+        rdf = (rdf
+                .with_columns(pl.lit(sample_id).alias('sample_id'))
+                .with_columns(pl.lit(clone).alias('clone'))
+                .filter(pl.col('raw_ibar').is_not_null())
+                .filter(pl.col('umi_dom_reads')>=min_reads)
+                .filter(pl.col('umi_dom_reads')<=max_reads)
+                .with_columns(pl.col('umi').n_unique().over(umis_allele_group).alias('umis_allele'))
+                .with_columns(pl.col('seq').n_unique().over(n_sib_group).alias('n_sib'))
+               )
+        # consolidates global QC metrics into df; these are agnostic to downsampling
+        rdf = qc_stats(rdf, tot_umis, tot_reads)
+        path_qc_stats= f'{cache_dir}/{sample_id}.qc_stats.parquet'
+
+        logger.io(f"writing {path_qc_stats}") #pyright: ignore
+        rdf.select(cs.by_name("^(qc_.+|sample_id)$")).unique().write_parquet(path_qc_stats)
+        rdf = rdf.drop(cs.by_name("^qc_.+$"))
+
+        rdf.write_parquet(cache_out)
+    return(rdf)    
+
+@ogtk.utils.log.call
+def qc_stats(df, tot_umis, tot_reads):
+    ''' helper function that consolidates global (downsampling agnostic) QC metrics into a data frame
+    '''
+    return(
+            df
+           #.with_columns(pl.lit(pc_offt).alias('qc_pc_offt'))
+           .with_columns(pl.lit(tot_umis).alias('qc_tot_umis'))
+           .with_columns(pl.lit(tot_reads).alias('qc_tot_reads'))
+           )
 
 def error_string(string, errors=0, error_type='e'):
     ''' es = error string 
@@ -359,7 +490,7 @@ def genotype_ibar_clone(
     else:
         # TODO add support for plotting what it means a given cutoff in the 
         # read count per umi distribution
-        # e.g by calling plot.reads_per_unit()
+        # e.g by calling pt.reads_per_unit()
         if min_cov is None:
             cell_bcs, min_cov = filter_umis_quantile_tabix(tabix_fn=tabix_fn, quantile=quantile)
             print(f'quantile {quantile} represents a min of {min_cov} reads')
@@ -442,29 +573,29 @@ def generate_qc_plots(ibars_df, unit,  min_cov, sample_id, png_prefix=None):
     ###
 
     ###
-    plot.reads_per_umi_ecdf(ibars_df, sample_id=sample_id, min_cov = min_cov, png_prefix=png_prefix)
+    pt.reads_per_umi_ecdf(ibars_df, sample_id=sample_id, min_cov = min_cov, png_prefix=png_prefix)
 
     ###
-    plot.boxen_reads_per_ibar(ibars_df, sample_id=sample_id, png_prefix=png_prefix)
+    pt.boxen_reads_per_ibar(ibars_df, sample_id=sample_id, png_prefix=png_prefix)
  
     ###
-    plot.boxen_mols_per_ibar(ibars_df, sample_id=sample_id, png_prefix=png_prefix)
+    pt.boxen_mols_per_ibar(ibars_df, sample_id=sample_id, png_prefix=png_prefix)
             
     ###
-    plot.expression_levels_curve(ibars_df, sample_id=sample_id, png_prefix=png_prefix)
+    pt.expression_levels_curve(ibars_df, sample_id=sample_id, png_prefix=png_prefix)
     ###
-    plot.macro_expression_levels_bar(ibars_df, sample_id=sample_id, png_prefix=png_prefix)
-    #plot.expression_levels_bar(ibars_df, sample_id=sample_id, expected=None, png_prefix=png_prefix)
-    #plot.expression_levels_bar(ibars_df, sample_id=sample_id, expected=True, png_prefix=png_prefix)
-    #plot.expression_levels_bar(ibars_df, sample_id=sample_id, expected=False, png_prefix=png_prefix)
-    ###
-
-
+    pt.macro_expression_levels_bar(ibars_df, sample_id=sample_id, png_prefix=png_prefix)
+    #pt.expression_levels_bar(ibars_df, sample_id=sample_id, expected=None, png_prefix=png_prefix)
+    #pt.expression_levels_bar(ibars_df, sample_id=sample_id, expected=True, png_prefix=png_prefix)
+    #pt.expression_levels_bar(ibars_df, sample_id=sample_id, expected=False, png_prefix=png_prefix)
     ###
 
-    plot.kde_mols_per_unit(ibars_df, unit=unit, sample_id=sample_id, png_prefix=png_prefix)
-    plot.ibar_confidence(ibars_df, correction = True, sample_id=sample_id, png_prefix=png_prefix)
-    plot.ibar_confidence(ibars_df, correction = False, sample_id=sample_id, png_prefix=png_prefix)
+
+    ###
+
+    pt.kde_mols_per_unit(ibars_df, unit=unit, sample_id=sample_id, png_prefix=png_prefix)
+    pt.ibar_confidence(ibars_df, correction = True, sample_id=sample_id, png_prefix=png_prefix)
+    pt.ibar_confidence(ibars_df, correction = False, sample_id=sample_id, png_prefix=png_prefix)
 #    with plt.rc_context({'figure.figsize':(15.5, 8.5)}):
 #        
 #        fig, ax = plt.subplots(1,3)
@@ -551,7 +682,7 @@ def filter_umis_quantile_tabix(tabix_fn, quantile):
     filtered_umis = umi_counts[umi_counts>=min_cov].index.to_list()
     
     # plot filtering QCs
-    plot.reads_per_unit(unit, umi_counts, sample_id, png_prefix)
+    pt.reads_per_unit(unit, umi_counts, sample_id, png_prefix)
  
     return((min_cov, filtered_umis))
 
@@ -1147,25 +1278,31 @@ def encode_reads_with_dummies(
 
     return(mask_wt(df))
 
-def empirical_kalhor_annotation(df: pl.DataFrame, drop_counts: bool=True)->pl.DataFrame:
-    ''' Determines the kalhor ids (and the metadata associated to each) to a given ibar-spacer pair.
-        This function should be run on samples that have not been induced.
-        Optionally (``drop_counts``) show the evidence for a given spacer-ibar match.
+def empirical_kalhor_annotation(
+        df: pl.DataFrame,
+        drop_counts: bool=True)->pl.DataFrame:
+    ''' 
+    Determines the kalhor ids (and their metadata) to a given ibar-spacer pair.
+    This function should be run on samples that have not been induced.
+    Optionally (``drop_counts``) show the evidence for a given ibar-spacer
+    pair.
+
+    Returns a data frame that can be used for annotation (join).
     '''
 
-    wl = load_wl(True).drop('clone')
+    wl = ogtk.shltr.ibars.load_wl(True).drop('clone')
+
     # determine the top spacer per raw_ibar
-    tsp_df = (df
-            .group_by(['clone', 'raw_ibar'])
-            .agg(pl.col('spacer').value_counts(sort=True).head(1))
-            .explode('spacer')
-            .unnest('spacer')
-             #.rename({'':'spacer', 'counts':'spacer_ibar_mols'}) # remove rename
-            .rename({'count':'spacer-ibar_mols'}) # remove rename
-            .join(wl, right_on='spacer', left_on='spacer', how='inner')
+    tsp_df = (
+        df
+        .group_by(['sample_id', 'raw_ibar', 'spacer']).len().sort('len', descending=True)
+        .filter(
+            pl.int_range(0, pl.len()).over(['sample_id', 'raw_ibar', 'spacer']) <=1
         )
+        .join(wl, right_on='spacer', left_on='spacer', how='inner')
+    )
     if drop_counts:
-        tsp_df = tsp_df.drop('spacer-ibar_mols')
+        tsp_df = tsp_df.drop('len')
     return(tsp_df)
 
 
@@ -1254,7 +1391,7 @@ def noise_spectrum(batch: str,
                    columns: str | Sequence = 'wts',
                    index: Sequence= ['np_sts', 'np_u6s', 'np_can', 'np_dss'],
                    do_plot:bool=False,
-                   out_fn: str| None= None) -> None:
+                   out_fn: str| None= None):
     '''
     Generate the complex heatmaps that encode noise according to features
     '''
@@ -1303,7 +1440,8 @@ def noise_spectrum(batch: str,
         
         plt.show()
 
-    return((pl.DataFrame(xxx),pl.DataFrame(xxxp)))
+    return pl.DataFrame(xxx), pl.DataFrame(xxxp)
+
 
 @ogtk.utils.log.call
 def mask_valid_ibars(
@@ -1515,6 +1653,176 @@ def plot_indel_stacked_fractions(element: str,
 
     plot_stacked_rectangles(rects, title=f'{element_field} {element} {bc}', groups=groups)
 
+def return_aligned_alleles(
+    df,
+    aligner,
+    lim=50,
+    correct_tss_coord: None|int = 18,
+    min_group_size=100,
+    tso_pad:str|None="",
+    )->pl.DataFrame:
+    '''
+    Requires a data frame that:
+    - belongs to a single ibar
+    - belongs to a single sample
+
+    E.g.
+    df_alg = (
+            df
+            .sample(int(1e5))
+            .group_by('raw_ibar','sample_id')
+            .map_groups(ogtk.shltr.ibars.return_aligned_alleles)
+    )
+
+    Returns the original data frame with additional fields that contain a an aligned version of the original sequence
+     = position-specific code:
+         - -1 is for gap
+         - 0 match
+         - >0 insertion length
+    '''
+    ref_str = "TTTCTTATATGGG[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAACCTAAGGCTAGTCCGTTATCAACTTGGTACT"
+    schema = {"sample_id":str, "ibar":str, "id":str, "aseq":str, "sweight":pl.Int64, "alg":pl.List(pl.Int64)}
+    oschema = {"aseq":str, "alg":pl.List(pl.Int64), "aweight":pl.Int64}
+    merged_schema = df.schema.copy()
+    merged_schema.update(oschema)
+    
+    assert correct_tss_coord is None or isinstance(correct_tss_coord, int), "correct_tss_coords must be None or an integer that defines the correction coordinate"
+
+    assert df['sample_id'].n_unique() == 1, "Please provide a data frame pre-filtered with a single sample_id. Best when this function is called within a group_by"
+
+    assert df['raw_ibar'].n_unique() == 1, "Please provide a data frame pre-filtered with a single ibar. Best when this function is called within a group_by"
+
+
+    foc_sample = df['sample_id'][0]
+    foc_ibar= df['raw_ibar'][0]
+
+
+    if df.shape[0]<min_group_size:
+        logger.info("group too small")
+        return pl.DataFrame(schema=merged_schema)
+
+    # we reduce the size of the tso sequence to reduce the specificity of the match
+    tso_string = return_feature_string("tso")
+    tso_pad = tso_string if tso_pad is None else tso_pad
+    fuzzy_tso = fuzzy_match_str(tso_string[5:], wildcard=".{0,1}")
+    df = (
+            df
+            .with_columns(
+                # a parenthesis is needed for the fuzzy pattern to include the wildcards at the beginning
+                pl.col('oseq').str.replace(f'^.+?({fuzzy_tso})', tso_pad)
+                .alias('seq_trim')
+            )
+            .with_columns(
+                pl.len().over(['wt', 'seq_trim'])
+                .alias('sweight')
+            )
+            .with_columns(
+                [pl.col(i).rank(method="dense").cast(pl.Int64).name.suffix('_encoded') for i in ['seq_trim',]]
+            )
+            .with_row_index(name='id')
+            .drop('seq_trim_encoded')
+        )
+
+    ### delete?
+    if len(df)==0:
+        print("No entries found to generate a fasta file {foc_ibar} {foc_sample}")
+        return pl.DataFrame(schema=merged_schema)
+
+    foc_spacer = (
+            df
+            .filter(pl.col('wt'))['spacer']
+            .value_counts()
+            .sort('count', descending=True)
+            )
+    #TODO change to use a defined spacer db
+    if foc_spacer.shape[0]==0:
+        print(f'No WT allele found for {foc_ibar} {foc_sample}')
+        return pl.DataFrame(schema=merged_schema)
+
+    foc_spacer = foc_spacer['spacer'][0]
+    foc_ref = ref_str.replace('[SPACER]', foc_spacer).replace('[IBAR]', foc_ibar)
+    foc_ref = foc_ref.replace(return_feature_string("tso"), tso_pad)
+
+    # ibars could show different sizes as spacer are varible
+    # we use the downstream ibar sequence to anchor the ibar position
+    foc_ref_match = regex.search(f'{foc_ibar}{return_feature_string("dsibar")}', foc_ref)
+    lim = lim if foc_ref_match is None else foc_ref_match.start()
+
+    coord_bins = range(lim)
+    alignment = df.select('seq_trim', 'oseq', 'sweight').unique()
+
+    if aligner is None:
+        aligner = NeedlemanWunsch(
+            #substitution_matrix=substitution_matrix,
+            gap_open=-17,
+            gap_extend=-1,
+        )
+    # perform the alignment
+    alignment =(
+            alignment
+            .with_columns(
+                pl.col('seq_trim')
+               .map_elements(lambda x: lambda_needlemanw(x, foc_ref, aligner))
+               .alias('alignment')
+               )
+            )
+
+    alignment = alignment.with_columns(
+        cigar=pl.col('alignment').list.get(0), 
+        aref=pl.col('alignment').list.get(1), 
+        aseq=pl.col('alignment').list.get(2), 
+        ascore=pl.col('alignment').list.get(3), 
+        ).drop('alignment')
+
+    df = df.join(alignment, left_on='oseq', right_on='oseq', how='left') 
+
+    return df
+
+    # create alignment data frame
+    alg_df = []
+    # 1 try to fix the tss slippage by replacing the first 18 bases of the aligned sequence with the reference
+    # 2 determine de alg_mask for cases without insertions
+    # 3 determine the alg_mask for cases with insertions
+    # 4 create the data frame using to_interval_df
+    # 5 join the data frame with the original df
+    # 6 return the data frame
+
+    for ((ref_name, read_name), (ref_seq, aligned_seq)) in alignment_tuples:
+        if correct_tss_coord is not None:
+            ref_seqv = np.array(list(ref_seq))
+            aligned_seqv = np.array(list(aligned_seq))
+            c_idx = range(correct_tss_coord) 
+            aligned_seqv[c_idx]=ref_seqv[c_idx]
+            aligned_seq = ''.join(aligned_seqv)
+
+        expansion_factor = regex.search(".+sweight_(.+)_id", read_name)
+        expansion_factor = int(expansion_factor.groups()[0])
+
+        # when reads don't have insertions
+        if "-" not in ref_seq:
+            alg_mask = return_del_mask(aligned_seq, 200)
+            aseq =  aligned_seq[0:lim]
+            #{"sample_id":str, "ibar":str, "id":str, "aseq":str, "sweight":pl.Int64, "alg":pl.List(pl.Int64)}
+            alg_df.append((foc_sample, foc_ibar, read_name, aseq, expansion_factor, alg_mask))
+        # cases where there are insertions
+        # add an additional field iseq to concatenate a string of integrations, 
+        if "-" in ref_seq:
+            alg_mask = return_ins_mask(ref_seq, 200)
+            # TODO check the policy for trimming insertions
+            aseq =  aligned_seq[0:lim]
+            alg_df.append((foc_sample, foc_ibar, read_name, aligned_seq, expansion_factor, alg_mask))
+
+    alg_df = to_interval_df(alg_df, schema=schema, sort_by='sweight') 
+
+    raw_fasta_entries = (
+        raw_fasta_entries
+        .join(alg_df, left_on='id', right_on='id', how='left')
+        .with_columns(pl.count().over('aseq').alias('aweight'))
+        .select(merged_schema.keys())
+        .with_columns(pl.col('aweight').cast(pl.Int64))
+    )
+    return raw_fasta_entries
+
 def return_aligned_alleles_emboss(
     df,
     lim=50,
@@ -1575,13 +1883,13 @@ def return_aligned_alleles_emboss(
                 .alias('seq_trim')
             )
             .with_columns(
-                pl.count().over(['wt', 'seq_trim'])
+                pl.len().over(['wt', 'seq_trim'])
                 .alias('sweight')
             )
             .with_columns(
-                [pl.col(i).rank().cast(pl.Int64).name.suffix('_encoded') for i in ['seq_trim',]]
+                [pl.col(i).rank(method="dense").cast(pl.Int64).name.suffix('_encoded') for i in ['seq_trim',]]
             )
-            .with_row_count(name='id')
+            .with_row_index(name='id')
             .with_columns(
                 (
                  "WT_"+pl.col('wt')\
@@ -1621,13 +1929,14 @@ def return_aligned_alleles_emboss(
     foc_ref = ref_str.replace('[SPACER]', foc_spacer).replace('[IBAR]', foc_ibar)
 
     # ibars could show different sizes as spacer are varible
+    # we use the downstream ibar sequence to anchor the ibar position
     foc_ref_match = regex.search(f'{foc_ibar}{return_feature_string("dsibar")}', foc_ref)
     lim = lim if foc_ref_match is None else foc_ref_match.start()
 
     coord_bins = range(lim)
 
     # perform the alignment
-    alignment_tuples = alignpw_ibar(
+    alignment_tuples = alignpw_ibar_emboss(
             raw_fasta_entries=raw_fasta_entries,
             foc_sample = foc_sample,
             foc_ibar =  foc_ibar,
@@ -1686,18 +1995,18 @@ def return_del_mask(aseq, lim):
         cur = operation_len-1
     return pl.Series(alg_mask)
 
-def return_ins_mask(aseq, lim): 
+def return_ins_mask(ref_seq, lim): 
     '''
     '''
     alg_mask = np.zeros(lim, dtype=int)
     cur = 0
-    for match in regex.finditer("-+", aseq):
+    for match in regex.finditer("-+", ref_seq):
         operation_len = np.diff(match.span())[0]
         alg_mask[match.start()-cur] = operation_len
         cur = operation_len-1
     return pl.Series(alg_mask)
 
-def alignpw_ibar(
+def alignpw_ibar_emboss(
         raw_fasta_entries:pl.DataFrame,
         foc_ibar:str,
         foc_sample:int,
@@ -1710,6 +2019,10 @@ def alignpw_ibar(
 
     To create one:
         conda create -n emboss -y -c bioconda  emboss
+        
+    Returns: a tuple of tuples in the form: 
+            ( (query_name, ref_name), (query_seq,ref_seq)) 
+        from an alignment from a fasta file
     '''
     with tempfile.TemporaryDirectory() as temp_dir:
         run_id = f'{foc_sample}_{foc_ibar}'
@@ -1776,3 +2089,12 @@ def return_exploded_positions(df, lim=50):
             .with_columns( pl.col("^pos.+$") * pl.col('aweight'))
         )
     return fdata
+
+def lambda_needlemanw(seq, foc_ref, aligner):
+    ''' 
+    '''
+    alignment = aligner.align(foc_ref, seq)
+    return [ngs_tools.sequence.alignment_to_cigar(alignment.result_a, alignment.result_b),
+            alignment.result_a,
+            alignment.result_b,
+            alignment.score]
