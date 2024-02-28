@@ -791,7 +791,7 @@ def return_corrected_spacer(x, spacer_corrector, correction_pad='GGT'):
     return(f"{correction_pad}{match.group('spacer')}{match.group('rest')}"  if match else x)
 
 def load_wl(as_pl: bool=False, turn_to_cat: bool= False):
-    ''' load Kalhor table
+    ''' load metadata table
     '''
 
     wl = pd.read_csv('/local/users/polivar/src/artnilet/conf/protospacers_singlecell.csv')
@@ -1278,14 +1278,13 @@ def encode_reads_with_dummies(
 
     return(mask_wt(df))
 
-def empirical_kalhor_annotation(
+def empirical_metadata_annotation(
         df: pl.DataFrame,
         drop_counts: bool=True)->pl.DataFrame:
     ''' 
-    Determines the kalhor ids (and their metadata) to a given ibar-spacer pair.
-    This function should be run on samples that have not been induced.
-    Optionally (``drop_counts``) show the evidence for a given ibar-spacer
-    pair.
+    Determines the metadata annotation to a given ibar-spacer pair. This
+    function should be run on samples that have not been induced. Optionally
+    (``drop_counts``) show the evidence for a given ibar-spacer pair.
 
     Returns a data frame that can be used for annotation (join).
     '''
