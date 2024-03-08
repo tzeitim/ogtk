@@ -41,7 +41,7 @@ def reads_to_molecules(sample_id: str,
     ''' Analytical routine to process UMIfied shRNA from single-cell assays (parquet format).
         If `clone` is not provided it assumes that can be found as the first element of a dash-splitted `sample_id` string. 
         Off-targets are defined by reads without an ibar pattern match.
-        UMIs are filtered based on the number of reads
+        UMIs are filtered based on the number of reads and quality (e.g. if they contain Ns)
     '''
     
     if modality not in ['single-cell', 'single-molecule']:
@@ -121,11 +121,15 @@ def reads_to_molecules(sample_id: str,
 
         umis_allele_group = ['cbc', 'raw_ibar', 'seq'] if modality == "single-cell" else ['raw_ibar', 'seq']
         n_sib_group = ['cbc', 'raw_ibar'] if modality == "single-cell" else ['raw_ibar']
+
+        logger.info(f'entries before filtering {rdf.shape[0]}')
         rdf = (rdf
                 .with_columns(pl.lit(sample_id).alias('sample_id'))
                 .with_columns(pl.lit(clone).alias('clone'))
                 .filter(pl.col('raw_ibar').is_not_null())
-                .filter(pl.col('umi_dom_reads')>=min_reads)
+                .filter(pl.col('raw_ibar').str.contains('N').not_())
+                .filter(pl.col('spacer').str.contains('N').not_())
+                .filter(pl.col('umi').str.contains('N').not_())
                 .filter(pl.col('umi_dom_reads')<=max_reads)
                 .with_columns(pl.col('umi').n_unique().over(umis_allele_group).alias('umis_allele'))
                 .with_columns(pl.col('seq').n_unique().over(n_sib_group).alias('n_sib'))
@@ -138,6 +142,7 @@ def reads_to_molecules(sample_id: str,
         rdf.select(cs.by_name("^(qc_.+|sample_id)$")).unique().write_parquet(path_qc_stats)
         rdf = rdf.drop(cs.by_name("^qc_.+$"))
 
+        logger.info(f'final entries {rdf.shape[0]}')
         rdf.write_parquet(cache_out)
     return(rdf)    
 
@@ -934,7 +939,7 @@ def get_ibar_table_from_tabix(tbx_ifn, valid_cells, out_fn, name, force=False, s
         df = pl.read_parquet(out_fn)
     return(df)
 
-def annotate_ibars(df: pl.DataFrame):
+def annotate_ibars_db(df: pl.DataFrame):
     '''Annotates data frame using a pre-determined data base
     '''
     wl = load_wl(True)
@@ -1265,7 +1270,7 @@ def encode_reads_with_dummies(
         #.with_columns(pl.col('seq').str.extract(f'([A-Z]{"{6}"})\[···SCF1···\]',1).alias('raw_ibar'))
 
         #######.with_columns(pl.col('seq').str.replace_all(f'(\]{"CTAGA"})', '][···SCF0···]'))
-        .with_columns(pl.col('seq').str.replace_all(r'\[···SCF2···\]\[···LIB···\].+$', '[END]'))
+        .with_columns(pl.col('seq').str.replace_all(r'\[···SCF2···\]\[···LIB···\].+$', ''))
         .with_columns(pl.col('seq').str.replace_all(f'{fuzzy_stammering}', '[XXX]'))
         .with_columns(pl.col('seq').str.replace_all(r'\[···U6···\]', '[···TSO···]'))
         .with_columns(pl.col('seq').str.replace_all(r'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
@@ -1280,6 +1285,7 @@ def encode_reads_with_dummies(
 
 def empirical_metadata_annotation(
         df: pl.DataFrame,
+        top_n:int=1,
         drop_counts: bool=True)->pl.DataFrame:
     ''' 
     Determines the metadata annotation to a given ibar-spacer pair. This
@@ -1289,19 +1295,22 @@ def empirical_metadata_annotation(
     Returns a data frame that can be used for annotation (join).
     '''
 
-    wl = ogtk.shltr.ibars.load_wl(True).drop('clone')
+    wl = ogtk.shltr.ibars.load_wl(as_pl=True).drop('clone')
 
     # determine the top spacer per raw_ibar
     tsp_df = (
         df
         .group_by(['sample_id', 'raw_ibar', 'spacer']).len().sort('len', descending=True)
         .filter(
-            pl.int_range(0, pl.len()).over(['sample_id', 'raw_ibar', 'spacer']) <=1
+            pl.int_range(0, pl.len()).over(['sample_id', 'raw_ibar'])<=top_n-1
         )
         .join(wl, right_on='spacer', left_on='spacer', how='inner')
     )
     if drop_counts:
         tsp_df = tsp_df.drop('len')
+
+    if 'clone' in tsp_df.columns:
+        tsp_df = tsp_df.rename({'clone':'clone_ann'})
     return(tsp_df)
 
 
