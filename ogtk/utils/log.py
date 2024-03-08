@@ -6,15 +6,27 @@ import inspect
 import polars as pl
 import pandas as pd
 
+# Define a custom logger class extending the standard Logger class
+class CustomLogger(logging.Logger):
+    def io(self, message, *args, **kws)->None:
+        IO_LEVEL_NUM = 19
+        if self.isEnabledFor(IO_LEVEL_NUM):
+            self._log(IO_LEVEL_NUM, message, args, **kws)
+    
+    def step(self, message, *args, **kws)->None:
+        STEP_LEVEL_NUM = 25
+        if self.isEnabledFor(STEP_LEVEL_NUM):
+            self._log(STEP_LEVEL_NUM, message, args, **kws)
+
 # rich logger
 class Rlogger:
     _instance = None
 
     levels = {
         "CRITICAL": logging.CRITICAL, #50
-        "STEP": 25,
         "INFO": logging.INFO, #20
         "IO": 19,
+        "STEP": 18,
         "DEBUG": logging.DEBUG, #10
     }
 
@@ -25,25 +37,14 @@ class Rlogger:
         return cls._instance
 
     def setup_logger(self):
-        STEP_LEVEL_NUM = self.levels['STEP']
-        IO_LEVEL_NUM = self.levels['IO']
-        
-        def io(self, message, *args, **kws):
-            if self.isEnabledFor(IO_LEVEL_NUM):
-                # Yes, logger takes its '*args' as 'args'.
-                self._log(IO_LEVEL_NUM, message, args, **kws) 
+        # Set the logger class to our custom logger
+        logging.setLoggerClass(CustomLogger)
 
-        def step(self, message, *args, **kws):
-            if self.isEnabledFor(STEP_LEVEL_NUM):
-                # Yes, logger takes its '*args' as 'args'.
-                self._log(STEP_LEVEL_NUM, message, args, **kws) 
+        # Add custom levels' names
+        logging.addLevelName(self.levels['STEP'], "STEP")
+        logging.addLevelName(self.levels['IO'], "IO")
 
-        logging.addLevelName(STEP_LEVEL_NUM, "STEP")
-        logging.addLevelName(IO_LEVEL_NUM, "IO")
-
-        setattr(logging.Logger, "step", step)
-        setattr(logging.Logger, "io", io)
-
+        # Initialize the logger with the custom class
         self.logger = logging.getLogger("rich_logger")
         self.logger.setLevel(logging.INFO)
         handler = RichHandler(console=Console(width=250))
