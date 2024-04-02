@@ -115,7 +115,7 @@ def tabulate_xp(xp, force=False):
             logger.debug("path to reads:")
             logger.debug(path_to_reads)
 
-            pattern =f'{xp.sample_id}*R1*'
+            pattern =f'{xp.sample_id}*R1*.fastq.gz'
             logger.debug(f"pattern={pattern}")
             logger.debug(f"reverse complement r2 ={rev_comp_r2}")
 
