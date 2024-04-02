@@ -130,12 +130,15 @@ def tabulate_xp(xp, force=False):
 
             for found in r1:
                 logger.debug(f"tabbing {found}")
-                outdir = f'{xp.wd_samplewd}/{suffix}'
-                ut.tabulate_paired_umified_fastqs(r1=found, 
-                                                  force=force, 
-                                                  rev_comp_r2=rev_comp_r2, 
-                                                  export_parquet=True, 
-                                                  outdir=outdir)
+                outdir = f'{xp.wd_xp}/{suffix}'
+                out_fn = f"{outdir}/{found.split('/')[-1]}".replace('.fastq.gz', '.mols.parquet')
+                ut.tabulate_paired_10x_fastqs_rs(
+                    file_path=found,
+                    modality='single-cell',
+                    out_fn=out_fn,
+                    force=force,
+                    do_rev_comp=rev_comp_r2,
+                )
 
     else:
         raise ValueError('No "tabulate" attribute in xp. When specified, add an additional prefix field bound to a boolean variable that will determine the reverse-complementarity of read2. yaml example:\ntabulate:\n  shrna: true\n  zshrna: false\n')
@@ -156,7 +159,8 @@ class Xp():
         self.console = Console(width=800)
         self.quiet = quiet
 
-        init_logger(self)
+        self.logger = Rlogger().get_logger()
+        self.rlogger = Rlogger()  # Keep a reference to the Rlogger instance
 
         if conf_fn is not None:
             conf_dict = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
@@ -264,7 +268,7 @@ class Xp():
         if out_fn is None:
             out_fn = f'{self.sample_id}_xpconf.yaml'
         if out_dir is None:
-            out_dir = f'{self.wd_samplewd}'
+            out_dir = f'{self.wd_xp}'
 
         out_fn = f'{out_dir}/{out_fn}'
         logger.io(f'Saving xp conf to {out_fn}')
