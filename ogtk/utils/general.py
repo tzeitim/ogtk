@@ -6,6 +6,7 @@ import os
 import subprocess
 import glob
 import itertools
+import rogtk.rogtk as rogtk
 from typing import Optional, Sequence
 
 from ogtk.utils.log import Rlogger
@@ -251,7 +252,7 @@ def tabulate_single_umified_fastq(r1, cbc_len =16 , umi_len = 10, end = None, si
         sorted_tab = sorted_tab.replace('.txt', f'.{f_end}.comparable.txt')
 
     if os.path.exists(sorted_tab) and not force:
-        print(f'using pre-computed {sorted_tab}')
+        logger.info(f'using pre-computed tabulated fastq {sorted_tab}')
         return(sorted_tab)
 
 
@@ -299,10 +300,82 @@ def tabulate_single_umified_fastq(r1, cbc_len =16 , umi_len = 10, end = None, si
 def paired_umified_fastqs_to_parquet():
     ''' convert paired umified fastqs (e.g 10x) into parquet format
     '''
+def tabulate_paired_10x_fastqs_rs(
+    file_path,
+    out_fn,
+    modality,
+    cbc_len = 16,
+    umi_len = 10,
+    do_rev_comp = False,
+    force = False,
+    )-> str:
+    ''' merges umified paired gzipped fastqs (e.g. 10x fastqs) into a single parquet file 
+    and then extracts the relevant features 
+
+    5ʼkit cbc_len = 16 ; umi_len = 10
+    3ʼkit cbc_len = 16 ; umi_len = 12
+
+    ``do_rev_comp`` reverse-complements read 2
+
+    '''
+    if not modality in ['single-cell', 'single-molecule']:
+        raise ValueError("Invalid modality. Use 'single-cell' or 'single-molecule'") 
+        
+    if not file_path.endswith('fastq.gz'):
+        raise ValueError("Input files must be gzipped fastq (fastq.gz)")
+
+    if modality =='single-molecule':
+        cbc_len = 0
+
+    merged_fn = file_path.replace('fastq.gz', 'merged.parquet')
+    logger.info(f"{merged_fn=}")
+
+    if not os.path.exists(merged_fn) or force:
+        logger.step('merging paired reads into parquet')
+
+        rogtk.merge_paired_fastqs(
+             in_fn1=file_path,
+             in_fn2=file_path.replace('_R1_', '_R2_'),
+             out_fn=merged_fn,
+             do_rev_comp=do_rev_comp
+        )
+    else:
+        logger.info(f"found pre-computed {merged_fn=}. Pass force=True to re-compute.")
+    logger.step('extracting features')
+
+    final_columns = set(['read_id', 'cbc', 'umi', 'cbc_qual', 'umi_qual', 'seq', 'seq_qual']) 
+    renaming_dict = {'r2_seq':'seq', 'r2_qual':'seq_qual'}
+
+    df = (
+        pl.scan_parquet(merged_fn)
+        .with_columns(
+            cbc=pl.col('r1_seq').str.slice(0, cbc_len), 
+            umi=pl.col('r1_seq').str.slice(cbc_len, cbc_len+umi_len),
+            cbc_qual=pl.col('r1_qual').str.slice(0, cbc_len), 
+            umi_qual=pl.col('r1_qual').str.slice(cbc_len, cbc_len+umi_len)
+        )
+        .rename(renaming_dict)
+        .collect()
+    )
+    
+    if modality == 'single-molecule':
+        df = df.drop('cbc_str', 'cbc_qual')
+        final_columns.remove("cbc")
+        final_columns.remove("cbc_qual")
+
+    df = (
+            df.drop('r1_seq', 'r1_qual')
+            .select(final_columns)
+            .write_parquet(out_fn) 
+         )
+    df = None
+
+    return out_fn
 
 def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False, rev_comp_r2=False, export_parquet = False, outdir: str|None=None):
     ''' merge umified paired fastqs (e.g. 10x fastqs) into a single one tab file with fields:
-        |readid | start | end  | cbc | umi | seq | qual|
+    
+    ["readid", "start", "end", "cbc", "umi", "cbc_qual", "umi_qual", "seq", "qual"]
 
     5ʼkit cbc_len = 16 ; umi_len = 10
     3ʼkit cbc_len = 16 ; umi_len = 12
@@ -316,18 +389,17 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     TODO: implent full python interface otherwise bgzip might not be available in the system
     '''
     import gzip
-    import bgzip
-    import os # why?
 
     r2 = r1.replace("R1", "R2")
-    rc = 'rc_' if rev_comp_r2 else ''
+    rc = '.rc' if rev_comp_r2 else ''
 
-    unsorted_tab = r1.split('_R1_')[0]+f'.{rc}unsorted.txt'
+    unsorted_tab = r1.split('_R1_')[0]+f'{rc}.unsorted.txt'
     sorted_tab = unsorted_tab.replace('unsorted.txt', 'sorted.txt.gz')
-    parfn = unsorted_tab.replace('unsorted.txt', '.parquet')
+    parfn = unsorted_tab.replace('unsorted.txt', '.raw_reads.parquet')
     
+    columns = ["readid", "start", "end", "cbc", "umi", "cbc_qual", "umi_qual", "seq", "qual"]
+
     if outdir is not None:
-        import os
         if not os.path.exists(outdir):
             os.system(f'mkdir -p {outdir}')
             print(f'created {outdir}')
@@ -350,13 +422,13 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
         sorted_tab = sorted_tab.replace('.txt', f'.{f_end}.comparable.txt')
 
     if os.path.exists(sorted_tab) and not force:
-        print(f'using pre-computed {sorted_tab}')
+        logger.info(f'using pre-computed tabulated fastq {sorted_tab}')
         if export_parquet:
             if os.path.exists(parfn) and not force:
                 return(parfn)
             else:
                 print("exporting to parquet")
-                export_tabix_parquet(sorted_tab, parfn)
+                export_tabix_parquet(sorted_tab, parfn, columns)
                 return(parfn)
         return(sorted_tab)
 
@@ -364,29 +436,37 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
     logger.info(subprocess.getoutput('date'))
 
     with open(unsorted_tab, 'wt') as R3:
-        with gzip.open(r1, 'rt') as R1, gzip.open(r2, 'rt') as R2:#, bgzip.BGZipWriter(R3) as zR3:
-        #with gzip.open(r1, 'rt') as R1, gzip.open(r2, 'rt') as R2, bgzip.BGZipWriter(R3) as zR3:
+        with gzip.open(r1, 'rt') as R1, gzip.open(r2, 'rt') as R2:
             i1 = itertools.islice(grouper(R1, 4), 0, end)
             i2 = itertools.islice(grouper(R2, 4), 0, end)
             for read1,read2 in zip(i1, i2):
-                #read2 = list(read2)
                 read_id = read1[0].split(' ')[0]
-                cbc_str = read1[1][0:cbc_len] if not single_molecule else read1[1][0:umi_len] # there's a bug here. for single-mol ? it was corrected to read1[1][0:cbc_len] 
-                umi_str = read1[1][cbc_len:cbc_len+umi_len] if not single_molecule else read1[1][0:umi_len] # also here read1[1][0:cbc_len]
+                # there's a bug here. for single-mol ? it was corrected to read1[1][0:cbc_len] 
+                cbc_str = read1[1][0:cbc_len] if not single_molecule else read1[1][0:umi_len] 
+                # also here read1[1][0:cbc_len]
+                umi_str = read1[1][cbc_len:cbc_len+umi_len] if not single_molecule else read1[1][0:umi_len]
+                r1_qual =  read1[3].strip()
+                cbc_qual = r1_qual[0:cbc_len] if not single_molecule else r1_qual[0:umi_len] 
+                umi_qual = r1_qual[cbc_len:cbc_len+umi_len] if not single_molecule else r1_qual[0:umi_len] 
                 seq = read2[1].strip() 
                 qual =  read2[3].strip()
+
                 if rev_comp_r2:
                     seq = rev_comp(seq)
                     qual = qual[::-1]
-                out_str = '\t'.join([read_id, '0', '1', cbc_str, umi_str, seq, qual])+'\n'
+                out_str = '\t'.join([read_id, '0', '1', cbc_str, umi_str, cbc_qual, umi_qual, seq, qual])+'\n'
+
                 if len(seq)>cbc_len+umi_len: 
                     R3.write(out_str)
     cmd_sort = f'sort -k4,4 -k5,5 {unsorted_tab}'
     cmd_bgzip = 'bgzip'
     
+    logger.step("Sorting tabix") #type: ignore
+    logger.debug(f"{cmd_sort}")
+
     c1 = subprocess.Popen(cmd_sort.split(), stdout = subprocess.PIPE)
     c2 = subprocess.Popen(cmd_bgzip.split(), stdin = c1.stdout, stdout = open(sorted_tab, 'w'))
-    c1.stdout.close()
+    c1.stdout.close() #type: ignore
     c2.communicate()
 
     pool = [c1, c2]
@@ -395,19 +475,26 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
 
     map(lambda x: x.terminate(), pool)
  
-    print(f"tabbed fastq {sorted_tab}")
-
     cmd_tabix = f"tabix -f -b 2 -e 3 -s 4 --zero-based {sorted_tab}"
+    logger.step("Invoking tabix") #type: ignore
+    logger.debug(f"{cmd_tabix}")
+
+
+    if export_parquet:
+        if os.path.exists(parfn) and not force:
+            return(parfn)
+        else:
+            print("exporting to parquet") 
+            export_tabix_parquet(sorted_tab, parfn, columns)
+            return(parfn)
+    
     c3 = subprocess.run(cmd_tabix.split())
     del_unsorted = subprocess.run(f'rm {unsorted_tab}'.split())
-    print(subprocess.getoutput('date'))
-    print("finished tabulation")
-    
-    if export_parquet:
-        print("exporting to parquet")
-        export_tabix_parquet(sorted_tab, parfn)
 
+    logger.debug(f"Cleanup:\n{del_unsorted}")
+    logger.info("finished tabulation")
     return(sorted_tab)
+
 
 def tabulate_umified_fastqs(r1, cbc_len =16, umi_len = 10, end = None, single_molecule = False, force = False, comparable = False):
     '''
@@ -432,7 +519,7 @@ def tabulate_umified_fastqs(r1, cbc_len =16, umi_len = 10, end = None, single_mo
         sorted_tab = sorted_tab.replace('.txt', f'.{f_end}.comparable.txt')
 
     if os.path.exists(sorted_tab) and not force:
-        print(f'using pre-computed {sorted_tab}')
+        logger.info(f'using pre-computed tabulated fastq {sorted_tab}')
         return(sorted_tab)
 
     logger.info("starting tabulation")
@@ -678,7 +765,7 @@ def rev_comp(seq):
         newSeq.append(revTbl[c])
     return "".join(newSeq)
 
-def export_tabix_parquet(tbxifn, parfn)->None:
+def export_tabix_parquet(tbxifn, parfn, columns)->None:
     ''' Small helper function that opens a tabix (gzipped) file and exports it back as parquet
     '''
     import polars as pl
@@ -687,7 +774,7 @@ def export_tabix_parquet(tbxifn, parfn)->None:
     print(subprocess.getoutput('date'))
 
     df = pl.read_csv(tbxifn, separator='\t', has_header=False)
-    df.columns=['readid',  'start' ,'end'  , 'cbc' , 'umi' , 'seq' , 'qual']
+    df.columns=columns
     df.write_parquet(parfn)
 
     print(f'saved {parfn}')

@@ -14,7 +14,7 @@ class CustomLogger(logging.Logger):
             self._log(IO_LEVEL_NUM, message, args, **kws)
     
     def step(self, message, *args, **kws)->None:
-        STEP_LEVEL_NUM = 25
+        STEP_LEVEL_NUM = 18
         if self.isEnabledFor(STEP_LEVEL_NUM):
             self._log(STEP_LEVEL_NUM, message, args, **kws)
 
