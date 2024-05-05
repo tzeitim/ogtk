@@ -1,3 +1,4 @@
+import ogtk
 from ogtk.utils import db
 from ogtk.ltr.shltr import cluster
 import matplotlib.pyplot as plt
@@ -18,6 +19,8 @@ from functools import wraps
 from pyaml import yaml
 import cassiopeia as cas
 
+from ogtk.utils.log import Rlogger
+logger = Rlogger().get_logger()
 
 def _check_required_attributes(self, case):
     """
@@ -79,8 +82,6 @@ def _cassit(exp,
         alleles = alleles.drop('cellBC')
 
     pallele_table = (alleles
-         #   .filter(pl.col('valid_ibar'))
-            .drop('valid_ibar')
             .rename(cas_dict)
    )
 
@@ -88,7 +89,7 @@ def _cassit(exp,
             pallele_table
             .with_columns(
                 pl.when(pl.col('wt'))
-                .then('NONE')
+                .then(pl.lit('NONE'))
                 .otherwise(pl.col('r1'))
                 .alias('r1'))
             .to_pandas()
@@ -267,11 +268,13 @@ def _plot_cc(exp,
     vmax=100,
     cluster_suffix='',
     pseudo_counts=1,
-    clone_numerator='h1',
-    clone_denominator='g10',
+    clone_numerator='ibc_1',
+    clone_denominator='ibc_2',
     expr = None,
     ):
     ''' cell size vs clone composition 
+    This function is used to explore the relationship between cell size and clone composition.
+    the expr argument can be passed to filter the data frame before plotting
     '''
     import matplotlib.pyplot as plt
     import seaborn as sns
@@ -296,14 +299,6 @@ def _plot_cc(exp,
     data = data.filter(pl.col('umis_cell')<tmax_cell_size)
     data = data.filter(pl.col('log_ratio')<=lim[1]).filter(pl.col('log_ratio')>=lim[0])
 
-
-    #data = data.filter(pl.col('total_counts')>1e3)
-    #data = data.filter(pl.col('umis_cell')<500)
-
-
-    #ax.set_xlim((0, 5000))
-    #ax.set_ylim((0, 500))
-
     fig, (ax, ax2, ax3) = plt.subplots(1,3, figsize=(3*15,15))
     sns.histplot(data=data.to_pandas(),
                  x=cell_size_metric,
@@ -311,10 +306,9 @@ def _plot_cc(exp,
                  bins=100, ax= ax, cmap='RdYlBu_r', vmax=vmax)
 
 
-    #ax.set_xlim((0, max_cell_size))
     ax.set_ylim(lim)
     ax.grid()
-    ax.set_ylabel('H1/G10')
+    ax.set_ylabel(f'{clone_numerator}/{clone_denominator}')
 
     sns.histplot(data=data.to_pandas(),
                  x='umis_cell',
@@ -325,8 +319,7 @@ def _plot_cc(exp,
     ax2.set_ylim(lim)
     ax2.grid()
 
-    #ax.set_ylim((0, 500))
-    ax2.set_ylabel('H1/G10')
+    ax.set_ylabel(f'{clone_numerator}/{clone_denominator}')
 
     sns.histplot(data=data.to_pandas(),
                 x=cell_size_metric,
@@ -386,6 +379,44 @@ def _color_hist(data, vmax=None, vmin=None, bins=25, edge_line=0.77, ax=None, xl
     if ax is None:
         plt.show()
 
+def _plot_alleles(alleles, *args, **kwargs):
+    '''
+    '''
+    alleles = alleles
+    g = sns.displot(
+            data=alleles
+            .filter(pl.col('umis_top_allele')<=5)    
+            .filter(pl.col('ties')==0)
+            .filter(pl.col('cluster')>0)
+            .filter(pl.col('doublet_prediction')=='singlet')
+            .sort('clone')
+            .to_pandas(), 
+            col='clone',
+            row='umis_top_allele',
+            x='norm_counts', 
+            hue='cluster', 
+            #multiple='stack',
+            height=1.5,
+            aspect=1.5,
+            *args, **kwargs)
+
+    return g
+    #for ax in g.axes.flat:
+    #    ax.set_xlim((4, 8))
+
+    g = sns.displot(
+            data=alleles
+            .filter(pl.col('umis_top_allele')<=5)    
+            .filter(pl.col('ties')==0)
+            .filter(pl.col('cluster')>0)
+            .filter(pl.col('doublet_prediction')=='singlet')
+            .sort('clone')
+            .to_pandas(), 
+            row='umis_top_allele',
+            x='norm_counts', 
+            multiple='stack',
+            height=1.5,
+            aspect=1.5)
 
 class Xp(db.Xp):
     def __init__(self, *args, **kwargs):
@@ -399,6 +430,8 @@ class Xp(db.Xp):
         self.batch_map = None
         self.mols = None
         self.attr_d= {'shrna':'mols', 'zshrna':'zmols'}
+        self.ibar_ann=None
+        self.cc=None
 
         if 'is_chimera' not in vars(self).keys():
             self.is_chimera = False
@@ -464,21 +497,23 @@ class Xp(db.Xp):
     def list_guide_tables(self,  suffix = 'shrna'):
         ''' Returns the file names of the available guide reads
         '''
-        path = f'{self.wd_samplewd}/{suffix}'
-        files = ut.sfind(path=path, pattern='*.parquet')
+        path = f'{self.wd_xp}/{suffix}'
+        files = ut.sfind(path=path, pattern='*raw_reads.parquet')
         if not isinstance(files, list):
             files=[files]
         return(files)
 
+    @ogtk.utils.log.call
     def load_guide_mols(
             self,
             clone:str,
             sample_id:str|None = None,
             suffix:str = 'shrna',
             pattern:str|None=None,
-            min_reads:int = 2,
-            valid_ibars = None,
+            min_reads:int = 1,
+            min_mols_per_ibar:int=1000,
             downsample = None,
+            normalize=False,
             use_cache:bool = True,
             corr_dir_fn:str|None=None,
             filter_valid_cells=False):
@@ -489,7 +524,7 @@ class Xp(db.Xp):
             When more than one parquet file is found by the function, all of them are loaded into a single data frame 
         '''
         if sample_id is None:
-            sample_id = self.sample_id
+            sample_id = self.sample_id #type: ignore
 
         # looks for tabulated parquet files
         parquet_ifn = self.list_guide_tables(suffix)
@@ -497,40 +532,71 @@ class Xp(db.Xp):
         if pattern is not None:
             parquet_ifn = [i for i in parquet_ifn if pattern in i]
 
-        self.print('Reading molecule parquets')
-        self.print(parquet_ifn)
+        logger.debug('Reading molecule parquets')
+        logger.debug(parquet_ifn)
 
-        df = shltr.sc.reads_to_molecules(
-                sample_id=sample_id,
-                parquet_ifn=parquet_ifn,
-                valid_ibars=valid_ibars, 
+        df = shltr.ibars.reads_to_molecules(
+                sample_id=sample_id, #type: ignore
+                parquet_ifn=parquet_ifn,#type: ignore
                 use_cache=use_cache,
-                cache_dir=self.return_cache_path('mols', suffix),
+                cache_dir=self.return_cache_path('mols', suffix), #type: ignore
                 corr_dict_fn=corr_dir_fn,
                 downsample=downsample,
                 #min_cells_per_ibar=int(len(obs27['cbc']) * 0.2),
                 min_reads=min_reads, 
-                max_reads=1e6, 
+                max_reads=int(1e6), #type: ignore
                 clone=clone)
+        logger.info(f'loaded mols {df.shape=}')
 
         if filter_valid_cells:
             if self.scs is None:
-                raise ValueError("Please populate .scs before ingesting")
+                raise ValueError("Please populate .scs before to filter valid cells")
             if 'excluded_cell' not in self.scs.obs.columns:
                 raise ValueError("Expected field `excluded_cell` in .obs")
             #self.load_latest_ad()
             #df = df.filter(pl.col('cbc').is_in(self.scs.obs.index.to_list()))
+            logger.info('filtering molecules for only valid cells')
             df = df.filter(pl.col('cbc').is_in(self.scs[~self.scs.obs.excluded_cell].obs.index.to_list()))
+    
+        logger.info(f'filtering ibars {min_mols_per_ibar=}')
 
-        return(df)
+        if normalize:
+            df = self.normalize_mols(df)
 
+        return(df.filter(pl.count().over('raw_ibar')>=min_mols_per_ibar))
+
+    def normalize_mols(
+            self,
+            df:pl.DataFrame,
+            min_umis_cell:int=10,
+           over_cells:Sequence[str]=['doublet_prediction'],
+           over_ibars:Sequence[str]=['cluster'],
+           bg_cells_expr:pl.Expr=pl.col('doublet_prediction')=='lowq'
+        )->pl.DataFrame:
+        ''' Normalizes the molecule counts by the total number of molecules per cell
+        In its current state it only works when 'doublet_prediction' is present in the .obs and mols
+        '''
+        #TODO: still need to smoothen the excluded_cells management
+
+        if 'doublet_prediction' in df.columns:
+            df=df.with_columns(pl.col('doublet_prediction').cast(pl.Utf8).fill_null("lowq"))
+            logger.critical(f'using Expr:{bg_cells_expr} to normalize ibar counts')
+
+            df=shltr.sc.normalize_mol_counts(
+                    df=df.filter(pl.col('umi').count().over('cbc')>=min_umis_cell),
+                    over_cells=over_cells,
+                    over_ibars=over_ibars,
+                    bg_cells_expr=bg_cells_expr)
+
+        return df
+
+    @ogtk.utils.log.call
     def init_mols(self,
-                  valid_ibars: Sequence,
                   clone: str, 
                   suffix: str='shrna',
-                  ibar_ann: str|None='empirical',
+                  ibar_ann:pl.DataFrame|None=None,
                   min_cell_size: int=0,
-                  min_reads: int=2,
+                  min_reads: int=1,
                   downsample: str|None=None,
                   pattern: str|None=None,
                   sample_id: str|None=None,
@@ -541,24 +607,25 @@ class Xp(db.Xp):
         '''
 
         if sample_id is None:
-            sample_id = self.sample_id
+            sample_id = self.sample_id #type: ignore
 
         if downsample is not None:
             self.print(f'Downsampling to {downsample} reads', style='bold #ff0000')
-            downsample = int(downsample)
+            downsample = int(downsample) #type: ignore
 
-        mols = self.load_guide_mols(valid_ibars=valid_ibars, 
-                                         min_reads=min_reads, 
-                                         clone=clone, 
-                                         suffix=suffix, 
-                                         downsample=downsample, 
-                                         pattern=pattern)
+        mols = self.load_guide_mols(
+                min_reads=min_reads, 
+                clone=clone, 
+                suffix=suffix, 
+                downsample=downsample, 
+                pattern=pattern)
 
         # annotate .mols
-        if ibar_ann == 'empirical':
+        if self.ibar_ann is None and ibar_ann is None: 
             ibar_ann = self.cluster_ibars(mols=mols)
 
-        mols = self.annotate_ibars(mols=mols, ibar_ann=ibar_ann)
+        self.ibar_ann = ibar_ann
+        mols = self.annotate_ibars(mols=mols, ibar_ann=self.ibar_ann)
 
         # store .mols
         setattr(self, self.attr_d[suffix], mols)
@@ -567,6 +634,8 @@ class Xp(db.Xp):
         #    self.score_clone(min_cell_size=min_cell_size)
 
     
+
+    @ogtk.utils.log.call
     def cluster_ibars(
             self,
             mols,
@@ -576,31 +645,29 @@ class Xp(db.Xp):
             
             Invokes ogtk.shlter.cluster_ibars
         '''
-        self.print("Clustering ibars based current mols")
         clustered_ibars = shltr.cluster.cluster_ibars(
                 df=mols, 
                 plot=plot, 
                 min_cov_log10=min_cov_log10, 
                 umap=False, 
-                write_parquets=False
                 )
 
-        self.print(clustered_ibars['cluster'].value_counts())
+        logger.debug(clustered_ibars['cluster'].value_counts())
         return clustered_ibars
 
+    @ogtk.utils.log.call
     def annotate_ibars(
             self, 
-            mols,
-            ibar_ann: str|None|pl.DataFrame=None,
-            ):
+            mols:pl.DataFrame,
+            ibar_ann:pl.DataFrame,
+            )->pl.DataFrame:
         '''
         applies a `.join` to a specified cluster-annotated ibar table.
+        TODO: There is an inconsistency that requires unique in the end
+        otherwise some columns are duplicated
 
         '''
         dfc = None
-
-        # load a pre-computed annotation
-        ibar_ann = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_clusters.parquet' if ibar_ann is None else ibar_ann
 
         if isinstance(ibar_ann, str):
             dfc = (pl.scan_parquet(ibar_ann)
@@ -619,10 +686,13 @@ class Xp(db.Xp):
                     right_on=['raw_ibar'], 
                     how='left')
               )
-        return(dfc)
+        #TODO why unique?
+        # the hardwired pre-computed ibar annotation table (now removed) had
+        # some ibar collisions across different samples
+        return(dfc.unique())
 
     def init_adata_std(self, kind, attr='raw_adata'):
-        ''' Populates .raw_adata from a standard kind
+        ''' Populates `attr` (def: .raw_adata) from a standard `kind`
         '''
         adata = ad.read_h5ad(self.return_path(kind))
         if kind == 'dedoublets_scs_ad_path':
@@ -638,6 +708,7 @@ class Xp(db.Xp):
         setattr(self, attr, adata)
         adata = None
 
+    @ogtk.utils.log.call
     def init_adata(self,
         force:bool=True,
         h5_path: str|None= None,
@@ -667,6 +738,7 @@ class Xp(db.Xp):
 
 
 
+    @ogtk.utils.log.call
     def run_scvi_solo(self,
         input_cells_path=None,
         min_counts=800,
@@ -751,18 +823,15 @@ class Xp(db.Xp):
 
 
 
-    @wraps(db.run_bcl2fq)
-    def demux(self, *args, **kwargs):
-        ''' demultiplex
-        '''
-        db.run_bcl2fq(self, *args, **kwargs)
-        
+
+    @ogtk.utils.log.call
     @wraps(db.run_cranger)
     def cellranger(self, *args, **kwargs):
         ''' cell ranger wrapper
         '''
         db.run_cranger(self, *args, **kwargs)
     
+    @ogtk.utils.log.call
     @wraps(shltr.sc.compute_clonal_composition)
     def score_clone(self, min_cell_size=0, clone_dict:dict|None=None, *args, **kwargs):
         ''' Compute clonal composition 
@@ -773,6 +842,8 @@ class Xp(db.Xp):
             expression.
 
             2. Merges the clonal composition data frame into the single-cell anndata object. 
+
+            3. Populates the xp.cc (clonal composition) attribute.
 
         '''
 
@@ -796,18 +867,19 @@ class Xp(db.Xp):
                     how='left')
         )
 
+    @ogtk.utils.log.call
     def init_object(self,
         sample_name: str| None= None,
         uiport=7777,
         skip_mols=False,
-        min_reads_per_mol: int=2,
+        min_reads_per_mol: int=1,
         kind: str| None = None,
         forced_pattern:str|None=None,
 )->None:
         ''' Main function to load full experiment object
         '''
         if sample_name is None:
-            sample_name = self.sample_id
+            sample_name = self.sample_id #type: ignore
 
         self.init_workdir()
 
@@ -819,11 +891,12 @@ class Xp(db.Xp):
             #self.init_adata()
             self.load_latest_ad(forced_pattern=forced_pattern, kind=kind)
 
-        if self.tabulate is not None:
+        if self.tabulate is not None:  #type: ignore
             db.tabulate_xp(self)
 
         if not skip_mols:
-            self.init_mols(valid_ibars = self.default_ibars(), clone=self.clone, min_reads=min_reads_per_mol)
+            self.init_mols(clone=self.clone, min_reads=min_reads_per_mol) #type: ignore
+
     def load_latest_ad(self, forced_pattern:str|None=None, kind:str|None=None):
         ''' Loads latest version of mcs and scs adatas
         #TODO add option to fetch a specific one
@@ -1028,6 +1101,45 @@ class Xp(db.Xp):
             excluded_fraction_of_umis_of_cells = 0
         plt.show()
 
+    def ccc(self):
+        ''' this function populate the .ccc attribute with a table of clonal composition with different scores based on the ratio of integrations and molecules
+        '''
+        ccc = (
+            self.mols
+            .rename({'cluster':'ibc'})
+            .filter(pl.col('ibc').is_not_null())
+            .with_columns(pl.n_unique('raw_ibar').over('cbc', 'ibc', 'doublet_prediction').alias('integrations'))
+            .with_columns(pl.count().over('cbc', 'ibc', 'doublet_prediction').alias('molecules'))
+            .with_columns(pl.count().over('cbc').alias('mols_per_cell'))
+            .select('doublet_prediction', 'cbc', 'integrations', 'ibc', 'molecules', 'mols_per_cell')
+            .unique()
+            .pivot(index=['doublet_prediction','cbc', 'mols_per_cell'], columns='ibc', values=['integrations', 'molecules'])
+            .fill_null(0)
+            #.sort("mols_per_cell", 'cbc' )
+            #.filter(pl.col("mols_per_cell")<1000)
+            #.filter(pl.col("mols_per_cell")>100)
+            .filter(pl.col('doublet_prediction')=="singlet")
+            .with_columns(
+                        score_raw=pl.col('molecules_ibc_2')/pl.col('molecules_ibc_1'),
+                        score_ints=pl.col('integrations_ibc_2')/pl.col('integrations_ibc_1'),
+                        score_norm=(pl.col('molecules_ibc_2')/pl.col('integrations_ibc_2'))/(pl.col('molecules_ibc_1')/pl.col('integrations_ibc_1')),
+            )
+            .with_columns(
+                        pl.col('score_raw').log10(),
+                        pl.col('score_ints').log10(),
+                        pl.col('score_norm').log10(),
+                        )
+            .with_columns(
+                        clone=pl.when(pl.col('score_norm')<0).then(pl.lit("left")).otherwise(pl.lit("right"))
+            )
+            .with_columns(
+                        clone=pl.when(
+                            (pl.col('score_norm')<0.25) &(pl.col('clone')=='right'))
+                        .then(pl.lit("mid")).otherwise(pl.col("clone"))
+            )
+        )
+        self.cc = ccc
+
     def mc_clean(
         self,
         sample_name:str|None=None, 
@@ -1054,6 +1166,7 @@ class Xp(db.Xp):
         max_parallel_piles=None,
                     ):
         '''
+        This function is the main entry point for the metacells pipeline
 
         '''
         import metacells.utilities.typing as utt
@@ -1309,43 +1422,46 @@ class Xp(db.Xp):
         self.mcs = mcs
         self.metadata = metadata
        
-        self.scs.write_h5ad(self.path_cleansc_h5ad)
-        self.mcs.write_h5ad(self.path_iterationx_h5ad.replace('XXX', '1'))
+        self.scs.write_h5ad(self.path_cleansc_h5ad) #type: ignore
+        self.mcs.write_h5ad(self.path_iterationx_h5ad.replace('XXX', '1')) #type: ignore
+
         #self.save_final_ad(sample_name)
 
     @wraps(shltr.sc.allele_calling)
     def init_alleles(self, 
                      suffix='shrna',
                      expr:None|pl.Expr=None,
-                     valid_ibars:Sequence|None=None,
                      ann_source:str|None|pl.DataFrame=None,
                      *args,
                      **kwargs):
-        if valid_ibars is None:
-            valid_ibars = self.default_ibars()
 
-        mols = getattr(self, self.attr_d[suffix] )
+        #mols = getattr(self, self.attr_d[suffix] )
 
-        if expr is not None:
-            alleles = shltr.sc.allele_calling(mols.filter(expr), *args, **kwargs)
-        else:
-            alleles = shltr.sc.allele_calling(mols, *args, **kwargs)
+        alleles = shltr.sc.allele_calling(self.mols, *args, **kwargs)
+
+        if self.cc is None:
+            self.ccc()
         
-        # add mask for valid ibars
-        alleles = (alleles
-                        .with_columns(pl.col('raw_ibar').is_in(valid_ibars).alias('valid_ibar'))
-                        .sort(['cluster', 'raw_ibar'])
-                        )
+        alleles = (
+                alleles
+                .join(self.cc, left_on='cbc', right_on='cbc', how='left')
+                .join(self.mols.select('raw_ibar', 'cluster').unique(), left_on='raw_ibar', right_on='raw_ibar')
+                )
 
+        #for ax in g.axes.flat:
+        #    ax.set_xlim((4, 8))
+
+        self.alleles = alleles
+        return 
         # merge with scs.obs
         # TODO a bug lurks here
         strip_pattern = '(.+?)-(.)' if self.batch_map is not None else '(.+)'
         strip_pattern = '(.+)'
-        self.print(f'{strip_pattern=}', style='bold #00ff00')
+
 
         # the majority of the raw cell barcodes do not belong to any real cell so we constrain the merge to the scs
         # how='outer'
-        # adobs_pd_to_df Converts an adata.obs pd data frame to a pl data frame...
+        # adobs_pd_to_df Converts an adata.obs pd data frame into pl data frame...
         alleles = alleles.join(
                 ut.sc.adobs_pd_to_df(self.scs, strip_pattern), 
                 left_on='cbc', 
@@ -1368,6 +1484,11 @@ class Xp(db.Xp):
 
         if ann_source is not None:
             self.annotate_alleles(ann_source)
+
+    @wraps(_plot_alleles)
+    def plot_alleles(self, *args, **kwargs)->sns.FacetGrid:
+        logger.step("plotting allele histograms")
+        return _plot_alleles(*args, **kwargs)
 
     @wraps(_cas_update_mc_ann)
     def update_scs_from_mc_ann(self, mc_ann=None):
@@ -1399,7 +1520,7 @@ class Xp(db.Xp):
             '''
                 Loads pre-determined list of valid ibars
             '''
-            self.print(':red_square: :red_square: Loading pre-computed valid ibars :red_square: :red_square:', 'bold #ff0000')
+            logger.critical('Loading pre-computed valid ibars')
             valid_ibars = pl.read_csv('/local/users/polivar/src/artnilet/conf/valid_ibars.csv')['valid_ibar'].to_list()      
             return(valid_ibars)
 
@@ -1437,14 +1558,14 @@ class Xp(db.Xp):
         batch_map = adata.obs.set_index('sample_id')['batch_id'].to_dict()
 
         self.batch_map = batch_map
-        assert len(batch_map) == len(adata.obs.sample_id.unique()), "It seems that one or more batches are duplicated"
+        assert len(batch_map) == len(adata.obs.sample_id.unique()), "One or more batches are duplicated"
 
         self.scs = adata
         
         ad_path = 'raw_scs_ad_path'
         self.scs.write(self.return_path(ad_path))
 
-        self.print(f"saved raw ingested cells as {self.return_path(ad_path)}")
+        logger.io(f"saved raw ingested cells as {self.return_path(ad_path)}")
         self.batch_map = batch_map
         self.conf_keys.append('batch_map')
 
@@ -1452,11 +1573,15 @@ class Xp(db.Xp):
             self.export_xpconf(xp_conf_keys = set(self.conf_keys))
             return None
 
-        self.mols = (
-           pl.concat(
+        #assert not any([xp.mols is None for xp in xps]) , "Molecules need to be initialized manually"
+        #self.mols = pl.concat([i.mols for i in xps])
+
+        self.mols = pl.concat(
                [i.load_guide_mols(clone=i.clone, filter_valid_cells=filter_valid_cells) 
-                for i in xps])
+                for i in xps]
         )
+       
+        logger.info(f"{self.mols.shape=}")
 
         self.mols = (
                 self.mols
@@ -1468,9 +1593,19 @@ class Xp(db.Xp):
                 .with_columns(pl.col('cbc')+"_"+pl.col('batch_id').alias('cbc'))
         )
 
-        self.mols = self.annotate_ibars(mols=self.mols, ibar_ann=ibar_ann)
+        logger.info(f"{self.mols.shape=}")
+
+        # annotate .mols
+        if self.ibar_ann is None and ibar_ann is None: 
+            ibar_ann = self.cluster_ibars(mols=self.mols)
+
+        self.ibar_ann = ibar_ann
+        self.mols = self.annotate_ibars(mols=self.mols, ibar_ann=self.ibar_ann)
+
+        logger.info(f"{self.mols.shape=}")
+
         # save parquet file
-        self.print(f"saving molecules to {self.return_path('mols', suffix=suffix)}")
+        logger.io(f"saving molecules to {self.return_path('mols', suffix=suffix)}")
         self.mols.write_parquet(self.return_path('mols', suffix=suffix))
 
         self.export_xpconf(xp_conf_keys = set(self.conf_keys))
@@ -1480,7 +1615,7 @@ class Xp(db.Xp):
         '''
         if key =='mols':
             assert suffix is not None, "A suffix for the type of molecule is needed, e.g., 'shrna', 'zhrna'"
-            return f'{self.wd_samplewd}/{suffix}/'
+            return f'{self.wd_xp}/{suffix}/'
 
 
     @wraps(_cassit)
@@ -1579,5 +1714,4 @@ class Xp(db.Xp):
 @wraps(db.print_template)
 def print_template(*args, **kwargs):
     db.print_template(*args, **kwargs)
-
 
