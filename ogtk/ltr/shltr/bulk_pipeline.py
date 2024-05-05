@@ -5,15 +5,19 @@ import ogtk.ltr.shltr.ibars as ibars
 import ogtk.ltr.shltr.bulk as bulk
 import polars as pl
 import matplotlib.pyplot as plt
-import os
 from functools import wraps
+import os
 import seaborn as sns
 
 from ogtk.utils.log import Rlogger
 logger = Rlogger().get_logger()
 
 def _list_raw_fastqs(self):
-    self.input_files = ut.sfind(self.wd_fastq, pattern = "*_R1_*fastq.gz")
+    self.input_files = [i 
+                        for i in 
+                        ut.sfind(self.wd_fastq, pattern = "*_R1_*fastq.gz") 
+                        if not i.split('/')[-1].startswith("Undetermined") 
+                        ]
 
 def _list_files(self, pattern):
     return ut.sfind(self.wd_xp, pattern = pattern)
