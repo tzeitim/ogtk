@@ -142,3 +142,6 @@ cython_debug/
 media
 static
 
+ogtk/ltr/shltr/chaleibars.py
+ogtk/ltr/shltr/basura
+ogtk/utils/mc/mcview_import_dataset.r
