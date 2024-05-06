@@ -1,15 +1,9 @@
 from typing import Sequence,Optional, List
 import os
 import ogtk 
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 import polars as pl
-import polars.selectors as cs
+#import polars.selectors as cs
 import rich as rich
-from . import ibars as ib
-from . import plot as pt
 
 from ogtk.utils.log import Rlogger
 logger = Rlogger().get_logger()
