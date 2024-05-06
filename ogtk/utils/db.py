@@ -90,7 +90,9 @@ import hashlib
 
 
 
-def tabulate_xp(xp, force=False):
+# changes here might break the invokation in the pipeline since the will be missing arguments
+@ogtk.utils.log.call
+def tabulate_xp(xp, modality, cbc_len, umi_len, force=False):
     ''' 
     Tabulates paired fastq of umified reads (R1:UMI:CB, R2:RNA) into the
     parquet format. The xp configuration requires a `tabulate` field which in
@@ -132,9 +134,13 @@ def tabulate_xp(xp, force=False):
                 logger.debug(f"tabbing {found}")
                 outdir = f'{xp.wd_xp}/{suffix}'
                 out_fn = f"{outdir}/{found.split('/')[-1]}".replace('.fastq.gz', '.mols.parquet')
+                logger.io(out_fn)
+
                 ut.tabulate_paired_10x_fastqs_rs(
                     file_path=found,
-                    modality='single-cell',
+                    cbc_len=cbc_len,
+                    umi_len=umi_len,
+                    modality=modality,
                     out_fn=out_fn,
                     force=force,
                     do_rev_comp=rev_comp_r2,
@@ -213,6 +219,16 @@ class Xp():
             # for now we import all
             #self.workdir =  xp_template['workdir']
             self.wd_datain = xp_template['datain']
+
+            if 'tabulate' in vars(self):
+                assert isinstance(self.tabulate, dict), "The .tabulate attribute of an expriment must be a dictionary"
+                for suffix in self.tabulate.keys():
+                    allowed_suffixes = [i for i in xp_template.keys() if i.endswith('_suffix')]
+                    if suffix in allowed_suffixes:
+                        xp_template[f'wd_{suffix}'] = "f'{self.wd_xp}/{suffix}'"
+                    else:
+                        logger.critical("The provided tabulation suffixes do not match the experiment template")
+
 
             for k in xp_template.keys():
                 if k.startswith('wd_'):
