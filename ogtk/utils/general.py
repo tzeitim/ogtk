@@ -7,6 +7,7 @@ import subprocess
 import glob
 import itertools
 import rogtk.rogtk as rogtk
+import ogtk.utils.log as log
 from typing import Optional, Sequence
 
 from ogtk.utils.log import Rlogger
@@ -300,6 +301,8 @@ def tabulate_single_umified_fastq(r1, cbc_len =16 , umi_len = 10, end = None, si
 def paired_umified_fastqs_to_parquet():
     ''' convert paired umified fastqs (e.g 10x) into parquet format
     '''
+
+@log.call
 def tabulate_paired_10x_fastqs_rs(
     file_path,
     out_fn,
@@ -341,6 +344,7 @@ def tabulate_paired_10x_fastqs_rs(
         )
     else:
         logger.info(f"found pre-computed {merged_fn=}. Pass force=True to re-compute.")
+    
     logger.step('extracting features')
 
     final_columns = set(['read_id', 'cbc', 'umi', 'cbc_qual', 'umi_qual', 'seq', 'seq_qual']) 
@@ -358,6 +362,8 @@ def tabulate_paired_10x_fastqs_rs(
         .collect()
     )
     
+    logger.step(f'{out_fn=}')
+
     if modality == 'single-molecule':
         df = df.drop('cbc_str', 'cbc_qual')
         final_columns.remove("cbc")
@@ -368,6 +374,7 @@ def tabulate_paired_10x_fastqs_rs(
             .select(final_columns)
             .write_parquet(out_fn) 
          )
+
     df = None
 
     return out_fn
