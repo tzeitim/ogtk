@@ -1,4 +1,4 @@
-from typing import Sequence,Optional
+from typing import Sequence,Optional, List
 import os
 import ogtk 
 import numpy as np
@@ -6,6 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import polars as pl
+import polars.selectors as cs
 import rich as rich
 from . import ibars as ib
 from . import plot as pt
@@ -14,151 +15,53 @@ from ogtk.utils.log import Rlogger
 logger = Rlogger().get_logger()
 
 
+# function that takes a mol-level data frame and returns a cell-level data frame
+# with the top allele for each cell
 @ogtk.utils.log.call
-def reads_to_molecules(sample_id: str,
-           parquet_ifn: str, 
-           corr_dict_fn: str | None= None,
-           min_reads: int=1, 
-           max_reads: int=int(1e6),
-           downsample: int | None=None,
-           min_cells_per_ibar: int | None=1000,
-           clone: str | None=None,
-           columns_ns: str | Sequence='tsos',
-           cache_dir: str='/local/users/polivar/src/artnilet/cache',
-           use_cache: bool=True
-           ) -> pl.DataFrame:
-    ''' Analytical routine to process UMIfied shRNA from single-cell assays (parquet format).
-        If `clone` is not provided it assumes that can be found as the first element of a dash-splitted `sample_id` string. 
-        Off-targets are defined by reads without an ibar pattern match.
-        UMIs are filtered based on the number of reads
-    '''
-    
-    spacers = ib.load_wl(True)['spacer']
-
-    cache_out = f'{cache_dir}/{sample_id}_r2mols.parquet'
-    encoded_reads_parquet = f'{cache_dir}/{sample_id}_encoded_reads.parquet'
-
-    if use_cache and os.path.exists(cache_out):
-        logger.info(f'loading from cache {cache_out}')
-        rdf = pl.read_parquet(cache_out)
-    else:
-        # generate a reads data frame 
-        if os.path.exists(encoded_reads_parquet) and use_cache:
-            logger.info(f"loading {encoded_reads_parquet=}")
-            rdf = pl.read_parquet(encoded_reads_parquet)
-        else:
-            rdf = ib.encode_reads_with_dummies(parquet_ifn = parquet_ifn, batch = sample_id, sample = downsample)
-            rdf.write_parquet(encoded_reads_parquet)
-
-        tot_reads = rdf.shape[0]
-        rdf = rdf.with_columns(pl.col('cbc')+"-1")
-
-        # correct cbc if path to dictionary is provided
-        if corr_dict_fn is not None:
-            logger.info('correcting with dic')
-            rdf = ogtk.utils.cd.correct_cbc_pl(rdf, ogtk.utils.cd.load_corr_dict(corr_dict_fn))
-
-        # CPU-intensive
-        # TODO add thread control
-        
-        rdf = ib.ibar_reads_to_molecules(rdf, modality='single-cell')
-
-        rdf = ib.extract_spacer(rdf, spacers) #type: ignore
-        
-        rdf = ib.encode_wt(rdf, spacers) #type: ignore
-        
-        rdf = ib.count_essential_patterns(rdf)
-
-        # guess from the first field of the sample_id the clone of origin
-        # if `clone` is not specified
-        if clone is None:
-            clone = sample_id.split('_')[0]
-
-        ib.noise_spectrum(sample_id, rdf, index = ['dss'], columns=columns_ns)    
-
-        # determine valid_ibars in data
-        #rdf = ib.mask_valid_ibars(rdf, valid_ibars, min_cells_per_ibar=min_cells_per_ibar)
-
-        ## create mask for wt
-        rdf = ib.mask_wt(rdf)
-
-        plot = False
-        if plot:
-            pt.plot_sibling_noise(rdf)
-
-        # TODO a small number (56 cases in 5M) of molecules ar the 
-        # ['cbc', 'umi','raw_ibar'] level map to more than one seq
-
-        #gather stats
-        # how to determine pc_offt TODO
-        #pc_offt = rdf.filter(~pl.col("valid_ibar")).shape[0]/rdf.shape[0]
-        tot_umis = rdf.select('umi').n_unique()
-
-        #logger.info(f'{pc_offt=:.2%}')
-        logger.info(f'{tot_umis=}')
-        logger.info(f'{tot_reads=}')
-
-        rdf = (rdf
-               .filter(pl.col('raw_ibar').is_not_null())
-               .filter(pl.col('umi_dom_reads')>=min_reads)
-               .filter(pl.col('umi_dom_reads')<=max_reads)
-               .with_columns(pl.col('umi').n_unique().over(['cbc', 'raw_ibar', 'seq', 'wt']).alias('umis_allele'))
-                             # ^- this feels too high for my taste??
-               .with_columns(pl.col('seq').n_unique().over(['cbc', 'raw_ibar']).alias('n_sib'))
-               )
-        # consolidates QC metrics into df
-        rdf = qc_stats(rdf, sample_id, clone, tot_umis, tot_reads)
-
-        # normalize umi counts based on the size of the cell and levels of expression of the ibar
-        #rdf = normalize(rdf)
-
-        rdf.write_parquet(cache_out)
-    return(rdf)    
-
 def allele_calling(
         mols: pl.DataFrame, 
-        min_umis_allele: int=2,
-        by='umis_allele',
-        descending=True,
+        excluded_cells_field:str='doublet_prediction',
         )-> pl.DataFrame:
     ''' Given a mol-level data frame, returns the top allele for individual ibar-cell data points
-    umis_allele is computed going over ['cbc', 'raw_ibar', 'seq', 'wt']  from `reads_to_molecules()`
+    umis_allele is computed going over ['cbc', 'raw_ibar', 'seq']  from `reads_to_molecules()`
 
     The top allele is determined by ``by``, 'umis_allele' by default but could also be:
         - 'cs_norm_umis_allele'
         - 'ib_norm_umis_allele'
         - 'db_norm_umis_allele'  
     '''
+    if excluded_cells_field not in mols.columns:
+        raise ValueError(f'{excluded_cells_field} not in {mols.columns}. Pleae provide a valid field name such as "doublet_prediction" or "excluded_cell"')
+
     alleles = (mols
         .lazy()
         #.filter(pl.col('doublet_prediction')=='singlet')
         .with_columns(pl.count().over('cbc', 'raw_ibar', 'seq').alias('umis_allele'))
-        .group_by([ 'doublet_prediction', 'cbc', 'raw_ibar',])
+               .group_by([excluded_cells_field, 'cbc', 'raw_ibar']) #type: ignore
         .agg(
-            ties = ((pl.col('umis_allele') == pl.col('umis_allele').max()).sum()/pl.col('umis_allele').max())-1,
+            ties = (
+                (pl.col('umis_allele') == pl.col('umis_allele').max()).sum()
+                /pl.col('umis_allele').max()
+                )-1,
         
             umis_per_ibar = pl.count(),
             umis_top_allele = pl.col('umis_allele').max(),
             siblings = pl.col('seq').n_unique(),
             
-            norm_counts = pl.col('cat_db_norm_umis_allele').min(),
-            norm_counts_acc_raw = pl.col('cat_db_norm_umis_allele').gather(pl.col('umis_allele').arg_max()),
+            norm_counts = pl.col('norm_counts').max(),
+            norm_counts_acc_raw = pl.col('norm_counts').gather(pl.col('umis_allele').arg_max()), #type: ignore
             
             raw_counts = pl.col('umis_allele').max(),
             
-            top_allele_raw = pl.col('seq').gather(pl.col('umis_allele').arg_max()),
-            top_allele_norm = pl.col('seq').gather(pl.col('cat_db_norm_umis_allele').arg_min()),
-            #seq_raw = pl.col('seq').gather(pl.col('umis_allele').arg_max()),
+            top_allele_raw = pl.col('seq').gather(pl.col('umis_allele').arg_max()), #type: ignore
+            top_allele_norm = pl.col('seq').gather(pl.col('norm_counts').arg_max()), #type: ignore
                           
             umi_dom_reads = pl.col('umi_dom_reads').max(),
             umi_reads = pl.col('umi_reads').max(),
-
         )
-        .with_columns(pl.col('raw_ibar').n_unique().over('cbc').alias('cells_per_ibar'))
         .explode('top_allele_raw')
         .explode('top_allele_norm')
         .explode('norm_counts_acc_raw')
-        #.explode('seq_raw')
         .collect()
     )
 
@@ -205,39 +108,44 @@ def to_compare_top_alleles(df):
     return(df)
 
 @ogtk.utils.log.call
-def normalize(df:pl.DataFrame, over_cells:List=['cbc'], over_ibars:List=['raw_ibar'], prefix:str='', expr_cells:None|pl.Expr=None):
+def normalize_mol_counts(
+        df:pl.DataFrame,
+        over_cells:Sequence[str]=['cbc'],
+        over_ibars:Sequence[str]=['raw_ibar'],
+        bg_cells_expr:None|pl.Expr=None,
+        )->pl.DataFrame:
     ''' normalize umi counts based on the size of the cell and levels of expression of the ibar
+        cells can be grouped using `over_cells` and ibars using `over_ibars`
+        `bg_cells_expr` is a filter expression to select cells to be used for normalization
+        if `bg_cells_expr` is `None` then groupby `over_ibars` is used to compute the number of cells
+        
+        The normalized counts are -log10 transformed
     '''
-    if expr_cells is None:
-        expr_cells = pl.lit(True)
-    return(df
-        .with_columns(pl.count().over(over_cells).alias(prefix+'umis_cell'))
-       # .with_columns(pl.count().over(over_ibars).alias(prefix+'umis_ibar'))
-           .with_columns(pl.when(
-                            expr_cells is None
-                         )
-                         .then(
-                            pl.count().over(over_ibars)
-                         )
-                         .otherwise(
-                            pl.col('raw_ibar').count()/pl.col('cbc').filter(expr_cells).count()                             
-                         )
-                        .alias(prefix+'umis_ibar'))
-        .with_columns((pl.col('umis_allele')/pl.col(prefix+'umis_cell')).name.prefix(prefix+'cs_norm_'))
-        .with_columns((pl.col('umis_allele')/pl.col(prefix+'umis_ibar')).name.prefix(prefix+'ib_norm_'))
-        .with_columns((pl.col('umis_allele')/(pl.col(prefix+'umis_cell')*pl.col(prefix+'umis_ibar'))).name.prefix(prefix+'db_norm_'))
-           .with_columns(pl.col(prefix+'cs_norm_umis_allele').log10() * -1 )
-           .with_columns(pl.col(prefix+'ib_norm_umis_allele').log10() * -1 )
-           .with_columns(pl.col(prefix+'db_norm_umis_allele').log10() * -1 )
-    )
+
+    if bg_cells_expr is None:
+        bg_cells_expr = pl.lit(True)
+
+    model_from = pl.col('doublet_prediction')=="singlet"
+    return (df
+            .filter(pl.col('doublet_prediction')=='singlet')
+            .with_columns(pl.col('umi').count().over(['cbc', 'doublet_prediction']).alias('umis_per_cell'))
+            .with_columns(pl.col('umi').count().over(['doublet_prediction']).alias('total_umis'))
+            .with_columns(pl.col('umi').count().over(['raw_ibar', 'doublet_prediction']).alias('total_umis_ibar'))
+            .with_columns(pl.col('umi').filter(bg_cells_expr).count().over('raw_ibar').alias('umis_per_ibar_model'))
+            .with_columns(pl.col('umi').count().over(['cbc', 'raw_ibar', 'seq']).alias('umis_allele'))
+            .with_columns(p_cell = pl.col('umis_per_cell')/pl.col('total_umis'))
+            .with_columns(p_ibar = pl.col('total_umis_ibar')/pl.col('total_umis'))
+            .with_columns(p_join = pl.col('p_cell') * pl.col('p_ibar'))
+            .with_columns(weighted_counts =pl.col('umis_allele')*pl.col('p_join'))
+           )
+
+
 @ogtk.utils.log.call
 def qc_stats(df, sample_id, clone, tot_umis, tot_reads):
     ''' helper function that consolidates QC metrics into df
     '''
     return(
             df
-           .with_columns(pl.lit(sample_id).alias('sample_id'))
-           .with_columns(pl.lit(clone).alias('clone'))
            #.with_columns(pl.lit(pc_offt).alias('qc_pc_offt'))
            .with_columns(pl.lit(tot_umis).alias('qc_tot_umis'))
            .with_columns(pl.lit(tot_reads).alias('qc_tot_reads'))
