@@ -32,7 +32,7 @@ def reads_to_molecules(sample_id: str,
            corr_dict_fn: str | None= None,
            min_reads: int=1, 
            max_reads: int=int(1e6),
-           downsample: int | None=None,
+           do_sampling: int | None=None,
            min_cells_per_ibar: int | None=1000,
            clone: str | None=None,
            columns_ns: str | Sequence='np_tsos',
@@ -67,8 +67,7 @@ def reads_to_molecules(sample_id: str,
         else:
             rdf = encode_reads_with_dummies(
                      parquet_ifn = parquet_ifn,
-                     batch = sample_id,
-                     sample = downsample,
+                     do_sampling = do_sampling,
                      zombie=zombie
                 )
 
@@ -487,17 +486,31 @@ def genotype_ibar_clone(
     ## index a small sample of original reads
     if single_end:
         print(f'single_end {single_end}')
-        tabix_fn = ut.tabulate_umified_fastqs(r1 = r1, cbc_len=0, umi_len=25, single_molecule=single_molecule, end=end, force=force, comparable=True)
+        tabix_fn = ut.tabulate_umified_fastqs(r1 = r1,
+                     cbc_len=0,
+                     umi_len=25,
+                     single_molecule=single_molecule,
+                     end=end,
+                     force=force,
+                     comparable=True)
     else:
         print(f'single_end {single_end}')
-        tabix_fn = ut.tabulate_paired_umified_fastqs(r1 = r1, cbc_len=16, umi_len=10, single_molecule=single_molecule, end=end, force=force, comparable=True)
+        tabix_fn = ut.tabulate_paired_umified_fastqs(r1 = r1,
+                     cbc_len=16,
+                     umi_len=10,
+                     single_molecule=single_molecule,
+                     end=end,
+                     force=force,
+                     comparable=True)
     
     if not single_molecule:
         # import cell barcodes from cleaned andata's index
         # TODO change thi to something less embarrassing
         import anndata as ad
         adata_obs = ad.read_h5ad(h5ad_path).obs
-        cell_bcs=[i.split('-')[0] for i in adata_obs[adata_obs['batch'] == sample_id].index.to_list()]
+        cell_bcs=[i.split('-')[0] 
+                  for i in adata_obs[adata_obs['batch'] == sample_id].index.to_list()
+                  ]
     else:
         # TODO add support for plotting what it means a given cutoff in the 
         # read count per umi distribution
@@ -1040,7 +1053,7 @@ def stutter():
 
    
 
-def pl_tabix_to_df(tbx_ifn, sample = False):
+def pl_tabix_to_df(tbx_ifn, do_sampling = False):
     ''' load tabix fastq as polars df
     '''
     df=pl.read_csv(tbx_ifn, sep='\t', has_header=False)
@@ -1092,7 +1105,7 @@ def pl_fastq_to_df(fastq_ifn, rc=False, end = None, export = False):
     else:
         return(df)
 
-def pl_10xfastq_to_df(fastq_ifn, end = None, sample=None, export = False):
+def pl_10xfastq_to_df(fastq_ifn, end = None, export = False):
     ''' 
     DON'T USE THIS - IS IS INSANELY BAD IN TERMS OF MEMORY
 
@@ -1141,11 +1154,10 @@ def return_feature_string(key: str):
 
 @ogtk.utils.log.call
 def encode_reads_with_dummies(
-            batch: str,
             parquet_ifn: str| None = None,
             df: pl.DataFrame | None = None,
             zombie = False,
-            sample = None,
+            do_sampling = None,
             ) -> pl.DataFrame:
     ''' Encodes raw reads based on regular expressions. It doesn't aggregate results
     '''
@@ -1195,16 +1207,16 @@ def encode_reads_with_dummies(
     drop = ['readid', 'qual' , 'start', 'end']
 
     @ogtk.utils.log.call
-    def return_parquets_scan(parquet_ifns, sample=False):
+    def return_parquets_scan(parquet_ifns, do_sampling=False):
         '''
         '''
         if not isinstance(parquet_ifns, list):
             parquet_ifns = [parquet_ifns]
 
-        if sample:
+        if do_sampling:
             return (
                     pl.scan_parquet(i)
-                    .head(sample)
+                    .head(do_sampling)
                     .drop(drop)
                     .with_columns(pl.lit(pfn(i)).alias('ifn'))
                     .collect()  
@@ -1221,15 +1233,15 @@ def encode_reads_with_dummies(
     # TODO check whether this splitting of the function is still needed 
     # https://github.com/pola-rs/polars/issues/8338
     @ogtk.utils.log.call
-    def return_parquets_read(parquet_ifns, sample=False, use_pyarrow=True):
+    def return_parquets_read(parquet_ifns, do_sampling=False, use_pyarrow=True):
         '''
         '''
         if not isinstance(parquet_ifns, list):
             parquet_ifns = [parquet_ifns]
-        if sample:
+        if do_sampling:
             return (
                     pl.read_parquet(i, use_pyarrow=use_pyarrow)
-                    .head(sample)
+                    .head(do_sampling)
                     .drop(drop)
                     .with_columns(pl.lit(pfn(i)).alias('ifn'))
                     for i in parquet_ifns
@@ -1243,7 +1255,7 @@ def encode_reads_with_dummies(
                     )
 
     if df is None:
-            fs = return_parquets_read(parquet_ifn, sample, use_pyarrow)
+            fs = return_parquets_read(parquet_ifn, do_sampling, use_pyarrow)
             df = pl.concat(fs)
 
     logger.info(f'total_reads={df.shape[0]}')
@@ -1259,6 +1271,8 @@ def encode_reads_with_dummies(
 
     logger.step(f'[red]fuzzy encoding[/]', extra={"markup": True})
     # It is faster to use fuzzy matching only once, so we encode first and then count
+    if zombie:
+        fprime_dummie = '[···U6···]'
     df = (
         df
         .lazy()
@@ -1283,8 +1297,9 @@ def encode_reads_with_dummies(
 
 
         .drop([i for i in ['qual',  'readid', 'start', 'end'] if i in df.columns])
-  #      .filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
-    ).collect()
+        #.filter(pl.col('seq').str.contains(r'[···SCF1···][END]'))
+        .collect()
+    )
     logger.step(f'[green] done[/]', extra={"markup": True})
 
     return(mask_wt(df))
