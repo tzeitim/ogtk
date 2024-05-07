@@ -19,8 +19,6 @@ def _list_raw_fastqs(self):
                         if not i.split('/')[-1].startswith("Undetermined") 
                         ]
 
-def _list_files(self, pattern):
-    return ut.sfind(self.wd_xp, pattern = pattern)
 
 @log.call
 def _filter_ibars(df: pl.DataFrame, filters:dict)->pl.DataFrame:
@@ -55,22 +53,26 @@ def _filter_ibars(df: pl.DataFrame, filters:dict)->pl.DataFrame:
 
 @log.call
 def _generate_molecule_dfs(
-        cache_dir,
         xps,
+        cache_dir,
         min_reads=1,
         max_reads=1e4,
         downsample=None,
+        suffix:str = 'shrna',
         *args,
         **kwargs
     )-> pl.DataFrame:
     ''' xps maps a sample_id to a corresponding parquet path
     '''
+    assert suffix in ['zshrna', 'shrna'], "Invalid suffix, please use 'zshrna' or 'shrna'"
+
     df = []
     for path, clone, sample_id  in zip(xps['path'], xps['clone'], xps['sample_id']):
         df.append(
                 ibars.reads_to_molecules(
                     sample_id=sample_id,
                     modality='single-molecule',
+                    zombie=suffix == 'zshrna',
                     parquet_ifn=path,
                     min_reads=int(min_reads),
                     max_reads=int(max_reads),
@@ -88,6 +90,11 @@ def _generate_molecule_dfs(
 
 def _fastq_to_parquet(files, cbc_len=0, umi_len=25, force=False, out_prefix='', ):
     ''' '''
+
+    # how it should be used
+    #if self.tabulate is not None:  #type: ignore
+    #    db.tabulate_xp(self)
+
     parquets = []
     for file in files:
         out_fn = f"{out_prefix}/{file.split('/')[-1]}".replace('.fastq.gz', '.mols.parquet')
@@ -311,7 +318,7 @@ class Xp(db.Xp):
         self.init_mols(filters=filters, force=force)
         self.plot_qc_seq()
 
-    def init_mols(self, force=False, do_annotation=True, filters=None, *args, **kwargs):
+    def init_mols(self, xps, force=False, do_annotation=True, filters=None, *args, **kwargs):
         ''' 
         Populates the .mols attribute by:
             - collapsing data from reads to molecules
@@ -323,23 +330,30 @@ class Xp(db.Xp):
             - do_annotation: dictionary with any key in ['min_mols_ibar', 'whitelist']
         '''
 
-        if not os.path.exists(self.path_mols) or force:
-            self.mols = _generate_molecule_dfs(cache_dir=self.wd_shrna, force=force, *args, **kwargs) 
+        for suffix in self.valid_tab_suffixes():
+            if os.path.exists(self.path_mols) and not force:
+                self.logger.io(f"loading {self.path_mols}") #pyright:ignore
+                self.mols = pl.read_parquet(self.path_mols)
+            else:
+                self.mols = _generate_molecule_dfs(
+                     xps=xps,
+                     cache_dir=getattr(self, f'wd_{suffix}'),
+                     force=force,
+                     suffix=suffix,
+                     *args,
+                     **kwargs) 
 
-            # compute sample-specific qc metrics
-            self.mols = self.qc_ibars_per_sample()
+                # compute sample-specific qc metrics
+                self.mols = self.qc_ibars_per_sample()
 
-            if filters is not None:
-                self.mols = self.filter_ibars(filters=filters)
+                if filters is not None:
+                    self.mols = self.filter_ibars(filters=filters)
 
-            if do_annotation and self.ibar_clusters is not None:
-                self.metadata_annotate_ibars()
+                if do_annotation and self.ibar_clusters is not None:
+                    self.metadata_annotate_ibars()
 
-            self.logger.io(f"saving mols to {self.path_mols}")
-            self.mols.write_parquet(self.path_mols)
-        else:
-            self.logger.io(f"loading {self.path_mols}") 
-            self.mols = pl.read_parquet(self.path_mols)
+                self.logger.io(f"saving mols to {self.path_mols}")
+                self.mols.write_parquet(self.path_mols)
         return None
     
     def metadata_annotate_ibars(self, df:None|pl.DataFrame=None, on=['raw_ibar'], how='left'):
@@ -476,18 +490,8 @@ class Xp(db.Xp):
     def filter_ibars(self, *args, **kwargs):
         return _filter_ibars(self.mols, *args, **kwargs)
 
-    @wraps(_list_files)
-    def list_files(self, pattern:str):
-        return _list_files(self, pattern)
-
-    @wraps(_list_raw_fastqs)
-    def list_raw_fastqs(self):
-        _list_raw_fastqs(self)
-
-    @wraps(_fastq_to_parquet)
-    def fastq_to_parquet(self, *args, **kwargs):
-        _list_raw_fastqs(self)
-        self.parquets = _fastq_to_parquet(files=self.input_files, out_prefix=self.wd_raw_input, *args, **kwargs)
+    def fastq_to_parquet(self, cbc_len=0, umi_len=25, force=False):
+        self.parquets = db.tabulate_xp(self, modality='single-molecule', cbc_len=cbc_len, umi_len=umi_len, force=force)
         
     @wraps(_load_ibar_cluster_annotation)
     def load_ibar_cluster_annotation(self, path: str | None =None):
