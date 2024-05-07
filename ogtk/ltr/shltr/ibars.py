@@ -1,4 +1,4 @@
-from typing import Sequence, List
+from typing import *
 from colorhash import ColorHash
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
@@ -10,9 +10,9 @@ import os
 import regex
 import seaborn as sns
 import tempfile
-import rich 
-from pyseq_align import NeedlemanWunsch, SmithWaterman
+from pyseq_align import NeedlemanWunsch#, SmithWaterman
 import ngs_tools
+from functools import lru_cache
 
 import ogtk
 import ogtk.utils as ut
@@ -28,6 +28,7 @@ logger = Rlogger().get_logger()
 def reads_to_molecules(sample_id: str,
            parquet_ifn: str, 
            modality: str,
+           zombie: bool=False,
            corr_dict_fn: str | None= None,
            min_reads: int=1, 
            max_reads: int=int(1e6),
@@ -64,7 +65,13 @@ def reads_to_molecules(sample_id: str,
             logger.info(f"loading {encoded_reads_parquet=}")
             rdf = pl.read_parquet(encoded_reads_parquet)
         else:
-            rdf = encode_reads_with_dummies(parquet_ifn = parquet_ifn, batch = sample_id, sample = downsample)
+            rdf = encode_reads_with_dummies(
+                     parquet_ifn = parquet_ifn,
+                     batch = sample_id,
+                     sample = downsample,
+                     zombie=zombie
+                )
+
             rdf.write_parquet(encoded_reads_parquet)
 
         tot_reads = rdf.shape[0]
@@ -122,7 +129,6 @@ def reads_to_molecules(sample_id: str,
         umis_allele_group = ['cbc', 'raw_ibar', 'seq'] if modality == "single-cell" else ['raw_ibar', 'seq']
         n_sib_group = ['cbc', 'raw_ibar'] if modality == "single-cell" else ['raw_ibar']
 
-        logger.info(f'entries before filtering {rdf.shape[0]}')
         rdf = (rdf
                 .with_columns(pl.lit(sample_id).alias('sample_id'))
                 .with_columns(pl.lit(clone).alias('clone'))
@@ -131,6 +137,7 @@ def reads_to_molecules(sample_id: str,
                 .filter(pl.col('spacer').str.contains('N').not_())
                 .filter(pl.col('umi').str.contains('N').not_())
                 .filter(pl.col('umi_dom_reads')<=max_reads)
+                .filter(pl.col('umi_dom_reads')>=min_reads)
                 .with_columns(pl.col('umi').n_unique().over(umis_allele_group).alias('umis_allele'))
                 .with_columns(pl.col('seq').n_unique().over(n_sib_group).alias('n_sib'))
                )
@@ -142,7 +149,6 @@ def reads_to_molecules(sample_id: str,
         rdf.select(cs.by_name("^(qc_.+|sample_id)$")).unique().write_parquet(path_qc_stats)
         rdf = rdf.drop(cs.by_name("^qc_.+$"))
 
-        logger.info(f'final entries {rdf.shape[0]}')
         rdf.write_parquet(cache_out)
     return(rdf)    
 
@@ -1300,12 +1306,16 @@ def empirical_metadata_annotation(
     # determine the top spacer per raw_ibar
     tsp_df = (
         df
-        .group_by(['sample_id', 'raw_ibar', 'spacer']).len().sort('len', descending=True)
+        .group_by(['sample_id', 'raw_ibar', 'spacer'])
+        .len()
         .filter(
-            pl.int_range(0, pl.len()).over(['sample_id', 'raw_ibar'])<=top_n-1
+            pl.col('len').rank(method='dense', descending=True).over(['sample_id', 'raw_ibar']) <= top_n
         )
-        .join(wl, right_on='spacer', left_on='spacer', how='inner')
+        .with_columns(nlen=pl.col('len')/pl.col('len').sum().over('sample_id') * 1e4)
+        .join(wl, right_on='spacer', left_on='spacer', how='inner') #pyright:ignore
+
     )
+
     if drop_counts:
         tsp_df = tsp_df.drop('len')
 
@@ -1652,10 +1662,10 @@ def plot_indel_stacked_fractions(element: str,
                df,
                element,
                element_field=element_field,
-               grouping_field = grouping_field,
+               grouping_field=grouping_field,
                grouping_value=grouping_value,
                n_top=n_top,
-               x = idx,
+               x=idx,
                bc=bc)
         rects = create_rectangle_patches(data, rects)
 
@@ -1663,10 +1673,10 @@ def plot_indel_stacked_fractions(element: str,
 
 def return_aligned_alleles(
     df,
-    aligner,
-    lim=50,
+    aligner:Union["pyseq_align.NeedlemanWunsch", "pyseq_align.SmithWaterman"], #pyright: ignore
+    lim:int=50,
     correct_tss_coord: None|int = 18,
-    min_group_size=100,
+    min_group_size:int=100,
     tso_pad:str|None="",
     )->pl.DataFrame:
     '''
@@ -1688,6 +1698,7 @@ def return_aligned_alleles(
          - 0 match
          - >0 insertion length
     '''
+    #         [    TSO     ]
     ref_str = "TTTCTTATATGGG[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAACCTAAGGCTAGTCCGTTATCAACTTGGTACT"
     schema = {"sample_id":str, "ibar":str, "id":str, "aseq":str, "sweight":pl.Int64, "alg":pl.List(pl.Int64)}
     oschema = {"aseq":str, "alg":pl.List(pl.Int64), "aweight":pl.Int64}
@@ -1709,10 +1720,11 @@ def return_aligned_alleles(
         logger.info("group too small")
         return pl.DataFrame(schema=merged_schema)
 
-    # we reduce the size of the tso sequence to reduce the specificity of the match
+    # reduce the size of the TSO sequence to decrease the specificity of the match
     tso_string = return_feature_string("tso")
     tso_pad = tso_string if tso_pad is None else tso_pad
     fuzzy_tso = fuzzy_match_str(tso_string[5:], wildcard=".{0,1}")
+
     df = (
             df
             .with_columns(
@@ -1742,6 +1754,7 @@ def return_aligned_alleles(
             .value_counts()
             .sort('count', descending=True)
             )
+
     #TODO change to use a defined spacer db
     if foc_spacer.shape[0]==0:
         print(f'No WT allele found for {foc_ibar} {foc_sample}')
@@ -1770,16 +1783,25 @@ def return_aligned_alleles(
             alignment
             .with_columns(
                 pl.col('seq_trim')
-               .map_elements(lambda x: lambda_needlemanw(x, foc_ref, aligner))
-               .alias('alignment')
+               .map_elements(lambda x: lambda_needlemanw(x, foc_ref, aligner), 
+                            return_dtype =   pl.Struct({
+                                             'cigar_str':pl.Utf8,
+                                             'aligned_ref': pl.Utf8, 
+                                             'aligned_seq': pl.Utf8, 
+                                             'alignment_score': pl.Int64,
+                                             })
                )
+               .alias('alignment')
+            )
+            .select('oseq', 'alignment')
             )
 
+
     alignment = alignment.with_columns(
-        cigar=pl.col('alignment').list.get(0), 
-        aref=pl.col('alignment').list.get(1), 
-        aseq=pl.col('alignment').list.get(2), 
-        ascore=pl.col('alignment').list.get(3), 
+        cigar=pl.col('alignment').struct.field('cigar_str'), 
+        alg_ref=pl.col('alignment').struct.field('aligned_ref'), 
+        alg_seq=pl.col('alignment').struct.field('aligned_seq'), 
+        alg_score=pl.col('alignment').struct.field('alignment_score'), 
         ).drop('alignment')
 
     df = df.join(alignment, left_on='oseq', right_on='oseq', how='left') 
@@ -1854,10 +1876,13 @@ def return_aligned_alleles_emboss(
     )
 
     Returns the original data frame with additional fields that contain a an aligned version of the original sequence
-     = position-specific code:
+     - position-specific code:
          - -1 is for gap
          - 0 match
          - >0 insertion length
+    
+    Alignment fields: "alg_ref", "alg_seq", "alg_score"
+
     '''
     ref_str = "TTTCTTATATGGG[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAACCTAAGGCTAGTCCGTTATCAACTTGGTACT"
     schema = {"sample_id":str, "ibar":str, "id":str, "aseq":str, "sweight":pl.Int64, "alg":pl.List(pl.Int64)}
@@ -2098,11 +2123,100 @@ def return_exploded_positions(df, lim=50):
         )
     return fdata
 
+@lru_cache
 def lambda_needlemanw(seq, foc_ref, aligner):
     ''' 
     '''
     alignment = aligner.align(foc_ref, seq)
-    return [ngs_tools.sequence.alignment_to_cigar(alignment.result_a, alignment.result_b),
-            alignment.result_a,
-            alignment.result_b,
-            alignment.score]
+
+    return {
+        'cigar_str': ngs_tools.sequence.alignment_to_cigar(alignment.result_a, alignment.result_b),
+        'aligned_ref':  alignment.result_a,
+        'aligned_seq':  alignment.result_b,
+        'alignment_score':  alignment.score
+        }
+
+def compare_ibar_hdistance(seqs:Sequence, mols, select:None|Sequence=None, title='', jobs = 10):
+    # how to find ibar shadows
+    mm = ogtk.UM.hdist_all(seqs, jobs=jobs)
+    assert (mm==mm.T).all(), "Hamming distance matrix is not symmetric"
+
+    mm = np.triu(mm, k=0)
+
+    mp = pl.DataFrame(mm, schema=list(seqs)).with_columns(raw_ibar=seqs)
+    mp = mp.melt(id_vars='raw_ibar', variable_name="raw_ibar2", value_name="hdist")
+    mp.shape
+
+    dselect = ['raw_ibar', 'ibar_umisg']
+
+    select = np.hstack([dselect, select]) if select is not None else dselect
+
+    mp  = (
+        mp
+        .join(mols.select(select).unique(), 
+              left_on='raw_ibar', 
+              right_on='raw_ibar', 
+              how='left')
+        .join(mols.select(select).unique(), 
+              left_on='raw_ibar2',
+              right_on='raw_ibar', 
+              how='left', 
+              suffix="2")
+        .filter((pl.col("hdist")>0) | (pl.col('raw_ibar')==pl.col('raw_ibar2')))
+    )
+    
+    return mp
+
+    #g = sns.relplot(data=mp
+    #            .filter(pl.col('cluster')=="1")
+    #            .sort("hdist", descending=True)
+    #                .to_pandas(),
+    #            x="ibar_umisg",
+    #            y="ibar_umisg2",
+    #            col="cluster2",
+    #            row="hdist",
+    #           )
+    #
+    #g.set(xscale='log')
+    #g.set(yscale='log')
+
+    grata = (mp.group_by("cluster", "cluster2", "hdist").agg(
+        pear=pl.corr("ibar_umisg", "ibar_umisg2", method="pearson"),
+        spear=pl.corr("ibar_umisg", "ibar_umisg2", method="spearman"),
+        ).sort('cluster')
+    )
+
+    g = sns.catplot(data=grata.to_pandas(), y="pear", x="hdist", col="cluster", kind="box")
+    g.fig.subplots_adjust(top=0.9) # adjust the Figure in rp
+    g.fig.suptitle(f'Pearson {title}')
+    g.set(ylim=(-1, 1))
+    plt.show()
+    
+    g = sns.catplot(data=grata.to_pandas(), y="spear", x="hdist", col="cluster", kind="box")
+    g.fig.subplots_adjust(top=0.9) # adjust the Figure in rp
+    g.fig.suptitle(f'Spearman {title}')
+    g.set(ylim=(-1, 1))
+    plt.show()
+
+def all_keys(df_keys):
+    """Create dataframe of all unique combinations of values."""
+    columns = df_keys.columns
+    df = df_keys.select(columns[0]).unique()
+    for column in columns[1:]:
+        df = df.join(df_keys.select(column).unique(), how="cross")
+    return df
+
+
+def len_all_combos(df, key, agg_ops=pl.all().len(), fill_value=None):
+    """Perform group-by with op and include all possible key combinations."""
+    keys = all_keys(df.select(key))
+    df_grouped = df.group_by(key).agg(agg_ops)
+    df_out = keys.join(df_grouped, on=key, how="left")
+    if fill_value is not None:
+        other_columns = [x for x in df.columns if x not in key]
+        df_out = df_out.with_columns(pl.col(other_columns).fill_null(fill_value))
+    return df_out.sort(keys)
+
+
+
+
