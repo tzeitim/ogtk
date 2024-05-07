@@ -1,4 +1,5 @@
 import rich
+from typing import List
 import os
 from pyaml import yaml
 from rich.console import Console
@@ -92,7 +93,7 @@ import hashlib
 
 # changes here might break the invokation in the pipeline since the will be missing arguments
 @ogtk.utils.log.call
-def tabulate_xp(xp, modality, cbc_len, umi_len, force=False):
+def tabulate_xp(xp, modality, cbc_len, umi_len, force=False)->List:
     ''' 
     Tabulates paired fastq of umified reads (R1:UMI:CB, R2:RNA) into the
     parquet format. The xp configuration requires a `tabulate` field which in
@@ -104,11 +105,13 @@ def tabulate_xp(xp, modality, cbc_len, umi_len, force=False):
        shrna: true
        zshrna: false
     ```
+
+    Returns: list of paths of tabulated files
     '''
     import ogtk.utils as ut
 
     if 'tabulate' in vars(xp):
-        for suffix in xp.tabulate.keys():
+        for suffix in xp.valid_tab_suffixes():
             logger.debug(f"{suffix}")
 
             path_to_reads = f'{xp.wd_fastq}/{suffix}'
@@ -121,22 +124,29 @@ def tabulate_xp(xp, modality, cbc_len, umi_len, force=False):
             logger.debug(f"pattern={pattern}")
             logger.debug(f"reverse complement r2 ={rev_comp_r2}")
 
-            r1 = ut.sfind(path_to_reads, pattern=pattern)
-            logger.debug(r1)
 
-            if len(r1)==0:
+            r1_input_files = [
+                            i for i in 
+                                ut.sfind(path_to_reads, pattern = "*_R1_*fastq.gz") 
+                            if not i.split('/')[-1].startswith("Undetermined") 
+                            ]
+
+            logger.debug(r1_input_files)
+
+            if len(r1_input_files)==0:
                 raise ValueError(f'No files found under the pattern {pattern}')
 
-            if not isinstance(r1, list):
-                r1 = [r1]
+            if not isinstance(r1_input_files, list):
+                r1_input_files = [r1_input_files]
 
-            for found in r1:
+            tabulated_files = []
+            for found in r1_input_files:
                 logger.debug(f"tabbing {found}")
                 outdir = f'{xp.wd_xp}/{suffix}'
                 out_fn = f"{outdir}/{found.split('/')[-1]}".replace('.fastq.gz', '.mols.parquet')
                 logger.io(out_fn)
 
-                ut.tabulate_paired_10x_fastqs_rs(
+                tabbed = ut.tabulate_paired_10x_fastqs_rs(
                     file_path=found,
                     cbc_len=cbc_len,
                     umi_len=umi_len,
@@ -145,6 +155,8 @@ def tabulate_xp(xp, modality, cbc_len, umi_len, force=False):
                     force=force,
                     do_rev_comp=rev_comp_r2,
                 )
+                tabulated_files.append(tabbed)
+            return tabulated_files
 
     else:
         raise ValueError('No "tabulate" attribute in xp. When specified, add an additional prefix field bound to a boolean variable that will determine the reverse-complementarity of read2. yaml example:\ntabulate:\n  shrna: true\n  zshrna: false\n')
@@ -212,8 +224,10 @@ class Xp():
         ''' The self-referencing pointers in the configuration are evaluated
         '''
         # import information from experiment template
-        if self.xp_template is not None:
-            xp_template = yaml.load(open(self.xp_template), Loader=yaml.FullLoader)
+        if self.xp_template is not None: #pyright:ignore
+
+            xp_template = yaml.load(open(self.xp_template), Loader=yaml.FullLoader) #pyright:ignore
+
 
             # still undecided on whether to import everything or be more selective.
             # for now we import all
@@ -221,9 +235,10 @@ class Xp():
             self.wd_datain = xp_template['datain']
 
             if 'tabulate' in vars(self):
-                assert isinstance(self.tabulate, dict), "The .tabulate attribute of an expriment must be a dictionary"
-                for suffix in self.tabulate.keys():
-                    allowed_suffixes = [i for i in xp_template.keys() if i.endswith('_suffix')]
+                assert isinstance(self.tabulate, dict), "The .tabulate attribute of an expriment must be a dictionary" #pyright:ignore
+
+                for suffix in self.tabulate.keys(): #pyright:ignore
+                    allowed_suffixes = [v for k,v in xp_template.items() if k.endswith('_suffix')]
                     if suffix in allowed_suffixes:
                         xp_template[f'wd_{suffix}'] = "f'{self.wd_xp}/{suffix}'"
                     else:
@@ -262,6 +277,12 @@ class Xp():
                 logger.debug(f":construction:\t{wd_dir}", extra={"markup": True})
             else:
                 logger.debug(f":mag:\t{wd_dir}", extra={"markup": True})
+
+    def valid_tab_suffixes(self)->List|None:
+        if 'tabulate' in vars(self):
+            return [k for k,v in self.tabulate.items() if v]
+        else:
+            return None
 
     def reset_done(self, pattern='*'):
         ''' patterns can be: "cr", "bcl2fq", ""
