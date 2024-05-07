@@ -497,6 +497,8 @@ class Xp(db.Xp):
     def list_guide_tables(self,  suffix = 'shrna'):
         ''' Returns the file names of the available guide reads
         '''
+        assert suffix in ['zshrna', 'shrna'], "Invalid suffix, please use 'zshrna' or 'shrna'"
+
         path = f'{self.wd_xp}/{suffix}'
         files = ut.sfind(path=path, pattern='*raw_reads.parquet')
         if not isinstance(files, list):
@@ -527,6 +529,7 @@ class Xp(db.Xp):
             sample_id = self.sample_id #type: ignore
 
         # looks for tabulated parquet files
+        assert suffix in ['zshrna', 'shrna'], "Invalid suffix, please use 'zshrna' or 'shrna'"
         parquet_ifn = self.list_guide_tables(suffix)
 
         if pattern is not None:
@@ -538,7 +541,7 @@ class Xp(db.Xp):
         df = shltr.ibars.reads_to_molecules(
                 sample_id=sample_id, #type: ignore
                 parquet_ifn=parquet_ifn,#type: ignore
-                use_cache=use_cache,
+                zombie=suffix == 'zshrna',
                 cache_dir=self.return_cache_path('mols', suffix), #type: ignore
                 corr_dict_fn=corr_dir_fn,
                 downsample=downsample,
@@ -605,6 +608,8 @@ class Xp(db.Xp):
             Annotates the ibars using a ibar 'cluster' table
             # TODO : improve the ibar annotation functionality
         '''
+
+        assert suffix in ['zshrna', 'shrna'], "Invalid suffix, please use 'zshrna' or 'shrna'"
 
         if sample_id is None:
             sample_id = self.sample_id #type: ignore
@@ -892,7 +897,7 @@ class Xp(db.Xp):
             self.load_latest_ad(forced_pattern=forced_pattern, kind=kind)
 
         if self.tabulate is not None:  #type: ignore
-            db.tabulate_xp(self)
+            db.tabulate_xp(self, modality='singl-cell', cbc_len=16, umi_len=10)
 
         if not skip_mols:
             self.init_mols(clone=self.clone, min_reads=min_reads_per_mol) #type: ignore
@@ -1001,6 +1006,7 @@ class Xp(db.Xp):
         otl_ad_path = mcs_ad_path.replace('mcells', 'outliers')
         
         if suffix is not None:
+            assert suffix in ['zshrna', 'shrna'], "Invalid suffix, please use 'zshrna' or 'shrna'"
             mols = self.return_cache_path('mols', suffix=suffix)
             mols = f'{mols}/{sample_name}_r2mols.parquet'
 
@@ -1436,6 +1442,8 @@ class Xp(db.Xp):
                      **kwargs):
 
         #mols = getattr(self, self.attr_d[suffix] )
+        assert suffix in ['zshrna', 'shrna'], "Invalid suffix, please use 'zshrna' or 'shrna'"
+
 
         alleles = shltr.sc.allele_calling(self.mols, *args, **kwargs)
 
@@ -1540,6 +1548,8 @@ class Xp(db.Xp):
 
             ibar_ann: path to ibar annotations. None (default) resources to the default path specified on `.annotate_ibar()`
         '''
+        assert suffix in ['zshrna', 'shrna'], "Invalid suffix, please use 'zshrna' or 'shrna'"
+
         if self.mols is not None and self.raw_adata is not None:
             self.print('This experiment seems to be have ingested others. No need to ingest unless force=True')
             return None

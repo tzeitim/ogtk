@@ -362,8 +362,6 @@ def tabulate_paired_10x_fastqs_rs(
         .collect()
     )
     
-    logger.step(f'{out_fn=}')
-
     if modality == 'single-molecule':
         df = df.drop('cbc_str', 'cbc_qual')
         final_columns.remove("cbc")
