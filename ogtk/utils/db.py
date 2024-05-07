@@ -280,7 +280,7 @@ class Xp():
 
     def valid_tab_suffixes(self)->List|None:
         if 'tabulate' in vars(self):
-            return [k for k,v in self.tabulate.items() if v]
+            return [k for k,v in self.tabulate.items()]
         else:
             return None
 
