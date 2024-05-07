@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 import ogtk
 from ogtk.utils import db as db 
 
+from ogtk.utils.log import Rlogger
+logger = Rlogger().get_logger()
 
 #__all__ = [
 #    "cluster_ibars",
@@ -18,13 +20,32 @@ from ogtk.utils import db as db
 
 pl.Config.set_fmt_str_lengths(150)
 
+@ogtk.utils.log.call
 def load_parquet_for_analysis(df, plot = True, min_cov_log10=2):
     '''
+    Computes the marginal coverage of each integration across samples and
+    filters out integrations with low coverage. The marginal coverage is the
+    sum of the number of molecules across all samples. min_cov_log10 is the
+    minimum log10 of the marginal coverage to keep the integration.
 
+    If plot is True, it plots the distribution of marginal coverage and the
+    minimum coverage threshold.
+
+    Returns a polars data frame with the marginal coverage and the log10 of the
+    marginal coverage.
     '''
+
+    logger.critical("Warning: assuming that molecules provided come from uncut samples") #pyright: ignore
+
     df = (
         df
         .lazy()
+        # TODO: this is a dirty way of keeping sane spacers 
+        # it works for now since there are plenty of uncut alleles in general
+        .filter(pl.col('wt'))
+        # generate a compsite ibar-spacer 
+        .with_columns(raw_ibar=pl.col('raw_ibar')+'-'+pl.col('spacer'))
+
         .groupby(['cbc','raw_ibar','seq', 'sample_id'])
          .agg([
             pl.col('umi_dom_reads').sum().alias('allele_reads'),
@@ -60,28 +81,30 @@ def load_parquet_for_analysis(df, plot = True, min_cov_log10=2):
     return df.filter(pl.col('ibar_marginal_log')>=min_cov_log10)
 
 
+@ogtk.utils.log.call
 def cluster_ibars(
         mols_parquet: None| str=None, 
         df: None| pl.DataFrame= None,
         plot=True, 
         min_cov_log10=2, 
-        write_parquets=False,
-        umap=False, 
-        out_parquet = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_clusters.parquet',
-        out_valid_ibars = '/local/users/polivar/src/artnilet/conf/valid_ibars.csv'
+        umap:bool=False, 
+        out_parquet:str|None=None,
         )->pl.DataFrame:
     '''
-    Runs HDBSCAN in order to cluster integrations based in the correlation matrix of individual integrations and their molecule counts. 
+    Runs HDBSCAN in order to cluster integrations based in the correlation
+    matrix of individual integrations and their molecule counts. 
 
-    Input: Either a parquet file path or a polars data frame of single cell data, at the molecule level.
+    Input: Either a parquet file path or a polars data frame of single cell
+    data, at the molecule level. Setting umap to True can be very slow for
+    large datasets so it is not recommended. Output: Returns 
 
-
-    Output: Returns 
+    out_parquet = '/local/users/polivar/src/artnilet/workdir/scv2/ibar_clusters.parquet',
     '''
+
     assert not (mols_parquet is None and df is None), "You need to specify mols_parque or df"
 
     if df is None:
-        df =pl.scan_parquet(mols_parquet)
+        df=pl.scan_parquet(mols_parquet)
 
     df = load_parquet_for_analysis(df, plot, min_cov_log10)
 
@@ -109,26 +132,27 @@ def cluster_ibars(
     labs = clusterer.labels_
     yyy = df.join(pl.DataFrame(dict(ibar=candidate, cluster=labs)), left_on='raw_ibar', right_on='ibar')
 
+
     final_df = (
             yyy
             .groupby(['sample_id', 'raw_ibar', 'cluster'])
             .agg(pl.count())
             .drop('count')
             .with_columns(pl.col('sample_id').str.replace('e.?$', '')).rename({'sample_id':'clone'})
+            # name clusters based on size. -1 remains as noise and the largest cluster starts with 1
+            .with_columns(pl.count().over('cluster').rank('dense', descending=True).alias('rank'))
+            .with_columns(cluster=pl.when(pl.col('cluster')==-1).then('cluster').otherwise(pl.col('rank')))
+            .drop('rank')
+            # split composite ibar-spacer into two individual fields
+            .with_columns(
+                raw_ibar=pl.col('raw_ibar').str.split('-').list.get(0), 
+                spacer=pl.col('raw_ibar').str.split('-').list.get(1)
+                )
         )
 
-    if write_parquets:
+    if out_parquet is not None:
         final_df.write_parquet(out_parquet)
-
-        (
-            pl.read_parquet(out_parquet)
-            .rename({'raw_ibar':"valid_ibar"})
-            .select('valid_ibar')
-            .write_csv(out_valid_ibars)
-        )
-
-        print(f'written file {out_parquet}')
-        print(f'written file {out_valid_ibars}')
+        logger.io(f'written file {out_parquet}')
 
     if plot:
         plot_heatmap(zz)
@@ -139,6 +163,7 @@ def cluster_ibars(
         visualize_clusters(df, zz, zn, clusterer)
 
     # TODO in some cases it is desirable to remove the 'clone' and unique the results
+
     return final_df
 
 
