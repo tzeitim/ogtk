@@ -514,7 +514,7 @@ class Xp(db.Xp):
             pattern:str|None=None,
             min_reads:int = 1,
             min_mols_per_ibar:int=1000,
-            downsample = None,
+            do_sampling = None,
             normalize=False,
             use_cache:bool = True,
             corr_dir_fn:str|None=None,
@@ -544,7 +544,7 @@ class Xp(db.Xp):
                 zombie=suffix == 'zshrna',
                 cache_dir=self.return_cache_path('mols', suffix), #type: ignore
                 corr_dict_fn=corr_dir_fn,
-                downsample=downsample,
+                do_sampling=do_sampling,
                 #min_cells_per_ibar=int(len(obs27['cbc']) * 0.2),
                 min_reads=min_reads, 
                 max_reads=int(1e6), #type: ignore
@@ -600,7 +600,7 @@ class Xp(db.Xp):
                   ibar_ann:pl.DataFrame|None=None,
                   min_cell_size: int=0,
                   min_reads: int=1,
-                  downsample: str|None=None,
+                  do_sampling: str|None=None,
                   pattern: str|None=None,
                   sample_id: str|None=None,
                   ):
@@ -614,15 +614,15 @@ class Xp(db.Xp):
         if sample_id is None:
             sample_id = self.sample_id #type: ignore
 
-        if downsample is not None:
-            self.print(f'Downsampling to {downsample} reads', style='bold #ff0000')
-            downsample = int(downsample) #type: ignore
+        if do_sampling is not None:
+            self.print(f'Downsampling to {do_sampling} reads', style='bold #ff0000')
+            do_sampling = int(do_sampling) #type: ignore
 
         mols = self.load_guide_mols(
                 min_reads=min_reads, 
                 clone=clone, 
                 suffix=suffix, 
-                downsample=downsample, 
+                do_sampling=do_sampling, 
                 pattern=pattern)
 
         # annotate .mols

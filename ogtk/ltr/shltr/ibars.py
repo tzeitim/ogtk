@@ -59,6 +59,7 @@ def reads_to_molecules(sample_id: str,
     if os.path.exists(cache_out) and not force:
         logger.info(f'loading from cache {cache_out}')
         rdf = pl.read_parquet(cache_out)
+        return rdf
     else:
         # generate a reads data frame 
         if os.path.exists(encoded_reads_parquet) and not force:
@@ -149,6 +150,7 @@ def reads_to_molecules(sample_id: str,
         rdf = rdf.drop(cs.by_name("^qc_.+$"))
 
         rdf.write_parquet(cache_out)
+        logger.io(cache_out)
     return(rdf)    
 
 @ogtk.utils.log.call
@@ -1138,6 +1140,16 @@ def pl_10xfastq_to_df(fastq_ifn, end = None, export = False):
 
 def return_feature_string(key: str):
     ''' For a provided key return the default string  
+    Supported features: 
+
+     - 'u6mx'
+     - 'tso'
+     - 'u6bk'
+     - 'usibar'
+     - 'dsibar'
+     - 'canscaf'
+     - 'primer'
+     - 'scaf2'
     ''' 
     features_dict = {
     'u6mx':   'GACGAAACACC', # 'GACGAAACACC'
@@ -1685,7 +1697,7 @@ def plot_indel_stacked_fractions(element: str,
         rects = create_rectangle_patches(data, rects)
 
     plot_stacked_rectangles(rects, title=f'{element_field} {element} {bc}', groups=groups)
-
+# TODO support passing a dictionary of ibar -> uncut spacers
 def return_aligned_alleles(
     df,
     aligner:Union["pyseq_align.NeedlemanWunsch", "pyseq_align.SmithWaterman"], #pyright: ignore
@@ -1697,13 +1709,12 @@ def return_aligned_alleles(
     '''
     Requires a data frame that:
     - belongs to a single ibar
-    - belongs to a single sample
 
     E.g.
     df_alg = (
             df
             .sample(int(1e5))
-            .group_by('raw_ibar','sample_id')
+            .group_by('raw_ibar')
             .map_groups(ogtk.shltr.ibars.return_aligned_alleles)
     )
 
@@ -1715,21 +1726,40 @@ def return_aligned_alleles(
     '''
     #         [    TSO     ]
     ref_str = "TTTCTTATATGGG[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAACCTAAGGCTAGTCCGTTATCAACTTGGTACT"
+    ref_str = "TTTCTTATATGGG[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAA"#CCTAAGGCTAGTCC" #GTTATCAACTTGGTACT"
     schema = {"sample_id":str, "ibar":str, "id":str, "aseq":str, "sweight":pl.Int64, "alg":pl.List(pl.Int64)}
     oschema = {"aseq":str, "alg":pl.List(pl.Int64), "aweight":pl.Int64}
     merged_schema = df.schema.copy()
     merged_schema.update(oschema)
+
+    query_schema = {'seq_trim':pl.Utf8, 'oseq':pl.Utf8}
+
+    # alignment.schema=OrderedDict([('oseq', String), ('cigar', String), ('alg_ref', String), ('alg_seq', String), ('alg_score', Int64)])
+
+    alignment_schema = {
+           'cigar_str':pl.Utf8,
+           'aligned_ref': pl.Utf8, 
+           'aligned_seq': pl.Utf8, 
+           'alignment_score': pl.Int64,
+           }
     
-    assert correct_tss_coord is None or isinstance(correct_tss_coord, int), "correct_tss_coords must be None or an integer that defines the correction coordinate"
 
-    assert df['sample_id'].n_unique() == 1, "Please provide a data frame pre-filtered with a single sample_id. Best when this function is called within a group_by"
+    merged_schema = query_schema.copy()
+    merged_schema.update(alignment_schema)
 
-    assert df['raw_ibar'].n_unique() == 1, "Please provide a data frame pre-filtered with a single ibar. Best when this function is called within a group_by"
+    assert correct_tss_coord is None or isinstance(correct_tss_coord, int), \
+            "correct_tss_coords must be None or an integer that defines the correction coordinate"
 
+    #assert df['sample_id'].n_unique() == 1, \
+    #        "Please provide a data frame pre-filtered with a single sample_id. \
+    #        Best when this function is called within a group_by"
 
-    foc_sample = df['sample_id'][0]
+    assert df['raw_ibar'].n_unique() == 1, \
+            "Please provide a data frame pre-filtered with a single ibar. \
+            Best when this function is called within a group_by"
+
+    #foc_sample = df['sample_id'][0]
     foc_ibar= df['raw_ibar'][0]
-
 
     if df.shape[0]<min_group_size:
         logger.info("group too small")
@@ -1739,28 +1769,27 @@ def return_aligned_alleles(
     tso_string = return_feature_string("tso")
     tso_pad = tso_string if tso_pad is None else tso_pad
     fuzzy_tso = fuzzy_match_str(tso_string[5:], wildcard=".{0,1}")
+    fuzzy_u6 = fuzzy_match_str(return_feature_string('u6mx')[5:], wildcard=".{0,1}")
+    fuzzy_5pend = f'{fuzzy_tso}|{fuzzy_u6}'
+    fuzzy_3pend = fuzzy_match_str("CCTAAGGCTAGTCC", wildcard=".{0,1}")
 
+    # compute seq_trim
     df = (
             df
+            .lazy()
             .with_columns(
                 # a parenthesis is needed for the fuzzy pattern to include the wildcards at the beginning
-                pl.col('oseq').str.replace(f'^.+?({fuzzy_tso})', tso_pad)
+                pl.col('oseq')
+                .str.replace(f'^.+?({fuzzy_5pend})', tso_pad)
+                .str.replace(f'{fuzzy_3pend}', '')
                 .alias('seq_trim')
             )
-            .with_columns(
-                pl.len().over(['wt', 'seq_trim'])
-                .alias('sweight')
-            )
-            .with_columns(
-                [pl.col(i).rank(method="dense").cast(pl.Int64).name.suffix('_encoded') for i in ['seq_trim',]]
-            )
-            .with_row_index(name='id')
-            .drop('seq_trim_encoded')
+            .collect()
         )
 
     ### delete?
     if len(df)==0:
-        print("No entries found to generate a fasta file {foc_ibar} {foc_sample}")
+        print("No entries found to generate a fasta file {foc_ibar} ")
         return pl.DataFrame(schema=merged_schema)
 
     foc_spacer = (
@@ -1772,7 +1801,7 @@ def return_aligned_alleles(
 
     #TODO change to use a defined spacer db
     if foc_spacer.shape[0]==0:
-        print(f'No WT allele found for {foc_ibar} {foc_sample}')
+        print(f'No WT allele found for {foc_ibar} ')
         return pl.DataFrame(schema=merged_schema)
 
     foc_spacer = foc_spacer['spacer'][0]
@@ -1785,43 +1814,34 @@ def return_aligned_alleles(
     lim = lim if foc_ref_match is None else foc_ref_match.start()
 
     coord_bins = range(lim)
-    alignment = df.select('seq_trim', 'oseq', 'sweight').unique()
+    query = df.select('seq_trim', 'oseq').unique()
 
-    if aligner is None:
-        aligner = NeedlemanWunsch(
-            #substitution_matrix=substitution_matrix,
-            gap_open=-17,
-            gap_extend=-1,
-        )
     # perform the alignment
-    alignment =(
-            alignment
+    query =(
+            query
             .with_columns(
-                pl.col('seq_trim')
+                alignment= pl.col('seq_trim')
                .map_elements(lambda x: lambda_needlemanw(x, foc_ref, aligner), 
-                            return_dtype =   pl.Struct({
-                                             'cigar_str':pl.Utf8,
-                                             'aligned_ref': pl.Utf8, 
-                                             'aligned_seq': pl.Utf8, 
-                                             'alignment_score': pl.Int64,
-                                             })
-               )
-               .alias('alignment')
+                            return_dtype =   pl.Struct(alignment_schema))
             )
-            .select('oseq', 'alignment')
+            .select('oseq', 'alignment', 'seq_trim')
             )
 
 
-    alignment = alignment.with_columns(
-        cigar=pl.col('alignment').struct.field('cigar_str'), 
-        alg_ref=pl.col('alignment').struct.field('aligned_ref'), 
-        alg_seq=pl.col('alignment').struct.field('aligned_seq'), 
-        alg_score=pl.col('alignment').struct.field('alignment_score'), 
+    alignment = query.with_columns(
+        cigar_str=pl.col('alignment').struct.field('cigar_str'), 
+        aligned_ref=pl.col('alignment').struct.field('aligned_ref'), 
+        aligned_seq=pl.col('alignment').struct.field('aligned_seq'), 
+        alignment_score=pl.col('alignment').struct.field('alignment_score'), 
         ).drop('alignment')
 
-    df = df.join(alignment, left_on='oseq', right_on='oseq', how='left') 
+    query = None
 
-    return df
+    #df = df.join(alignment, left_on='oseq', right_on='oseq', how='left') 
+
+    alignment = alignment.select(list(merged_schema.keys()))
+
+    return alignment
 
     # create alignment data frame
     alg_df = []
@@ -1867,289 +1887,6 @@ def return_aligned_alleles(
         .with_columns(pl.col('aweight').cast(pl.Int64))
     )
     return raw_fasta_entries
-
-def return_aligned_alleles_emboss(
-    df,
-    lim=50,
-    correct_tss_coord: None|int = 18,
-    keep_intermediate=True,
-    min_group_size=100,
-    verbose=True,
-    )->pl.DataFrame:
-    '''
-    Requires a data frame that:
-    - belongs to a single ibar
-    - belongs to a single sample
-    - is annotated with a 'kalhor_id' 
-
-    E.g.
-    df_alg = (
-            df
-            .sample(int(1e5))
-            .group_by('raw_ibar','sample_id')
-            .map_groups(ogtk.shltr.ibars.return_aligned_alleles)
-    )
-
-    Returns the original data frame with additional fields that contain a an aligned version of the original sequence
-     - position-specific code:
-         - -1 is for gap
-         - 0 match
-         - >0 insertion length
-    
-    Alignment fields: "alg_ref", "alg_seq", "alg_score"
-
-    '''
-    ref_str = "TTTCTTATATGGG[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAACCTAAGGCTAGTCCGTTATCAACTTGGTACT"
-    schema = {"sample_id":str, "ibar":str, "id":str, "aseq":str, "sweight":pl.Int64, "alg":pl.List(pl.Int64)}
-    oschema = {"aseq":str, "alg":pl.List(pl.Int64), "aweight":pl.Int64}
-    merged_schema = df.schema.copy()
-    merged_schema.update(oschema)
-    
-    assert correct_tss_coord is None or isinstance(correct_tss_coord, int), "correct_tss_coords must be None or an integer that defines the correction coordinate"
-
-    assert df['sample_id'].n_unique() == 1, "Please provide a data frame pre-filtered with a single sample_id. Best when this function is called within a group_by"
-
-    assert df['raw_ibar'].n_unique() == 1, "Please provide a data frame pre-filtered with a single ibar. Best when this function is called within a group_by"
-
-    assert 'kalhor_id' in df.columns, "Missing field: kalhor_id"
-
-    foc_sample = df['sample_id'][0]
-    foc_ibar= df['raw_ibar'][0]
-
-
-    if df.shape[0]<min_group_size:
-        return pl.DataFrame(schema=merged_schema)
-
-    # we reduce the size of the tso sequence to reduce the specificity of the match
-    tso_string = return_feature_string("tso")
-    fuzzy_tso = fuzzy_match_str(tso_string[5:], wildcard=".{0,1}")
-    raw_fasta_entries = (
-            df
-            .with_columns(
-                # a parenthesis is needed for the fuzzy pattern to include the wildcards at the beginning
-                pl.col('oseq').str.replace(f'^.+?({fuzzy_tso})', tso_string)
-                .alias('seq_trim')
-            )
-            .with_columns(
-                pl.len().over(['wt', 'seq_trim'])
-                .alias('sweight')
-            )
-            .with_columns(
-                [pl.col(i).rank(method="dense").cast(pl.Int64).name.suffix('_encoded') for i in ['seq_trim',]]
-            )
-            .with_row_index(name='id')
-            .with_columns(
-                (
-                 "WT_"+pl.col('wt')\
-                 +"_kalhor_"+pl.col('kalhor_id').cast(pl.Utf8).fill_null('NA')\
-                 +"_sweight_"+pl.col('sweight').cast(pl.Utf8)\
-                 +"_id_"+pl.col('id').cast(pl.Utf8)\
-                 +"_seqid_"+pl.col('seq_trim_encoded').cast(pl.Utf8)\
-                 )
-                 .alias('id')
-            )
-            .with_columns(
-                (">"+pl.col('id')\
-                 +"\n"+pl.col('seq_trim')\
-                 +"\n")
-                 .alias('fasta')
-            )
-            .drop('seq_trim_encoded')
-        )
-
-    ### delete?
-    if len(raw_fasta_entries)==0:
-        print("No entries found to generate a fasta file {foc_ibar} {foc_sample}")
-        return pl.DataFrame(schema=merged_schema)
-
-    foc_spacer = (
-            raw_fasta_entries
-            .filter(pl.col('wt'))['spacer']
-            .value_counts()
-            .sort('count', descending=True)
-            )
-    #TODO change to use a defined spacer db
-    if foc_spacer.shape[0]==0:
-        print(f'No WT allele found for {foc_ibar} {foc_sample}')
-        return pl.DataFrame(schema=merged_schema)
-
-    foc_spacer = foc_spacer['spacer'][0]
-    foc_ref = ref_str.replace('[SPACER]', foc_spacer).replace('[IBAR]', foc_ibar)
-
-    # ibars could show different sizes as spacer are varible
-    # we use the downstream ibar sequence to anchor the ibar position
-    foc_ref_match = regex.search(f'{foc_ibar}{return_feature_string("dsibar")}', foc_ref)
-    lim = lim if foc_ref_match is None else foc_ref_match.start()
-
-    coord_bins = range(lim)
-
-    # perform the alignment
-    alignment_tuples = alignpw_ibar_emboss(
-            raw_fasta_entries=raw_fasta_entries,
-            foc_sample = foc_sample,
-            foc_ibar =  foc_ibar,
-            foc_ref =  foc_ref,
-            verbose = verbose,
-            keep_intermediate =  keep_intermediate)
-
-    
-    # create alignment data frame
-    alg_df = []
-
-    for ((ref_name, read_name), (ref_seq, aligned_seq)) in alignment_tuples:
-        if correct_tss_coord is not None:
-            ref_seqv = np.array(list(ref_seq))
-            aligned_seqv = np.array(list(aligned_seq))
-            c_idx = range(correct_tss_coord) 
-            aligned_seqv[c_idx]=ref_seqv[c_idx]
-            aligned_seq = ''.join(aligned_seqv)
-
-        expansion_factor = regex.search(".+sweight_(.+)_id", read_name)
-        expansion_factor = int(expansion_factor.groups()[0])
-
-        # when reads don't have insertions
-        if "-" not in ref_seq:
-            alg_mask = return_del_mask(aligned_seq, 200)
-            aseq =  aligned_seq[0:lim]
-            #{"sample_id":str, "ibar":str, "id":str, "aseq":str, "sweight":pl.Int64, "alg":pl.List(pl.Int64)}
-            alg_df.append((foc_sample, foc_ibar, read_name, aseq, expansion_factor, alg_mask))
-        # cases where there are insertions
-        # add an additional field iseq to concatenate a string of integrations, 
-        if "-" in ref_seq:
-            alg_mask = return_ins_mask(ref_seq, 200)
-            # TODO check the policy for trimming insertions
-            aseq =  aligned_seq[0:lim]
-            alg_df.append((foc_sample, foc_ibar, read_name, aligned_seq, expansion_factor, alg_mask))
-
-    alg_df = to_interval_df(alg_df, schema=schema, sort_by='sweight') 
-
-    raw_fasta_entries = (
-        raw_fasta_entries
-        .join(alg_df, left_on='id', right_on='id', how='left')
-        .with_columns(pl.count().over('aseq').alias('aweight'))
-        .select(merged_schema.keys())
-        .with_columns(pl.col('aweight').cast(pl.Int64))
-    )
-    return raw_fasta_entries
-
-def return_del_mask(aseq, lim): 
-    '''
-    '''
-    alg_mask = np.zeros(lim, dtype=int)
-    cur = 0
-    for match in regex.finditer("-+", aseq):
-        operation_len = np.diff(match.span())[0]
-        alg_mask[range(match.start(), match.end())] = -1
-        cur = operation_len-1
-    return pl.Series(alg_mask)
-
-def return_ins_mask(ref_seq, lim): 
-    '''
-    '''
-    alg_mask = np.zeros(lim, dtype=int)
-    cur = 0
-    for match in regex.finditer("-+", ref_seq):
-        operation_len = np.diff(match.span())[0]
-        alg_mask[match.start()-cur] = operation_len
-        cur = operation_len-1
-    return pl.Series(alg_mask)
-
-def alignpw_ibar_emboss(
-        raw_fasta_entries:pl.DataFrame,
-        foc_ibar:str,
-        foc_sample:int,
-        foc_ref:str,
-        keep_intermediate:bool=False,
-        verbose:bool=False,
-        conda_prefix:str = "conda run -n emboss")-> Sequence:
-    '''
-    Assumes a conda env named emboss which contains the emboss suite
-
-    To create one:
-        conda create -n emboss -y -c bioconda  emboss
-        
-    Returns: a tuple of tuples in the form: 
-            ( (query_name, ref_name), (query_seq,ref_seq)) 
-        from an alignment from a fasta file
-    '''
-    with tempfile.TemporaryDirectory() as temp_dir:
-        run_id = f'{foc_sample}_{foc_ibar}'
-        reads_fa = f'{temp_dir}/{run_id}_in_pair_algn.fa'
-        ref_fa = f'{temp_dir}/{run_id}_ref_pair_algn.fa' 
-        final_alignment = f'{run_id}_pair_algn.fa'
-
-        with open(reads_fa, 'wt') as reads_out, open(ref_fa, 'wt') as ref_out:
-            ref_out.write(f">ref\n{foc_ref}\n")
-            for i in raw_fasta_entries['fasta'].to_numpy():
-                if i is not None:
-                    reads_out.write(i)
-
-        ltr_utils.mltbc_align_reads_to_ref(
-                name=run_id, 
-                fa_ofn=final_alignment, 
-                ref_path=ref_fa, 
-                ref_name='ref', 
-                conda_prefix=conda_prefix,
-                verbose=verbose,
-                wd=temp_dir)
-
-        #TODO clean the messy paths related to the temp_dir
-        alignment_tuples = ltr_utils.return_alignment_tuples(f'{temp_dir}/{final_alignment}') 
-        if keep_intermediate:
-            os.system(f'cp -r {temp_dir} ./{run_id}')
-
-    return alignment_tuples
-
-def to_interval_df(alignment_data, schema, sort_by):
-    '''
-        Converts a list of tuples containing intervals data (``alignment_data``) into  a data frame following a ``schema``.
-    '''
-    df = pl.DataFrame(alignment_data, schema=schema).sort(sort_by, descending=True)
-    return df
-
-def to_intervals(pos_array, sample_id, lim=50):
-    xy = (
-            pl.Series(pos_array, dtype=pl.Float64)
-            .append(pl.Series(range(lim)).cast(pl.Float64))
-            .value_counts()
-            .with_columns(pl.col('count')-1)
-            .rename({'':'pos', "counts":sample_id})
-            .with_columns(pl.col("pos").cast(pl.Float64))
-            .with_columns(pl.col(sample_id)/len(pos_array))
-            )
-    return xy
-
-def explode_pos(df):
-    dsource = (
-            df
-            .drop(['alg', 'aseq', 'weight'])
-            .melt(id_vars=['sample_id', 'ibar', 'id'], variable_name='pos')
-            .with_columns(pl.col('pos').str.replace('pos_', '').cast(pl.Int64))
-        )
-    return dsource
-
-def return_exploded_positions(df, lim=50): 
-    '''
-    '''
-    fdata = (
-            df
-            .with_columns([pl.col('alg').list.get(i).alias(f"pos_{i}") for i in range(lim)])
-            .with_columns( pl.col("^pos.+$") * pl.col('aweight'))
-        )
-    return fdata
-
-@lru_cache
-def lambda_needlemanw(seq, foc_ref, aligner):
-    ''' 
-    '''
-    alignment = aligner.align(foc_ref, seq)
-
-    return {
-        'cigar_str': ngs_tools.sequence.alignment_to_cigar(alignment.result_a, alignment.result_b),
-        'aligned_ref':  alignment.result_a,
-        'aligned_seq':  alignment.result_b,
-        'alignment_score':  alignment.score
-        }
 
 def compare_ibar_hdistance(seqs:Sequence, mols, select:None|Sequence=None, title='', jobs = 10):
     # how to find ibar shadows
@@ -2213,8 +1950,23 @@ def compare_ibar_hdistance(seqs:Sequence, mols, select:None|Sequence=None, title
     g.set(ylim=(-1, 1))
     plt.show()
 
+@lru_cache
+def lambda_needlemanw(seq, foc_ref, aligner):
+    ''' 
+    '''
+    alignment = aligner.align(foc_ref, seq)
+
+    return {
+        'cigar_str': ngs_tools.sequence.alignment_to_cigar(alignment.result_a, alignment.result_b),
+        'aligned_ref':  alignment.result_a,
+        'aligned_seq':  alignment.result_b,
+        'alignment_score':  alignment.score
+        }
+
 def all_keys(df_keys):
-    """Create dataframe of all unique combinations of values."""
+    '''
+    Create data frame of all unique combinations of values. \nCourtesy of mcrumiller.
+    '''
     columns = df_keys.columns
     df = df_keys.select(columns[0]).unique()
     for column in columns[1:]:
@@ -2223,15 +1975,90 @@ def all_keys(df_keys):
 
 
 def len_all_combos(df, key, agg_ops=pl.all().len(), fill_value=None):
-    """Perform group-by with op and include all possible key combinations."""
+    '''
+    Perform group-by with op and include all possible key combinations. \nCourtesy of mcrumiller.
+    '''
     keys = all_keys(df.select(key))
-    df_grouped = df.group_by(key).agg(agg_ops)
+    df_grouped = df.group_by(key).len()
+
+    
     df_out = keys.join(df_grouped, on=key, how="left")
     if fill_value is not None:
-        other_columns = [x for x in df.columns if x not in key]
-        df_out = df_out.with_columns(pl.col(other_columns).fill_null(fill_value))
-    return df_out.sort(keys)
+        df_out = df_out.with_columns(pl.col('len').fill_null(fill_value))
+    return df_out
+
+
+def default_aligner():
+    return NeedlemanWunsch(
+            gap_open=-20,
+            gap_extend=-1,
+            no_start_gap_penalty=True,
+        )
 
 
 
+def align_alleles(df, aligner=None, alignment_groups=['raw_ibar', 'sample_id'])->pl.DataFrame: 
+    '''
+        Aligns the alleles to their corresponding references in place. 
+        Adds the following fields: 
+         - 'cigar_str',
+         - 'aligned_ref',
+         - 'aligned_seq',
+         - 'alignment_score'
+    '''
+    from rich.progress import Progress
 
+    assert all([i in df.columns for i in ['raw_ibar', 'sample_id', 'oseq']]),\
+        "df must include raw_ibar, sample_id and oseq in its fields"
+    
+    if aligner is None:
+        aligner = default_aligner()
+
+    def tracked_align(df, progress, task):
+        result = return_aligned_alleles(df, aligner, min_group_size=1)
+        progress.update(task, advance=1)
+        return result
+
+    with Progress() as progress:
+        groups = df.group_by(*alignment_groups)
+
+        total = groups.len().shape[0]
+        task1 = progress.add_task("[red]Aligning...", total=total)
+
+        def process_group(group):
+            return tracked_align(group, progress, task1)
+
+        df_alg = groups.map_groups(process_group)
+
+        return df.join(other=df_alg.unique(), left_on='oseq', right_on='oseq', how='left')
+
+def explode_alignment_by_coord(df, 
+                       max_coord=40,
+                       grouping_fields= ['operation', 'coord', 'raw_ibar', "sample_id", "speed", "kalhor_id", 'clone'],
+    ):
+    '''
+    '''
+    import rogtk as rr
+    # import polars_hash as plh
+    mm = (
+        df
+        .with_columns( #pyright:ignore
+            cigop=rr.parse_cigar('cigar_str') #pyright: ignore
+        )
+        .with_columns(pl.col('cigop').str.split('|')).explode('cigop')
+        .with_columns(pl.col('cigop').str.split(','))
+        .with_columns(
+            operation=pl.col('cigop').list.get(0),
+            coord=pl.col('cigop').list.get(1).cast(pl.Int32),
+            oper_len=pl.col('cigop').list.get(2).cast(pl.Int32),
+        )
+        .drop('cigop')
+        .filter(pl.col('coord')<=max_coord)
+        )
+
+    mmm = len_all_combos(
+            df=mm.select(grouping_fields),
+            key=grouping_fields,
+            fill_value=0
+    )
+    return mmm

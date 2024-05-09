@@ -146,16 +146,20 @@ def tabulate_xp(xp, modality, cbc_len, umi_len, force=False)->List:
                 out_fn = f"{outdir}/{found.split('/')[-1]}".replace('.fastq.gz', '.mols.parquet')
                 logger.io(out_fn)
 
-                tabbed = ut.tabulate_paired_10x_fastqs_rs(
-                    file_path=found,
-                    cbc_len=cbc_len,
-                    umi_len=umi_len,
-                    modality=modality,
-                    out_fn=out_fn,
-                    force=force,
-                    do_rev_comp=rev_comp_r2,
-                )
-                tabulated_files.append(tabbed)
+                if not os.path.exists(out_fn) or force:
+                    ut.tabulate_paired_10x_fastqs_rs(
+                        file_path=found,
+                        cbc_len=cbc_len,
+                        umi_len=umi_len,
+                        modality=modality,
+                        out_fn=out_fn,
+                        force=force,
+                        do_rev_comp=rev_comp_r2,
+                        )
+                else:
+                    logger.io(f"loading from cache:\n{out_fn}")
+
+                tabulated_files.append(out_fn)
             return tabulated_files
 
     else:
@@ -239,6 +243,7 @@ class Xp():
 
                 for suffix in self.tabulate.keys(): #pyright:ignore
                     allowed_suffixes = [v for k,v in xp_template.items() if k.endswith('_suffix')]
+
                     if suffix in allowed_suffixes:
                         xp_template[f'wd_{suffix}'] = "f'{self.wd_xp}/{suffix}'"
                     else:

@@ -311,7 +311,7 @@ def tabulate_paired_10x_fastqs_rs(
     umi_len = 10,
     do_rev_comp = False,
     force = False,
-    )-> str:
+    ):
     ''' merges umified paired gzipped fastqs (e.g. 10x fastqs) into a single parquet file 
     and then extracts the relevant features 
 
@@ -343,7 +343,7 @@ def tabulate_paired_10x_fastqs_rs(
              do_rev_comp=do_rev_comp
         )
     else:
-        logger.info(f"found pre-computed {merged_fn=}. Pass force=True to re-compute.")
+        logger.info(f"found pre-computed {merged_fn=}. \nPass force=True to re-compute.")
     
     logger.step('extracting features')
 
@@ -375,7 +375,6 @@ def tabulate_paired_10x_fastqs_rs(
 
     df = None
 
-    return out_fn
 
 def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False, rev_comp_r2=False, export_parquet = False, outdir: str|None=None):
     ''' merge umified paired fastqs (e.g. 10x fastqs) into a single one tab file with fields:
