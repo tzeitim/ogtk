@@ -4,6 +4,7 @@ from ogtk.utils import log
 import ogtk.ltr.shltr.ibars as ibars
 import ogtk.ltr.shltr.bulk as bulk
 import polars as pl
+from pyseq_align import NeedlemanWunsch, SmithWaterman
 import matplotlib.pyplot as plt
 from functools import wraps
 import os
@@ -11,6 +12,9 @@ import seaborn as sns
 
 from ogtk.utils.log import Rlogger
 logger = Rlogger().get_logger()
+
+def _list_files(self, pattern):
+    return ut.sfind(self.wd_xp, pattern = pattern)
 
 def _list_raw_fastqs(self):
     self.input_files = [i 
@@ -47,8 +51,6 @@ def _filter_ibars(df: pl.DataFrame, filters:dict)->pl.DataFrame:
     if 'whitelist' in filters:
         df = df.filter(pl.col('raw_ibar').is_in(filters['whitelist']))
 
-
-
     return df
 
 @log.call
@@ -57,7 +59,7 @@ def _generate_molecule_dfs(
         cache_dir,
         min_reads=1,
         max_reads=1e4,
-        downsample=None,
+        do_sampling=None,
         suffix:str = 'shrna',
         *args,
         **kwargs
@@ -78,7 +80,7 @@ def _generate_molecule_dfs(
                     max_reads=int(max_reads),
                     clone=clone,
                     cache_dir=cache_dir,
-                    downsample=downsample,
+                    do_sampling=do_sampling,
                     *args,
                     **kwargs,
                 )
@@ -86,33 +88,6 @@ def _generate_molecule_dfs(
 
     df = pl.concat(df)
     return df
-
-
-def _fastq_to_parquet(files, cbc_len=0, umi_len=25, force=False, out_prefix='', ):
-    ''' '''
-
-    # how it should be used
-    #if self.tabulate is not None:  #type: ignore
-    #    db.tabulate_xp(self)
-
-    parquets = []
-    for file in files:
-        out_fn = f"{out_prefix}/{file.split('/')[-1]}".replace('.fastq.gz', '.mols.parquet')
-        if not os.path.exists(out_fn) or force:
-            parquets.append(
-                ut.tabulate_paired_10x_fastqs_rs(
-                file_path=file,
-                out_fn=out_fn,
-                cbc_len=cbc_len,
-                umi_len=umi_len,
-                modality='single-molecule',
-                force=force,
-                do_rev_comp=True,
-            ))
-        else:
-            logger.io(f"loading pre-computed {out_fn}") 
-            parquets.append(out_fn)
-    return parquets
 
 def _qc_ibars_per_sample(df: pl.DataFrame)-> pl.DataFrame:
     '''
@@ -311,14 +286,14 @@ class Xp(db.Xp):
         super().__init__(*args, **kwargs)
         self.conf_keys = [i for i in vars(self)]
         # paths
-        self.path_mols =  f'{self.wd_shrna}/{self.sample_id}.mols.parquet' 
+        self.path_mols =  f'{self.wd_xp}/{self.sample_id}.mols.parquet' 
 
-    def init_experiment(self, meta_df, filters, force=False):
+    def init_experiment(self, xps, meta_df, filters, force=False):
         self.set_metadata(meta_df)
-        self.init_mols(filters=filters, force=force)
+        self.init_mols(xps=xps, filters=filters, force=force)
         self.plot_qc_seq()
 
-    def init_mols(self, xps, force=False, do_annotation=True, filters=None, *args, **kwargs):
+    def init_mols(self, xps:None|pl.DataFrame=None, force=False, do_annotation=True, filters=None, *args, **kwargs):
         ''' 
         Populates the .mols attribute by:
             - collapsing data from reads to molecules
@@ -331,10 +306,12 @@ class Xp(db.Xp):
         '''
 
         for suffix in self.valid_tab_suffixes():
-            if os.path.exists(self.path_mols) and not force:
-                self.logger.io(f"loading {self.path_mols}") #pyright:ignore
-                self.mols = pl.read_parquet(self.path_mols)
+            path_mols = self.path_mols.replace('mols', f'mols.{suffix}')
+            if os.path.exists(path_mols) and not force:
+                self.logger.io(f"loading {path_mols}") #pyright:ignore
+                self.mols = pl.read_parquet(path_mols)
             else:
+                assert xps is not None, "Please provide a xps data frame"
                 self.mols = _generate_molecule_dfs(
                      xps=xps,
                      cache_dir=getattr(self, f'wd_{suffix}'),
@@ -352,8 +329,8 @@ class Xp(db.Xp):
                 if do_annotation and self.ibar_clusters is not None:
                     self.metadata_annotate_ibars()
 
-                self.logger.io(f"saving mols to {self.path_mols}")
-                self.mols.write_parquet(self.path_mols)
+                self.logger.io(f"saving mols to {path_mols}")
+                self.mols.write_parquet(path_mols)
         return None
     
     def metadata_annotate_ibars(self, df:None|pl.DataFrame=None, on=['raw_ibar'], how='left'):
@@ -481,6 +458,15 @@ class Xp(db.Xp):
         self.emp_ann = emp_ann_df
         self.logger.info("Populated .emp_ann")
 
+    def save_mols(self, suffix):
+        ''' ''' 
+        assert suffix in self.valid_tab_suffixes(), \
+                f"Please provide a valid suffix from {self.valid_tab_suffixes()}"
+
+        path_mols = self.path_mols.replace('mols', f'mols.{suffix}')
+        self.mols.write_parquet(path_mols)
+
+        return path_mols 
 
     @wraps(_qc_ibars_per_sample)
     def qc_ibars_per_sample(self,  *args, **kwargs):
@@ -491,8 +477,18 @@ class Xp(db.Xp):
         return _filter_ibars(self.mols, *args, **kwargs)
 
     def fastq_to_parquet(self, cbc_len=0, umi_len=25, force=False):
-        self.parquets = db.tabulate_xp(self, modality='single-molecule', cbc_len=cbc_len, umi_len=umi_len, force=force)
-        
+        # TODO improve the caching scheme. Currently force only has an effect
+        # on the tabulation itself but not on the feature calling
+        self.parquets = db.tabulate_xp(self, modality='single-molecule',
+                                       cbc_len=cbc_len, umi_len=umi_len,
+                                       force=force)
+
+    @wraps(ibars.align_alleles)
+    def align_alleles(self):
+        ''' 
+        '''
+        self.mols = ibars.align_alleles(self.mols)
+
     @wraps(_load_ibar_cluster_annotation)
     def load_ibar_cluster_annotation(self, path: str | None =None):
         ''' '''
@@ -513,6 +509,14 @@ class Xp(db.Xp):
         '''
         '''
         _plot_ibar_qc(self, df=df, *args, **kwargs)
+
+    @wraps(_list_files)
+    def list_files(self, pattern:str):
+        return _list_files(self, pattern)
+
+    @wraps(_list_raw_fastqs)
+    def list_raw_fastqs(self):
+        _list_raw_fastqs(self)
 
 
     def set_metadata(self, meta_df):
