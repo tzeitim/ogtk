@@ -1390,8 +1390,18 @@ def noise_properties(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 def plot_noise_properties(df):
+    '''
+    '''
     from matplotlib.colors import LogNorm
-    sns.displot(df, x='tg_cmp', y='spacer_len', cmap='plasma', bins=(10,30),  cbar=True, cbar_kws=dict(norm=LogNorm()))
+
+    sns.displot(df,
+                x='tg_cmp',
+                y='spacer_len',
+                cmap='plasma',
+                bins=(10,30),
+                cbar=True,
+                cbar_kws=dict(norm=LogNorm())
+                )
 
 @ogtk.utils.log.call
 def ibar_reads_to_molecules(
@@ -1698,11 +1708,12 @@ def plot_indel_stacked_fractions(element: str,
 
     plot_stacked_rectangles(rects, title=f'{element_field} {element} {bc}', groups=groups)
 # TODO support passing a dictionary of ibar -> uncut spacers
+
 def return_aligned_alleles(
     df,
     aligner:Union["pyseq_align.NeedlemanWunsch", "pyseq_align.SmithWaterman"], #pyright: ignore
     lim:int=50,
-    correct_tss_coord: None|int = 18,
+    correct_tss_coord:None|int=18,
     min_group_size:int=100,
     tso_pad:str|None="",
     )->pl.DataFrame:
@@ -1723,10 +1734,20 @@ def return_aligned_alleles(
          - -1 is for gap
          - 0 match
          - >0 insertion length
+
+    Alignment procedure:
+     - Trim the original sequence based on fuzzy 5- and 3-prime anchor
+       sequences. In the case of RNA-based detection the TSO fulfills this
+       role. For DNA-based (zombie) it's the 3' end of the U6 promoter 
+     - 
+     # TODO watch out for stammering on alignments - how do they look? search for XXX in the seq
+
+
     '''
+
     #         [    TSO     ]
-    ref_str = "TTTCTTATATGGG[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAACCTAAGGCTAGTCCGTTATCAACTTGGTACT"
-    ref_str = "TTTCTTATATGGG[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAA"#CCTAAGGCTAGTCC" #GTTATCAACTTGGTACT"
+    ref_str = "TTTCTTATATGGG[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAACCTAAGGCTAGTCCGTTATCAACTTG"
+    ref_str = "TTTCTTATATGGG[SPACER]GGGTTAGAGCTAGA[IBAR]AATAGCAAGTTAACCTAAGGCTAGTCC" #GTTATCAACTTGGTACT"
     schema = {"sample_id":str, "ibar":str, "id":str, "aseq":str, "sweight":pl.Int64, "alg":pl.List(pl.Int64)}
     oschema = {"aseq":str, "alg":pl.List(pl.Int64), "aweight":pl.Int64}
     merged_schema = df.schema.copy()
@@ -1743,7 +1764,6 @@ def return_aligned_alleles(
            'alignment_score': pl.Int64,
            }
     
-
     merged_schema = query_schema.copy()
     merged_schema.update(alignment_schema)
 
@@ -1768,11 +1788,28 @@ def return_aligned_alleles(
     # reduce the size of the TSO sequence to decrease the specificity of the match
     tso_string = return_feature_string("tso")
     tso_pad = tso_string if tso_pad is None else tso_pad
+
     fuzzy_tso = fuzzy_match_str(tso_string[5:], wildcard=".{0,1}")
     fuzzy_u6 = fuzzy_match_str(return_feature_string('u6mx')[5:], wildcard=".{0,1}")
+
     fuzzy_5pend = f'{fuzzy_tso}|{fuzzy_u6}'
+    #                              [Common region]
     fuzzy_3pend = fuzzy_match_str("CCTAAGGCTAGTCC", wildcard=".{0,1}")
 
+    
+    # filter out sequences that can't be controlled
+    # TODO keep a record
+    df = (
+            df
+            .lazy()
+            .filter(
+                pl.col('oseq')
+                .str.contains(f'{fuzzy_5pend}'))
+            .filter(
+                pl.col('oseq')
+                .str.contains(f'{fuzzy_3pend}'))
+            .collect()
+        )
     # compute seq_trim
     df = (
             df
@@ -1963,29 +2000,6 @@ def lambda_needlemanw(seq, foc_ref, aligner):
         'alignment_score':  alignment.score
         }
 
-def all_keys(df_keys):
-    '''
-    Create data frame of all unique combinations of values. \nCourtesy of mcrumiller.
-    '''
-    columns = df_keys.columns
-    df = df_keys.select(columns[0]).unique()
-    for column in columns[1:]:
-        df = df.join(df_keys.select(column).unique(), how="cross")
-    return df
-
-
-def len_all_combos(df, key, agg_ops=pl.all().len(), fill_value=None):
-    '''
-    Perform group-by with op and include all possible key combinations. \nCourtesy of mcrumiller.
-    '''
-    keys = all_keys(df.select(key))
-    df_grouped = df.group_by(key).len()
-
-    
-    df_out = keys.join(df_grouped, on=key, how="left")
-    if fill_value is not None:
-        df_out = df_out.with_columns(pl.col('len').fill_null(fill_value))
-    return df_out
 
 
 def default_aligner():
@@ -2032,33 +2046,84 @@ def align_alleles(df, aligner=None, alignment_groups=['raw_ibar', 'sample_id'])-
 
         return df.join(other=df_alg.unique(), left_on='oseq', right_on='oseq', how='left')
 
+def parse_cigar(df):
+    import rogtk as rr
+    # import polars_hash as plh
+    return (
+            df
+            .with_columns( #pyright:ignore
+                cigop=rr.parse_cigar('cigar_str') #pyright: ignore
+            )
+            .with_columns(pl.col('cigop').str.split('|')).explode('cigop')
+            .with_columns(pl.col('cigop').str.split(','))
+            .with_columns(
+                operation=pl.col('cigop').list.get(0),
+                coord=pl.col('cigop').list.get(1).cast(pl.Int32),
+                oper_len=pl.col('cigop').list.get(2).cast(pl.Int32),
+            )
+            .drop('cigop')
+        )
+
 def explode_alignment_by_coord(df, 
-                       max_coord=40,
-                       grouping_fields= ['operation', 'coord', 'raw_ibar', "sample_id", "speed", "kalhor_id", 'clone'],
+       max_coord=40,
+       statistic = 'cigar_str', 
+       grouping_fields= [
+               'operation',
+               'coord',
+               'raw_ibar',
+               "sample_id",
+               "speed",
+               "kalhor_id",
+               'clone'],
     ):
     '''
     '''
-    import rogtk as rr
-    # import polars_hash as plh
-    mm = (
-        df
-        .with_columns( #pyright:ignore
-            cigop=rr.parse_cigar('cigar_str') #pyright: ignore
-        )
-        .with_columns(pl.col('cigop').str.split('|')).explode('cigop')
-        .with_columns(pl.col('cigop').str.split(','))
-        .with_columns(
-            operation=pl.col('cigop').list.get(0),
-            coord=pl.col('cigop').list.get(1).cast(pl.Int32),
-            oper_len=pl.col('cigop').list.get(2).cast(pl.Int32),
-        )
-        .drop('cigop')
-        .filter(pl.col('coord')<=max_coord)
-        )
+    gf = set(grouping_fields)
+    gf.add(statistic)
+
+    assert 'cigar_str' in df.columns, \
+            "An aligned data frame must be provided. Expecting `cigar_str` field."
+
+    mm = parse_cigar(df).filter(pl.col('coord')<=max_coord)
 
     mmm = len_all_combos(
-            df=mm.select(grouping_fields),
-            key=grouping_fields,
+            df=mm.select(list(gf)),
+            key=list(gf),
             fill_value=0
     )
-    return mmm
+
+    gf.remove(statistic)
+    mmmm= (
+            mmm.group_by(*list(gf))
+            .agg(sum=pl.col('len').sum(), mean=pl.col('len').mean()*1e4)
+            )
+    return mmmm
+
+def all_keys(df_keys):
+    '''
+    Create data frame of all unique combinations of values. \n
+    Courtesy of mcrumiller.
+    '''
+    columns = df_keys.columns
+    df = df_keys.select(columns[0]).unique()
+    for column in columns[1:]:
+        df = df.join(df_keys.select(column).unique(), how="cross")
+    return df
+
+
+def len_all_combos(df, key, fill_value=None):
+    '''
+    Perform group-by with op and include all possible key combinations. \n
+    Courtesy of mcrumiller.
+    '''
+    keys = all_keys(df.select(key).unique())
+    #df_grouped = df.group_by(key).len()
+    df_grouped = df.select(key).unique().group_by(key).len()
+
+
+    df_out = keys.join(df_grouped, on=key, how="left")
+
+    if fill_value is not None:
+        df_out = df_out.with_columns(pl.col('len').fill_null(fill_value))
+
+    return df_out
