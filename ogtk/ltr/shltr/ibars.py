@@ -2046,13 +2046,13 @@ def align_alleles(df, aligner=None, alignment_groups=['raw_ibar', 'sample_id'])-
 
         return df.join(other=df_alg.unique(), left_on='oseq', right_on='oseq', how='left')
 
-def parse_cigar(df):
+def parse_cigar(df, block_dels:bool=False):
     import rogtk as rr
     # import polars_hash as plh
     return (
             df
             .with_columns( #pyright:ignore
-                cigop=rr.parse_cigar('cigar_str') #pyright: ignore
+                cigop=rr.parse_cigar('cigar_str', block_dels) #pyright: ignore
             )
             .with_columns(pl.col('cigop').str.split('|')).explode('cigop')
             .with_columns(pl.col('cigop').str.split(','))
