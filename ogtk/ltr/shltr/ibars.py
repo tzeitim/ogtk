@@ -1306,7 +1306,7 @@ def encode_reads_with_dummies(
         .with_columns(pl.col('seq').str.replace_all(f'{fuzzy_stammering}', '[XXX]'))
         .with_columns(pl.col('seq').str.replace_all(r'\[···U6···\]', '[···TSO···]'))
         .with_columns(pl.col('seq').str.replace_all(r'\[···TSO···\]\[···WT···\]', '[···TSO···][···WT···]'))
-        .with_columns(pl.col('seq').str.replace_all(r'\[···SCF1···\]\[···SCF2···\].*?', '[···SCF1···]')) # trims ends of zombie libraries that do not show the primer sequence
+        .with_columns(pl.col('seq').str.replace_all(r'\[···SCF1···\]\[···SCF2···\].*', '[···SCF1···]')) # trims ends of zombie libraries that do not show the primer sequence
 
 
         .drop([i for i in ['qual',  'readid', 'start', 'end'] if i in df.columns])
