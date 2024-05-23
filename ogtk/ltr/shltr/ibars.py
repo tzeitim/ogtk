@@ -1710,9 +1710,11 @@ def plot_indel_stacked_fractions(element: str,
     plot_stacked_rectangles(rects, title=f'{element_field} {element} {bc}', groups=groups)
 # TODO support passing a dictionary of ibar -> uncut spacers
 
+@ogtk.utils.log.call
 def return_aligned_alleles(
     df,
     aligner:Union["pyseq_align.NeedlemanWunsch", "pyseq_align.SmithWaterman"], #pyright: ignore
+    ref_spacer:str|None=None,
     lim:int=50,
     correct_tss_coord:None|int=18,
     min_group_size:int=100,
@@ -1827,24 +1829,31 @@ def return_aligned_alleles(
 
     ### delete?
     if len(df)==0:
-        print("No entries found to generate a fasta file {foc_ibar} ")
+        logger.debug(f"No entries found to generate a fasta file {foc_ibar} ")
         return pl.DataFrame(schema=merged_schema)
 
-    foc_spacer = (
-            df
-            .filter(pl.col('wt'))['spacer']
-            .value_counts()
-            .sort('count', descending=True)
-            )
+    if ref_spacer is None:
+        # attempts to guess a spacer based on the most frequent wt allele
+        guess_spacer = (
+                df
+                .filter(pl.col('wt'))['spacer']
+                .value_counts()
+                .sort('count', descending=True)
+                )
 
-    #TODO change to use a defined spacer db
-    if foc_spacer.shape[0]==0:
-        print(f'No WT allele found for {foc_ibar} ')
-        return pl.DataFrame(schema=merged_schema)
+        if guess_spacer.shape[0]==0:
+            logger.debug(f'No WT allele found for {foc_ibar} ')
+            return pl.DataFrame(schema=merged_schema)
 
-    foc_spacer = foc_spacer['spacer'][0]
-    foc_ref = ref_str.replace('[SPACER]', foc_spacer).replace('[IBAR]', foc_ibar)
+        ref_spacer = guess_spacer['spacer'][0]
+        guess_spacer = None
+
+    assert isinstance(ref_spacer, str), "ref_spacer should be a string"
+
+    foc_ref = ref_str.replace('[SPACER]', ref_spacer).replace('[IBAR]', foc_ibar) 
     foc_ref = foc_ref.replace(return_feature_string("tso"), tso_pad)
+
+    logger.debug(f'{foc_ref=}')
 
     # ibars could show different sizes as spacer are varible
     # we use the downstream ibar sequence to anchor the ibar position
@@ -1859,72 +1868,25 @@ def return_aligned_alleles(
             query
             .with_columns(
                 alignment= pl.col('seq_trim')
-               .map_elements(lambda x: lambda_needlemanw(x, foc_ref, aligner), 
-                            return_dtype =   pl.Struct(alignment_schema))
+                   .map_elements(lambda x: lambda_needlemanw(x, foc_ref, aligner), 
+                            return_dtype=pl.Struct(alignment_schema))
             )
             .select('oseq', 'alignment', 'seq_trim')
             )
 
-
-    alignment = query.with_columns(
-        cigar_str=pl.col('alignment').struct.field('cigar_str'), 
-        aligned_ref=pl.col('alignment').struct.field('aligned_ref'), 
-        aligned_seq=pl.col('alignment').struct.field('aligned_seq'), 
-        alignment_score=pl.col('alignment').struct.field('alignment_score'), 
-        ).drop('alignment')
-
+    alignment = (
+            query.with_columns(
+                cigar_str=pl.col('alignment').struct.field('cigar_str'), 
+                aligned_ref=pl.col('alignment').struct.field('aligned_ref'), 
+                aligned_seq=pl.col('alignment').struct.field('aligned_seq'), 
+                alignment_score=pl.col('alignment').struct.field('alignment_score'), 
+            )
+            .drop('alignment')
+        )
     query = None
 
-    #df = df.join(alignment, left_on='oseq', right_on='oseq', how='left') 
-
     alignment = alignment.select(list(merged_schema.keys()))
-
     return alignment
-
-    # create alignment data frame
-    alg_df = []
-    # 1 try to fix the tss slippage by replacing the first 18 bases of the aligned sequence with the reference
-    # 2 determine de alg_mask for cases without insertions
-    # 3 determine the alg_mask for cases with insertions
-    # 4 create the data frame using to_interval_df
-    # 5 join the data frame with the original df
-    # 6 return the data frame
-
-    for ((ref_name, read_name), (ref_seq, aligned_seq)) in alignment_tuples:
-        if correct_tss_coord is not None:
-            ref_seqv = np.array(list(ref_seq))
-            aligned_seqv = np.array(list(aligned_seq))
-            c_idx = range(correct_tss_coord) 
-            aligned_seqv[c_idx]=ref_seqv[c_idx]
-            aligned_seq = ''.join(aligned_seqv)
-
-        expansion_factor = regex.search(".+sweight_(.+)_id", read_name)
-        expansion_factor = int(expansion_factor.groups()[0])
-
-        # when reads don't have insertions
-        if "-" not in ref_seq:
-            alg_mask = return_del_mask(aligned_seq, 200)
-            aseq =  aligned_seq[0:lim]
-            #{"sample_id":str, "ibar":str, "id":str, "aseq":str, "sweight":pl.Int64, "alg":pl.List(pl.Int64)}
-            alg_df.append((foc_sample, foc_ibar, read_name, aseq, expansion_factor, alg_mask))
-        # cases where there are insertions
-        # add an additional field iseq to concatenate a string of integrations, 
-        if "-" in ref_seq:
-            alg_mask = return_ins_mask(ref_seq, 200)
-            # TODO check the policy for trimming insertions
-            aseq =  aligned_seq[0:lim]
-            alg_df.append((foc_sample, foc_ibar, read_name, aligned_seq, expansion_factor, alg_mask))
-
-    alg_df = to_interval_df(alg_df, schema=schema, sort_by='sweight') 
-
-    raw_fasta_entries = (
-        raw_fasta_entries
-        .join(alg_df, left_on='id', right_on='id', how='left')
-        .with_columns(pl.count().over('aseq').alias('aweight'))
-        .select(merged_schema.keys())
-        .with_columns(pl.col('aweight').cast(pl.Int64))
-    )
-    return raw_fasta_entries
 
 def compare_ibar_hdistance(seqs:Sequence, mols, select:None|Sequence=None, title='', jobs = 10):
     # how to find ibar shadows
@@ -2011,48 +1973,77 @@ def default_aligner():
         )
 
 
-
-def align_alleles(df, aligner=None, alignment_groups=['raw_ibar', 'sample_id'])->pl.DataFrame: 
+def align_alleles(df,
+                  ref_df:None|pl.DataFrame=None,
+                  alignment_groups=['raw_ibar', 'sample_id'],
+                  show_progress=True,
+                  alg_kwargs:None|Dict[str,Union[None, Any]]=None,
+                  ) -> pl.DataFrame:
     '''
-        Aligns the alleles to their corresponding references in place. 
-        Adds the following fields: 
-         - 'cigar_str',
-         - 'aligned_ref',
-         - 'aligned_seq',
-         - 'alignment_score'
+    Aligns the alleles to their corresponding references in place.
+    Adds the following fields:
+    - 'cigar_str',
+    - 'aligned_ref',
+    - 'aligned_seq',
+    - 'alignment_score'
+    show_progress controls the execution with a progress bar present
     '''
     from rich.progress import Progress
 
-    assert all([i in df.columns for i in ['raw_ibar', 'sample_id', 'oseq']]),\
+    assert all([i in df.columns for i in ['raw_ibar', 'sample_id', 'oseq']]), \
         "df must include raw_ibar, sample_id and oseq in its fields"
+
+    groups = df.group_by(*alignment_groups)
     
-    if aligner is None:
-        aligner = default_aligner()
+    if alg_kwargs is None:
+        alg_kwargs = {'aligner':default_aligner(), 'min_group_size':1}
 
-    def tracked_align(df, progress, task):
-        result = return_aligned_alleles(df, aligner, min_group_size=1)
-        progress.update(task, advance=1)
-        return result
+    assert alg_kwargs is not None, "a set of arguments needs to be passed to the alignment"
 
-    with Progress() as progress:
-        groups = df.group_by(*alignment_groups)
+    def return_spacer(ref_df, group):
+        ''' '''
+        if ref_df is None:
+            return None
 
-        total = groups.len().shape[0]
-        task1 = progress.add_task("[red]Aligning...", total=total)
+        foc_ibar = group['raw_ibar'].unique()
+        assert len(foc_ibar)==1, "single ibar groups should be passed"
+        foc_ibar = foc_ibar[0]
 
+        foc_spacer=ref_df.filter(pl.col('raw_ibar')==foc_ibar)['spacer']
+        assert len(foc_spacer)>0, f"ibar {foc_ibar} is not present in ref_df" 
+
+        foc_spacer = foc_spacer[0]
+        logger.debug(f'{group.shape=}\n{foc_ibar=} {foc_spacer=}')
+        return foc_spacer
+
+    if show_progress:
+        with Progress() as progress:
+            total = groups.len().shape[0]
+            alignment_task = progress.add_task("[red]Aligning...", total=total)
+
+            def process_group_pro(group):
+                alg_kwargs['ref_spacer'] = return_spacer(ref_df, group) #pyright:ignore
+                result = return_aligned_alleles(group, **alg_kwargs) #pyright:ignore
+                progress.update(alignment_task, advance=1)
+                return result
+
+            df_alg = groups.map_groups(process_group_pro)
+    else:
         def process_group(group):
-            return tracked_align(group, progress, task1)
+            alg_kwargs['ref_spacer'] = return_spacer(ref_df, group) #pyright:ignore
+            return return_aligned_alleles(group, **alg_kwargs) #pyright:ignore
 
         df_alg = groups.map_groups(process_group)
 
-        return df.join(other=df_alg.unique(), left_on='oseq', right_on='oseq', how='left')
+    return df.join(other=df_alg.unique(), left_on='oseq', right_on='oseq', how='left')
+
 
 def parse_cigar(df, block_dels:bool=False):
     import rogtk as rr
     # import polars_hash as plh
     return (
             df
-            .with_columns( #pyright:ignore
+            .with_columns(
                 cigop=rr.parse_cigar('cigar_str', block_dels) #pyright: ignore
             )
             .with_columns(pl.col('cigop').str.split('|')).explode('cigop')

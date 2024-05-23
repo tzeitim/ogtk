@@ -484,10 +484,10 @@ class Xp(db.Xp):
                                        force=force)
 
     @wraps(ibars.align_alleles)
-    def align_alleles(self):
+    def align_alleles(self, *args, **kwargs):
         ''' 
         '''
-        self.mols = ibars.align_alleles(self.mols)
+        self.mols = ibars.align_alleles(self.mols, *args, **kwargs)
 
     @wraps(_load_ibar_cluster_annotation)
     def load_ibar_cluster_annotation(self, path: str | None =None):
