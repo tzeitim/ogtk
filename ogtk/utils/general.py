@@ -353,8 +353,8 @@ def tabulate_paired_10x_fastqs_rs(
     df = (
         pl.scan_parquet(merged_fn)
         .with_columns(
-            cbc=pl.col('r1_seq').str.slice(0, cbc_len), 
-            umi=pl.col('r1_seq').str.slice(cbc_len, cbc_len+umi_len),
+            cbc_str=pl.col('r1_seq').str.slice(0, cbc_len), 
+            umi_str=pl.col('r1_seq').str.slice(cbc_len, cbc_len+umi_len),
             cbc_qual=pl.col('r1_qual').str.slice(0, cbc_len), 
             umi_qual=pl.col('r1_qual').str.slice(cbc_len, cbc_len+umi_len)
         )
