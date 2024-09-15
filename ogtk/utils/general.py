@@ -347,13 +347,13 @@ def tabulate_paired_10x_fastqs_rs(
     
     logger.step('extracting features')
 
-    final_columns = set(['read_id', 'cbc_str', 'umi', 'cbc_qual', 'umi_qual', 'seq', 'seq_qual']) 
+    final_columns = set(['read_id', 'cbc', 'umi', 'cbc_qual', 'umi_qual', 'seq', 'seq_qual']) 
     renaming_dict = {'r2_seq':'seq', 'r2_qual':'seq_qual'}
 
     df = (
         pl.scan_parquet(merged_fn)
         .with_columns(
-            cbc_str=pl.col('r1_seq').str.slice(0, cbc_len), 
+            cbc=pl.col('r1_seq').str.slice(0, cbc_len), 
             umi=pl.col('r1_seq').str.slice(cbc_len, cbc_len+umi_len),
             cbc_qual=pl.col('r1_qual').str.slice(0, cbc_len), 
             umi_qual=pl.col('r1_qual').str.slice(cbc_len, cbc_len+umi_len)
@@ -363,8 +363,8 @@ def tabulate_paired_10x_fastqs_rs(
     )
     
     if modality == 'single-molecule':
-        df = df.drop('cbc_str', 'cbc_qual')
-        final_columns.remove("cbc_str")
+        df = df.drop('cbc', 'cbc_qual')
+        final_columns.remove("cbc")
         final_columns.remove("cbc_qual")
 
     df = (
