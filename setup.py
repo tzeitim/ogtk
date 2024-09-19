@@ -46,6 +46,9 @@ setuptools.setup(
 #        'scanpy',
         'seaborn',
         'setuptools_rust',
+        'hdbscan',
+        'ngs_tools',
+        'pyseq_align',
         'tables'
     ], 
     python_requires='>=3.6',
