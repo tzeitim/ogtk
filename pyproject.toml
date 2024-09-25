@@ -1,0 +1,70 @@
+[build-system]
+requires=["hatchling"]
+build-backend= "hatchling.build"
+
+[project]
+name="ogtk"
+version="0.0.1"
+python_requires='>=3.9'
+readme="README.md"
+authors=[
+  {name="Pedro Olivares"}
+]
+maintainers=[
+  {name="Pedro Olivares", email="pedroy.final@gmail.com"}
+]
+description="General tools for genomics and lineage tracing"
+#long_description=long_description,
+#long_description_content_type="text/markdown",
+urls.Home-page="https://github.com/tzeitim/ogtk"
+dependencies=[
+    'bgzip',
+    'colorhash',
+    #'fasta',
+    'fastcluster',
+    'matplotlib',
+    'pandas',
+    'polars',
+    'pyarrow',
+    'pyaml', 
+    'pysam', 
+    'pyfaidx', 
+    'pyfasta', 
+    'fastparquet',
+    'regex', 
+    'rich',
+    'scipy',
+    'seaborn',
+    'setuptools_rust',
+    'hdbscan',
+    'ngs_tools',
+    'pyseq_align',
+    'tables'
+] 
+classifiers=[
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+[project.optional-dependencies]
+sc=[
+        'metacells',
+        'scanpy',
+]
+
+doc=[
+ "docutils>=0.8,!=0.18.*,!=0.19.*",
+  "sphinx>=4",
+  "sphinx-book-theme>=1.0.0",
+  "myst-nb",
+  "sphinxcontrib-bibtex>=1.0.0",
+  "sphinx-autodoc-typehints",
+  "sphinxext-opengraph",
+  "ipykernel",
+  "ipython",
+  "sphinx-copybutton",
+  "pandas",
+]
+
+
