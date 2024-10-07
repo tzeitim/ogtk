@@ -17,7 +17,6 @@ import os
 import time
 from functools import wraps
 from pyaml import yaml
-import cassiopeia as cas
 
 from ogtk.utils.log import Rlogger
 logger = Rlogger().get_logger()
@@ -94,6 +93,8 @@ def _cassit(exp,
                 .alias('r1'))
             .to_pandas()
     )
+    import cassiopeia as cas
+
 
     intree = set(allele_table.reset_index()['cellBC'].unique())
 
