@@ -32,6 +32,7 @@ dependencies=[
     'pyfaidx', 
     'pyfasta', 
     'fastparquet',
+    'numpy>=1.21.0,<2.0.0',
     'regex', 
     'rich',
     'scipy',
@@ -53,7 +54,7 @@ sc=[
         'metacells',
         'scanpy',
 ]
-rs=['maturin']
+rs=['maturin', 'patchelf']
 doc=[
  "docutils>=0.8,!=0.18.*,!=0.19.*",
   "sphinx>=4",
