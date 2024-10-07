@@ -25,6 +25,7 @@ dependencies=[
     'matplotlib',
     'pandas',
     'polars',
+    'polars-hash',
     'pyarrow',
     'pyaml', 
     'pysam', 
@@ -52,7 +53,7 @@ sc=[
         'metacells',
         'scanpy',
 ]
-
+rs=['maturin']
 doc=[
  "docutils>=0.8,!=0.18.*,!=0.19.*",
   "sphinx>=4",
