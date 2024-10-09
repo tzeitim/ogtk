@@ -22,7 +22,6 @@ description="General tools for genomics and lineage tracing"
 #long_description_content_type="text/markdown",
 urls.Home-page="https://github.com/tzeitim/ogtk"
 dependencies=[
-    'rogtk @ git+https://github.com/tzeitim/rogtk.git',
     'numpy>=1.21.0,<2.0.0',
     'bgzip',
     'colorhash',
@@ -60,7 +59,11 @@ sc=[
         'metacells',
         'scanpy',
 ]
-rs=['maturin', 'patchelf']
+rs=[
+    'rogtk @ git+https://github.com/tzeitim/rogtk.git',
+    'maturin', 
+    'patchelf'
+]
 doc=[
  "docutils>=0.8,!=0.18.*,!=0.19.*",
   "sphinx>=4",
