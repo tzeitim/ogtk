@@ -23,6 +23,7 @@ description="General tools for genomics and lineage tracing"
 urls.Home-page="https://github.com/tzeitim/ogtk"
 dependencies=[
     'rogtk @ git+https://github.com/tzeitim/rogtk.git',
+    'numpy>=1.21.0,<2.0.0',
     'bgzip',
     'colorhash',
     #'fasta',
