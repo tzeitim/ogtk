@@ -147,3 +147,5 @@ ogtk/ltr/shltr/basura
 ogtk/utils/mc/mcview_import_dataset.r
 ogtk/ltr/._cluster.py
 ogtk/ltr/._align.py
+ogtk/.DS_Store
+.DS_Store
