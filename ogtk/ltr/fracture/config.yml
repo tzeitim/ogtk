@@ -1,0 +1,16 @@
+_prefix: "/home/labs/nyosef/pedro/"
+prefix: "/home/pedro/wexac/"
+input_dir: "projects/lt/datain/20241020/fracture"
+output_dir: "projects/lt/test_pp"
+steps:
+  - parquet
+  - preprocess 
+parameters:
+  anchor_ont: "GGCACACTGTCCT"
+  param2: value2
+  modality: "single-molecule"
+  umi_len: 12
+  rev_comp: True
+  sample: "sb_rna_fracture_S3" # we need to think on a way of selecting one out of many
+dry: False #True
+
