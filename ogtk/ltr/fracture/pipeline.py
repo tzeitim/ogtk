@@ -1,10 +1,58 @@
 from pathlib import Path
 import polars as pl
-from enum import Enum, auto
-from ogtk.utils.log import Rlogger, call
-from ogtk.utils import tabulate_paired_10x_fastqs_rs, sfind
+import pandas as pd
+from functools import wraps
 import argparse
-from ogtk.utils.db import Xp
+from enum import Enum, auto
+from typing import Any, Dict, List, Optional, Set
+from dataclasses import dataclass
+from ogtk.utils.log import Rlogger, call
+from ogtk.utils import tabulate_paired_10x_fastqs_rs, sfind #, another_function, yet_another_function
+
+@pl.api.register_dataframe_namespace("dna")
+class PlDNA:
+    def __init__(self, df: pl.DataFrame) -> None:
+        self._df = df
+
+    def to_fasta(self, read_id_col: str, read_col: str) -> pl.DataFrame:
+        return  self._df.with_columns(
+                (">"+pl.col(read_id_col)\
+                 +"\n"+pl.col(read_col)\
+                 +"\n")
+                 .alias(f'{read_col}_fasta')
+        )
+    def to_fastq(self, read_id_col: str, read_qual_col: str, read_col: str)-> pl.DataFrame:
+        return self._df.with_columns(
+                ("@"+pl.col(read_id_col)\
+                 +"\n"+pl.col(read_col)\
+                 +"\n+"\
+                 +"\n"+pl.col(read_qual_col)\
+                 +"\n"\
+                )
+                 .alias(f'{read_col}_fastq')
+        )
+
+
+@pl.api.register_dataframe_namespace("pp")
+class PlPipeline:
+    def __init__(self, df: pl.DataFrame) -> None:
+        self._df = df
+
+@pl.api.register_lazyframe_namespace("pp")
+class PllPipeline:
+    def __init__(self, ldf: pl.LazyFrame) -> None:
+        self._ldf = ldf
+
+    def parse_reads(self, umi_len, anchor_ont):
+        return(
+                self._ldf
+                    .with_columns(pl.col('r1_seq').str.slice(0, umi_len).alias('umi'))
+                    .with_columns(pl.col('r1_seq').str.contains(anchor_ont).alias('ont'))
+                    .filter(pl.col('ont'))
+                    .with_columns(pl.len().over('umi').alias('reads'))
+                    # strip out the UMI from R1
+                    .with_columns(pl.col('r1_seq').str.replace(f"^.+?{anchor_ont}", anchor_ont))
+                )    
 
 class PipelineStep(Enum):
     """Enum defining available pipeline steps"""
@@ -75,22 +123,22 @@ class Pipeline:
             return
             
         try:
-            self.logger.info(f"Loading data from {self.xp.input_dir}")
-            input_files = sfind(str(self.xp.input_dir), "*.fastq.gz")
+            self.logger.info(f"Loading data from {self.config.input_dir}")
+            input_files = sfind(f"{self.config.input_dir}", "*.fastq.gz")
             self.logger.io(f"found {input_files}")
 
-            if not getattr(self.xp, 'dry', False):
+            if not self.config.dry:
                 for file in input_files:
-                    parameters = self.xp.parameters if hasattr(self.xp, 'parameters') else {}
                     tabulate_paired_10x_fastqs_rs(
-                        file_path=file, 
-                        out_fn=file.replace("fastq.gz", '.parquet'), 
-                        modality=parameters.get('modality', 'single-molecule'),
-                        umi_len=parameters.get('umi_len', 12),
-                        do_rev_comp=parameters.get('rev_comp', True),
-                        force=True
-                    )
+                            file_path=file, 
+                            out_fn=file.replace("fastq.gz", '.parquet'), 
+                            modality=self.config.parameters.modality,     #pyright: ignore
+                            umi_len=self.config.parameters.umi_len,       #pyright: ignore
+                            do_rev_comp=self.config.parameters.rev_comp,  #pyright: ignore
+                            force=True)
                     print(file)
+
+            pass
         except Exception as e:
             self.logger.error(f"Failed to load data: {str(e)}")
             raise
@@ -105,8 +153,7 @@ class Pipeline:
         try:
             self.logger.step("Parsing reads and collecting molecule stats")
 
-            if not hasattr(self.xp, 'parameters'):
-                raise ValueError("Missing parameters in configuration")
+            parameters = self.config.parameters
 
             parameters = self.xp.parameters #pyright:ignore
             required_params = ['umi_len', 'anchor_ont']
@@ -121,14 +168,12 @@ class Pipeline:
             if not getattr(self.xp, 'dry', False):
                 (
                     pl
-                    .scan_parquet(f"{self.xp.input_dir}/{self.xp.sample_id}_R1_001.merged.parquet") #pyright: ignore
-                    .pp.parse_reads( #pyright:ignore
-                        umi_len=parameters['umi_len'], 
-                        anchor_ont=parameters['anchor_ont']
-                    )
+                    .scan_parquet(f"{input_dir}/{sample}_R1_001.merged.parquet")
+                    .pp.parse_reads(umi_len=umi_len, anchor_ont=anchor_ont) #pyright:ignore
                     .collect()
                     .write_parquet(out_file)
                 )
+            pass
         except Exception as e:
             self.logger.error(f"Failed to preprocess data: {str(e)}")
             raise
@@ -197,8 +242,20 @@ def parse_args():
                        help="Logging level")
     return parser.parse_args()
 
+
 def main():
-    """Main entry point for the pipeline"""
+    '''
+    # Run all steps defined in config
+    python pipeline.py --config config.yml
+
+    # Run only specific steps (overrides config)
+    python pipeline.py --config config.yml --steps load analyze save
+
+    # Set log level
+    python pipeline.py --config config.yml --log-level DEBUG
+    '''
+
+    # Parse arguments
     args = parse_args()
     
     # Initialize logger

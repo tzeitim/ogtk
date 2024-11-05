@@ -11,7 +11,7 @@ from ogtk.utils.log import Rlogger, call
 logger = Rlogger().get_logger()
 
 def init_logger(self):
-    #from import Rlogger
+    #from ogtk.utils.log import Rlogger
     self.logger = Rlogger().get_logger()
     self.rlogger = Rlogger()  # Keep a reference to the Rlogger instance
     #logger.set_level("DEBUG")
