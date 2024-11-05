@@ -8,11 +8,11 @@ import polars as pl
 import ogtk
 from functools import wraps
 
-from ogtk.utils.log import Rlogger
+from import Rlogger, call
 logger = Rlogger().get_logger()
 
 def init_logger(self):
-    #from ogtk.utils.log import Rlogger
+    #from import Rlogger
     self.logger = Rlogger().get_logger()
     self.rlogger = Rlogger()  # Keep a reference to the Rlogger instance
     #logger.set_level("DEBUG")
@@ -92,7 +92,7 @@ import hashlib
 
 
 # changes here might break the invokation in the pipeline since the will be missing arguments
-@ogtk.utils.log.call
+@call
 def tabulate_xp(xp, modality, cbc_len, umi_len, force=False)->List:
     ''' 
     Tabulates paired fastq of umified reads (R1:UMI:CB, R2:RNA) into the
@@ -184,12 +184,17 @@ class Xp():
         self.logger = Rlogger().get_logger()
         self.rlogger = Rlogger()  # Keep a reference to the Rlogger instance
 
+        print("helloooo")
         if conf_fn is not None:
             conf_dict = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
 
         if conf_dict is not None:
             for k,v in conf_dict.items():
-                setattr(self, k, v)
+                if "self" in v: # we need to evaluate this variable:
+                    print(f"{v} self-reference for {k}")
+                    setattr(self, k, eval(v))
+                else:
+                    setattr(self, k, v)
 
         if "xp_template" in vars(self):
             self.consolidate_conf()
@@ -229,9 +234,7 @@ class Xp():
         '''
         # import information from experiment template
         if self.xp_template is not None: #pyright:ignore
-
             xp_template = yaml.load(open(self.xp_template), Loader=yaml.FullLoader) #pyright:ignore
-
 
             # still undecided on whether to import everything or be more selective.
             # for now we import all
@@ -239,7 +242,7 @@ class Xp():
             self.wd_datain = xp_template['datain']
 
             if 'tabulate' in vars(self):
-                assert isinstance(self.tabulate, dict), "The .tabulate attribute of an expriment must be a dictionary" #pyright:ignore
+                assert isinstance(self.tabulate, dict), "The .tabulate attribute of an experiment must be a dictionary" #pyright:ignore
 
                 for suffix in self.tabulate.keys(): #pyright:ignore
                     allowed_suffixes = [v for k,v in xp_template.items() if k.endswith('_suffix')]
@@ -325,7 +328,7 @@ class Xp():
         with open(out_fn, 'w') as outfile:
             yaml.dump(conf_dict, outfile)
 
-    @ogtk.utils.log.call
+    @call
     @wraps(run_bcl2fq)
     def demux(self, *args, **kwargs):
         ''' demultiplex

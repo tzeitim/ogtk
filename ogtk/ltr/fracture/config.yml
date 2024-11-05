@@ -13,4 +13,4 @@ parameters:
   rev_comp: True
   sample: "sb_rna_fracture_S3" # we need to think on a way of selecting one out of many
 dry: False #True
-
+xp_template: "f'{self.prefix}/projects/lt/conf/fracture_xp_template.yml'"
