@@ -5,10 +5,9 @@ from pyaml import yaml
 from rich.console import Console
 from rich.text import Text
 import polars as pl
-import ogtk
 from functools import wraps
 
-from import Rlogger, call
+from ogtk.utils.log import Rlogger, call
 logger = Rlogger().get_logger()
 
 def init_logger(self):
@@ -184,14 +183,12 @@ class Xp():
         self.logger = Rlogger().get_logger()
         self.rlogger = Rlogger()  # Keep a reference to the Rlogger instance
 
-        print("helloooo")
         if conf_fn is not None:
             conf_dict = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
 
         if conf_dict is not None:
-            for k,v in conf_dict.items():
-                if "self" in v: # we need to evaluate this variable:
-                    print(f"{v} self-reference for {k}")
+            for k, v in conf_dict.items():
+                if isinstance(v, str) and "self" in v:  # Check if v is string first
                     setattr(self, k, eval(v))
                 else:
                     setattr(self, k, v)

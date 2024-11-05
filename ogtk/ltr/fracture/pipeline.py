@@ -23,15 +23,18 @@ class PipelineStep(Enum):
 
 class Pipeline:
     """Main pipeline class for data processing using Xp configuration"""
-    
+
     def __init__(self, xp: Xp):
         self.xp = xp
         self.logger = Rlogger().get_logger()
         
+        # Extract dry run setting before consolidation
+        self.dry_run = getattr(self.xp, 'dry', False)
+        
         # Create output directory if it doesn't exist
         Path(self.xp.output_dir).mkdir(parents=True, exist_ok=True)
-        if hasattr(self.xp, 'dry') and self.xp.dry:
-            self.logger.critical("Running dry!")
+        if self.dry_run:
+            self.logger.critical("Running in dry run mode!")
 
     def should_run_step(self, step: PipelineStep) -> bool:
         """Check if a step should be run based on configuration"""
@@ -105,20 +108,21 @@ class Pipeline:
             if not hasattr(self.xp, 'parameters'):
                 raise ValueError("Missing parameters in configuration")
 
-            parameters = self.xp.parameters
-            required_params = ['sample', 'umi_len', 'anchor_ont']
+            parameters = self.xp.parameters #pyright:ignore
+            required_params = ['umi_len', 'anchor_ont']
+
             for param in required_params:
                 if param not in parameters:
                     raise ValueError(f"Missing required parameter: {param}")
 
-            out_file = f"{self.xp.output_dir}/{parameters['sample']}.dff.parquet"
+            out_file = f"{self.xp.output_dir}/{self.xp.sample_id}.dff.parquet" #pyright:ignore
             self.logger.io(f"exporting reads to {out_file}")
 
             if not getattr(self.xp, 'dry', False):
                 (
                     pl
-                    .scan_parquet(f"{self.xp.input_dir}/{parameters['sample']}_R1_001.merged.parquet")
-                    .pp.parse_reads(
+                    .scan_parquet(f"{self.xp.input_dir}/{self.xp.sample_id}_R1_001.merged.parquet") #pyright: ignore
+                    .pp.parse_reads( #pyright:ignore
                         umi_len=parameters['umi_len'], 
                         anchor_ont=parameters['anchor_ont']
                     )
