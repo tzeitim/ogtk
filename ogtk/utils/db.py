@@ -1,18 +1,18 @@
 import rich
-from typing import List
+from typing import List, Dict
 import os
 from pyaml import yaml
 from rich.console import Console
 from rich.text import Text
 import polars as pl
-import ogtk
+
 from functools import wraps
 
-from ogtk.utils.log import Rlogger
+from ogtk.utils.log import Rlogger, call
 logger = Rlogger().get_logger()
 
 def init_logger(self):
-    #from ogtk.utils.log import Rlogger
+    #from import Rlogger
     self.logger = Rlogger().get_logger()
     self.rlogger = Rlogger()  # Keep a reference to the Rlogger instance
     #logger.set_level("DEBUG")
@@ -92,7 +92,7 @@ import hashlib
 
 
 # changes here might break the invokation in the pipeline since the will be missing arguments
-@ogtk.utils.log.call
+@call
 def tabulate_xp(xp, modality, cbc_len, umi_len, force=False)->List:
     ''' 
     Tabulates paired fastq of umified reads (R1:UMI:CB, R2:RNA) into the
@@ -175,6 +175,7 @@ def print_template(conf_fn: str = '/home/polivar/src/artnilet/conf/xps/template.
 class Xp():
     ''' Imports a yaml file into an instance of the class xp (experiment). Attributes are directly assigned via the yaml file
     '''
+    system: str
     def __init__(self, conf_fn=None, conf_dict=None, quiet=True):
         self.conf_fn = conf_fn
         self.consolidated = False
@@ -184,15 +185,19 @@ class Xp():
         self.logger = Rlogger().get_logger()
         self.rlogger = Rlogger()  # Keep a reference to the Rlogger instance
 
+        # populate the conf dir via a file or directly from an argument
         if conf_fn is not None:
             conf_dict = yaml.load(open(conf_fn), Loader=yaml.FullLoader)
-
+        
         if conf_dict is not None:
             for k,v in conf_dict.items():
                 setattr(self, k, v)
+       
+        # resolve prefix
+        self._resolve_system_prefix()
 
-        if "xp_template" in vars(self):
-            self.consolidate_conf()
+        # resolve type of experiment using xp_template
+        self.consolidate_conf()
 
         if 'gene_conf_fn' in vars(self):
             self.__init_genes()
@@ -210,7 +215,50 @@ class Xp():
         conf_dict = yaml.load(open(self.gene_conf_fn), Loader=yaml.FullLoader)
         for k,v in conf_dict.items():
             setattr(self, k, v)
-        
+    
+    def _resolve_system_prefix(self):
+        '''
+        '''
+        # check if prefix is in the environment
+        env_prefix = os.environ.get('OGTK_SYSPREFIX')
+        if env_prefix:
+            self.logger.info(f"Getting system prefix from environment:\n{env_prefix}")
+            setattr(self, 'prefix', env_prefix)
+            return 
+
+
+        # if not found as environ var get it from the conf 
+        if "system" not in vars(self):
+            raise ValueError(self._prefix_help())
+
+        if "prefixes" not in self.system and "default" not in self.system:
+            raise ValueError(self._prefix_help())
+
+        prefix = self.system['prefixes'][self.system['default']]
+        self.logger.info(f"Using system prefix from config file:\n{prefix}")
+
+        setattr(self, 'prefix', prefix)
+
+
+    def _populate_special(self, dic: Dict, var_pref: str):
+        ''' '''
+        for k,v in dic.items():
+            if k.startswith(var_pref):
+                if k not in vars(self): 
+                    setattr(self, k, eval(v))
+                else:
+                    logger.debug(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
+
+    @staticmethod
+    def _prefix_help():
+        return "A system prefix configuration needs to be provided in the form \n"  \
+                            "system:\n "\
+                            " prefixes:\n"\
+                            "    host1: '/home/user/path/to/project/'\n"\
+                            "    host2: '/mount/server/user/path/to/project/'\n"\
+                            "    laptop: '/Volumes/mount/user/'\n"\
+                            " default: 'host1'  # Default prefix to use\n"
+                            
     def logger_set_level(self, level):
         '''
         '''
@@ -225,19 +273,29 @@ class Xp():
         return pl.DataFrame(attrs)
 
     def consolidate_conf(self):
-        ''' The self-referencing pointers in the configuration are evaluated
-        '''
-        # import information from experiment template
-        if self.xp_template is not None: #pyright:ignore
+        ''' The self-referencing pointers in the configuration are evaluated '''
 
+        if not hasattr(self, 'xp_template'):
+            raise ValueError("An experiment template must be provided")
+        else:
+            # import information from experiment template
+
+            self.xp_template = self.xp_template.replace("${prefix}", self.prefix)
             xp_template = yaml.load(open(self.xp_template), Loader=yaml.FullLoader) #pyright:ignore
 
+            # some variables are special and need to be evaluated
+            # following the hierachy: xp_ -> pro_ -> sample_
+            special_vars = ['xp_', 'pro_', 'sample_'] 
+            for var_pref in special_vars:
+                self._populate_special(xp_template, var_pref)
 
-            # still undecided on whether to import everything or be more selective.
-            # for now we import all
-            #self.workdir =  xp_template['workdir']
-            self.wd_datain = xp_template['datain']
-
+            # direct assignment of non-special variables
+            for k,v in xp_template.items():
+                if k not in vars(self) and k not in special_vars:
+                    setattr(self, k, v)
+                else:
+                    logger.debug(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
+            
             if 'tabulate' in vars(self):
                 assert isinstance(self.tabulate, dict), "The .tabulate attribute of an expriment must be a dictionary" #pyright:ignore
 
@@ -249,25 +307,7 @@ class Xp():
                     else:
                         logger.critical("The provided tabulation suffixes do not match the experiment template")
 
-
-            for k in xp_template.keys():
-                if k.startswith('wd_'):
-                    # some variables are special and need to be evaluated
-                    if k not in vars(self):
-                        setattr(self, k, eval(xp_template[k]))
-                    else:
-                        logger.debug(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
-                else:
-                    # direct assignment
-                    if k not in vars(self):
-                        setattr(self, k, xp_template[k])
-                    else:
-                        logger.debug(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
-
-
             setattr(self, "consolidated", True)
-        else:
-            logger.debug('an experiment template is needed')
 
     def init_workdir(self):
         ''' create dir tree for a given experiment
@@ -325,7 +365,7 @@ class Xp():
         with open(out_fn, 'w') as outfile:
             yaml.dump(conf_dict, outfile)
 
-    @ogtk.utils.log.call
+    @call
     @wraps(run_bcl2fq)
     def demux(self, *args, **kwargs):
         ''' demultiplex
