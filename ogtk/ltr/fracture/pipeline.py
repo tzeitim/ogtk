@@ -12,6 +12,27 @@ from dataclasses import dataclass
 from ogtk.ltr.fracture.api_ext import PlDNA, PlPipeline, PllPipeline
 
 
+class PlotDB():
+    def plot_preprocess(self, xp, results):
+        ''' ''' 
+        ifn = results['parsed_reads']
+        out_path = f'{xp.sample_figs}/{xp.target_sample}_coverage.png'
+        fig = sns.displot(data=
+            pl.scan_parquet(ifn)
+                .select('umi', 'reads').unique()
+                .collect(),
+                y='reads', 
+                log_scale=(10, 10), 
+                kind='ecdf', 
+                complementary=True, 
+                stat='count')
+
+        plt.grid()
+        plt.title("Reads per UMI")
+
+        xp.logger.io(f"saved {out_path}")
+        fig.savefig(out_path)
+
 class StepResults(NamedTuple):
     """Container for data to be passed to plotting"""
     results: dict  
@@ -46,7 +67,7 @@ def pipeline_step(step: PipelineStep):
                 try:
                     pipeline_instance.logger.step(f'Plotting {step.name.lower()} results')
 
-                    plot_method = getattr(pipeline_instance, f"plot_{step.name.lower()}", None)
+                    plot_method = getattr(pipeline_instance.xp.plotdb, f"plot_{step.name.lower()}", None)
                     if plot_method:
                         pipeline_instance.logger.debug(f"Generating plots for {step.name.lower()}")
                         plot_method(result)
@@ -57,27 +78,6 @@ def pipeline_step(step: PipelineStep):
         return wrapper
     return decorator
 
-@call
-def plot_preprocess(results):
-    ''' ''' 
-    xp = results['xp'] 
-    ifn = results['parsed_reads']
-    out_path = f'{xp.sample_figs}/{xp.target_sample}_coverage.png'
-    fig = sns.displot(data=
-        pl.scan_parquet(ifn)
-            .select('umi', 'reads').unique()
-            .collect(),
-            y='reads', 
-            log_scale=(10, 10), 
-            kind='ecdf', 
-            complementary=True, 
-            stat='count')
-
-    plt.grid()
-    plt.title("Reads per UMI")
-
-    xp.logger.io(f"saved {out_path}")
-    fig.savefig(out_path)
 
 
 class FractureXp(Xp):
@@ -92,11 +92,13 @@ class FractureXp(Xp):
     anchor_ont: str
     samples: List[str]
     pro_workdir: str
+    plotdb: PlotDB
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.steps = getattr(self, 'steps', None)
         self.dry = getattr(self, 'dry', False)
+        self.plotdb = PlotDB()
 
     @call
     def organize_files_by_sample(self, files, samples, max_files=None):
@@ -283,6 +285,7 @@ class Pipeline:
         except Exception as e:
             self.logger.error(f"Pipeline failed: {str(e)}")
             return False
+
 
 def parse_args():
     """Parse command line arguments"""
