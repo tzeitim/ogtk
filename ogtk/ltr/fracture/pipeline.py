@@ -44,7 +44,8 @@ def pipeline_step(step: PipelineStep):
             
             if getattr(pipeline_instance.xp, 'do_plot', False):
                 try:
-                    pipeline_instance.logger.step(f'{step.name.lower()}')
+                    pipeline_instance.logger.step(f'Plotting {step.name.lower()} results')
+
                     plot_method = getattr(pipeline_instance, f"plot_{step.name.lower()}", None)
                     if plot_method:
                         pipeline_instance.logger.debug(f"Generating plots for {step.name.lower()}")
