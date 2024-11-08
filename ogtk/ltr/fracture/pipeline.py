@@ -13,9 +13,15 @@ from ogtk.ltr.fracture.api_ext import PlDNA, PlPipeline, PllPipeline
 
 
 class PlotDB():
-    def plot_preprocess(self, xp, results):
+    @call
+    # Pipeline instance = ppi
+    def plot_preprocess(self, ppi, results):
         ''' ''' 
-        ifn = results['parsed_reads']
+        sns = ppi.sns
+        plt = ppi.plt
+        xp = ppi.xp
+
+        ifn = results.results['parsed_reads']
         out_path = f'{xp.sample_figs}/{xp.target_sample}_coverage.png'
         fig = sns.displot(data=
             pl.scan_parquet(ifn)
@@ -56,25 +62,27 @@ class PipelineStep(Enum):
 def pipeline_step(step: PipelineStep):
     def decorator(func: Callable) -> Callable:
         @wraps(func)
-        def wrapper(pipeline_instance: Any, *args: Any, **kwargs: Any) -> Any:
-            if not pipeline_instance.should_run_step(step):
-                pipeline_instance.logger.io(f"Skipping {step.name.lower()}")
+        # Pipeline instance = ppi
+        def wrapper(ppi: Any, *args: Any, **kwargs: Any) -> Any:
+            if not ppi.should_run_step(step):
+                ppi.logger.io(f"Skipping {step.name.lower()}")
                 return None
             
-            results = func(pipeline_instance, *args, **kwargs)
+            results = func(ppi, *args, **kwargs)
             
-            if getattr(pipeline_instance.xp, 'do_plot', False):
+            if getattr(ppi.xp, 'do_plot', False):
                 try:
-                    pipeline_instance.logger.step(f'Plotting {step.name.lower()} results')
+                    ppi.logger.step(f'Plotting {step.name.lower()} results')
 
-                    plot_method = getattr(pipeline_instance.xp.plotdb, f"plot_{step.name.lower()}", None)
+                    # makes use of PlotDB to fetch the method
+                    plot_method = getattr(ppi.plotdb, f"plot_{step.name.lower()}", None)
 
                     if plot_method:
-                        pipeline_instance.logger.debug(f"Generating plots for {step.name.lower()}")
-                        plot_method(pipeline_instance.xp, results)
+                        ppi.logger.debug(f"Generating plots for {step.name.lower()}")
+                        plot_method(ppi, results)
 
                 except Exception as e:
-                    pipeline_instance.logger.error(f"Plot generation failed: {str(e)}")
+                    ppi.logger.error(f"Plot generation failed: {str(e)}")
             
             return results
         return wrapper
@@ -95,12 +103,12 @@ class FractureXp(Xp):
     samples: List[str]
     pro_workdir: str
     plotdb: PlotDB
+    do_plot: bool    
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.steps = getattr(self, 'steps', None)
         self.dry = getattr(self, 'dry', False)
-        self.plotdb = PlotDB()
 
     @call
     def organize_files_by_sample(self, files, samples, max_files=None):
@@ -120,14 +128,28 @@ class FractureXp(Xp):
         return sample_files
 
 class Pipeline:
+    plotdb: PlotDB
     """Main pipeline class for data processing using Xp configuration"""
     dry: bool
     def __init__(self, xp: FractureXp):
         self.xp = xp
         self.logger = Rlogger().get_logger()
+        self.plotdb = PlotDB()
         
         # Create output directory if it doesn't exist
         self.xp.init_workdir()
+
+        # Initialize plotting dependencies if do_plot is True
+        if getattr(self.xp, 'do_plot', False):
+            try:
+                import seaborn as sns
+                import matplotlib.pyplot as plt
+                self.sns = sns
+                self.plt = plt
+                self.logger.debug("Initialized plotting dependencies")
+            except ImportError as e:
+                self.logger.error(f"Failed to import plotting dependencies: {str(e)}")
+                self.xp.do_plot = False 
 
 
     def should_run_step(self, step: PipelineStep) -> bool:
@@ -333,10 +355,6 @@ def main():
         if args.steps:
             xp.steps = args.steps
 
-        if getattr(xp, 'do_plot', False):
-            import seaborn as sns
-            import matplotlib.pyplot as plt
-        
         # Initialize and run pipeline
         
         pipeline = Pipeline(xp)
