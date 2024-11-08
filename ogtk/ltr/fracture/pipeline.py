@@ -4,7 +4,7 @@ import pandas as pd
 from functools import wraps
 import argparse
 from enum import Enum, auto
-from typing import Any, NamedTuple, Callable
+from typing import Any, NamedTuple, Callable, List
 from ogtk.utils.log import CustomLogger, Rlogger, call
 from ogtk.utils import tabulate_paired_10x_fastqs_rs, sfind #, another_function, yet_another_function
 from ogtk.utils.db import Xp
@@ -89,12 +89,26 @@ class FractureXp(Xp):
     umi_len: int
     rev_comp: bool
     anchor_ont: str
+    samples: List[str]
+    pro_workdir: str
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.steps = getattr(self, 'steps', None)
         self.dry = getattr(self, 'dry', False)
 
+    def organize_files_by_sample(self, files, samples):
+        # Create a dictionary to store files for each sample
+        sample_files = {sample['id']: [] for sample in samples}
+        
+        # Sort files into appropriate sample groups
+        for f in files:
+            for sample_id in sample_files:
+                if sample_id in f:
+                    sample_files[sample_id].append(f)
+                    break
+        
+        return sample_files
 
 class Pipeline:
     """Main pipeline class for data processing using Xp configuration"""
@@ -121,6 +135,7 @@ class Pipeline:
             self.logger.info(f"Loading data from {self.xp.pro_datain}")
             input_files = sfind(f"{self.xp.pro_datain}", "*R1*.fastq.gz") # added R1
 
+            
             if len(input_files) == 0:
                 self.logger.error(f"No files found in {self.xp.pro_datain}")
 
@@ -132,15 +147,20 @@ class Pipeline:
                 if param not in vars(self.xp):
                     raise ValueError(f"Missing required parameter: {param}")
 
+            sample_to_file = self.xp.organize_files_by_sample(self.xp.samples, input_files)
+
             if not self.xp.dry:
-                for file in input_files:
+                for sample_id, file in sample_to_file.items():
+                    sample_dir = f'{self.xp.pro_workdir}/{sample_id}/' 
+                    Path(sample_dir).mkdir(parents=True, exist_ok=True)
+
                     tabulate_paired_10x_fastqs_rs(
                             file_path=file, 
-                            out_fn=file.replace("_R1_", "_paired_").replace("fastq.gz", '.parquet'), 
+                            out_fn=f'{sample_dir}/parsed_reads.parquet', 
                             modality=self.xp.modality,     
                             umi_len=self.xp.umi_len,      
                             do_rev_comp=self.xp.rev_comp,  
-                            force=True)
+                            force=True) # add to step interface
                     print(file)
 
             pass
