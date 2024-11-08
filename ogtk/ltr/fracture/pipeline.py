@@ -151,6 +151,7 @@ class Pipeline:
 
             if not self.xp.dry:
                 for sample_id, file in sample_to_file.items():
+                    self.logger.io(f'{sample_id} {file}')
                     sample_dir = f'{self.xp.pro_workdir}/{sample_id}/' 
                     Path(sample_dir).mkdir(parents=True, exist_ok=True)
 
