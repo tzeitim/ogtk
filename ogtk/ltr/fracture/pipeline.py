@@ -44,7 +44,7 @@ def pipeline_step(step: PipelineStep):
             
             if getattr(pipeline_instance.xp, 'do_plot', False):
                 try:
-                    pipeline_instance.logger(f'{step.name.lower()}')
+                    pipeline_instance.logger.step(f'{step.name.lower()}')
                     plot_method = getattr(pipeline_instance, f"plot_{step.name.lower()}", None)
                     if plot_method:
                         pipeline_instance.logger.debug(f"Generating plots for {step.name.lower()}")
@@ -98,7 +98,7 @@ class FractureXp(Xp):
         self.dry = getattr(self, 'dry', False)
 
     @call
-    def organize_files_by_sample(self, files, samples):
+    def organize_files_by_sample(self, files, samples, max_files=None):
         # Create a dictionary to store files for each sample
         sample_files = {sample['id']: [] for sample in samples}
         
@@ -108,7 +108,10 @@ class FractureXp(Xp):
                 if sample_id in f:
                     sample_files[sample_id].append(f)
                     break
-        
+        if max_files is not None and isinstance(max_files, int):
+            if any([len(i)>max_files for i in sample_files.values()]):
+                self.logger.error(f"Some sample(s) matched more than {max_files}\n{sample_files}")
+            
         return sample_files
 
 class Pipeline:
@@ -148,11 +151,8 @@ class Pipeline:
                 if param not in vars(self.xp):
                     raise ValueError(f"Missing required parameter: {param}")
 
-            sample_to_file = self.xp.organize_files_by_sample(input_files, self.xp.samples)
+            sample_to_file = self.xp.organize_files_by_sample(input_files, self.xp.samples, max_files=1)
             
-            if any([len(i)>1 for i in sample_to_file.values()]):
-                self.logger.error(f"Some sample matches more than one file and should only match read 1 (R1)\n{sample_to_file}")
-
             if not self.xp.dry:
                 for sample_id, file in sample_to_file.items():
                     file = file[0]
@@ -166,7 +166,6 @@ class Pipeline:
                             umi_len=self.xp.umi_len,      
                             do_rev_comp=self.xp.rev_comp,  
                             force=True) # add to step interface
-                    print(file)
 
             pass
 
