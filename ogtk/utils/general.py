@@ -312,13 +312,18 @@ def tabulate_paired_10x_fastqs_rs(
     do_rev_comp = False,
     force = False,
     ):
-    ''' merges umified paired gzipped fastqs (e.g. 10x fastqs) into a single parquet file 
-    and then extracts the relevant features 
+    ''' Merges umified paired gzipped fastqs (e.g. 10x fastqs) into a single parquet file 
+    and then extracts the relevant features. 
+
+    This process happens in two steps:
+     1) Merge two reads as a single parquet file through rogtk.merge_paired_fastqs (Rust bindings) 
+     2) Parses the parquet based on the passed arguments (modality, cbc and umi lengths, etc.)
 
     5ʼkit cbc_len = 16 ; umi_len = 10
     3ʼkit cbc_len = 16 ; umi_len = 12
 
     ``do_rev_comp`` reverse-complements read 2
+    ``force`` acts only on the first step (fastq->parquet)
 
     '''
     if not modality in ['single-cell', 'single-molecule']:
