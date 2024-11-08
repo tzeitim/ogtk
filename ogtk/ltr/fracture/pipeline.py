@@ -61,20 +61,22 @@ def pipeline_step(step: PipelineStep):
                 pipeline_instance.logger.io(f"Skipping {step.name.lower()}")
                 return None
             
-            result = func(pipeline_instance, *args, **kwargs)
+            results = func(pipeline_instance, *args, **kwargs)
             
             if getattr(pipeline_instance.xp, 'do_plot', False):
                 try:
                     pipeline_instance.logger.step(f'Plotting {step.name.lower()} results')
 
                     plot_method = getattr(pipeline_instance.xp.plotdb, f"plot_{step.name.lower()}", None)
+
                     if plot_method:
                         pipeline_instance.logger.debug(f"Generating plots for {step.name.lower()}")
-                        plot_method(result)
+                        plot_method(pipeline_instance.xp, results)
+
                 except Exception as e:
                     pipeline_instance.logger.error(f"Plot generation failed: {str(e)}")
             
-            return result
+            return results
         return wrapper
     return decorator
 
