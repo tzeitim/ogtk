@@ -1,5 +1,5 @@
 import rich
-from typing import List, Dict
+from typing import List, Dict, TypedDict, Optional, Any
 import os
 from pyaml import yaml
 from rich.console import Console
@@ -8,8 +8,12 @@ import polars as pl
 
 from functools import wraps
 
-from ogtk.utils.log import Rlogger, call
+from ogtk.utils.log import CustomLogger, Rlogger, call
 logger = Rlogger().get_logger()
+
+class SystemConfig(TypedDict):
+    prefixes: Dict[str, str]
+    default: str
 
 def init_logger(self):
     #from import Rlogger
@@ -120,7 +124,7 @@ def tabulate_xp(xp, modality, cbc_len, umi_len, force=False)->List:
             logger.debug("path to reads:")
             logger.debug(path_to_reads)
 
-            pattern =f'{xp.sample_id}*R1*.fastq.gz'
+            pattern =f'{xp.target_sample}*R1*.fastq.gz'
             logger.debug(f"pattern={pattern}")
             logger.debug(f"reverse complement r2 ={rev_comp_r2}")
 
@@ -175,7 +179,27 @@ def print_template(conf_fn: str = '/home/polivar/src/artnilet/conf/xps/template.
 class Xp():
     ''' Imports a yaml file into an instance of the class xp (experiment). Attributes are directly assigned via the yaml file
     '''
-    system: str
+    # Required attributes
+    system: SystemConfig
+    xp_datain: str
+    xp_template: str
+    prefix: str
+    consolidated: bool
+    special_patterns: List[str]
+    
+    # Optional attributes that may come from template or config
+    project: Optional[str]
+    target_sample: Optional[str]
+    gene_conf_fn: Optional[str]
+    steps: Optional[List[str]]
+    
+    # Internal attributes
+    console: Console
+    quiet: bool
+    logger: CustomLogger
+    rlogger: Any 
+    conf_fn: Optional[str]
+
     def __init__(self, conf_fn=None, conf_dict=None, quiet=True):
         self.conf_fn = conf_fn
         self.consolidated = False
@@ -212,7 +236,7 @@ class Xp():
     def __init_genes(self):
         ''' import a pre-defined set of genes and gene_conf
         '''
-        conf_dict = yaml.load(open(self.gene_conf_fn), Loader=yaml.FullLoader)
+        conf_dict = yaml.load(open(self.gene_conf_fn), Loader=yaml.FullLoader) #pyright: ignore
         for k,v in conf_dict.items():
             setattr(self, k, v)
     
@@ -283,15 +307,25 @@ class Xp():
             self.xp_template = self.xp_template.replace("${prefix}", self.prefix)
             xp_template = yaml.load(open(self.xp_template), Loader=yaml.FullLoader) #pyright:ignore
 
+            if "special_patterns" not in xp_template:
+                raise ValueError("special_patterns must be an attribute of an xp_template. e.g.:\nspecial_patterns: [xp_, pro_, sample_]")
+
             # some variables are special and need to be evaluated
             # following the hierachy: xp_ -> pro_ -> sample_
-            special_vars = ['xp_', 'pro_', 'sample_'] 
-            for var_pref in special_vars:
+            self.special_patterns = xp_template['special_patterns']
+            for var_pref in self.special_patterns:
                 self._populate_special(xp_template, var_pref)
+
+            # match special patterns to variables
+            self.special_vars = []
+            for k,v in vars(self).items():
+                for pattern in self.special_patterns:
+                    if pattern in k:
+                        self.special_vars.append(k)
 
             # direct assignment of non-special variables
             for k,v in xp_template.items():
-                if k not in vars(self) and k not in special_vars:
+                if k not in vars(self) and k not in self.special_vars:
                     setattr(self, k, v)
                 else:
                     logger.debug(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
@@ -307,6 +341,7 @@ class Xp():
                     else:
                         logger.critical("The provided tabulation suffixes do not match the experiment template")
 
+                        
             setattr(self, "consolidated", True)
 
     def init_workdir(self):
@@ -315,7 +350,7 @@ class Xp():
         if not self.consolidated:
             raise ValueError("An experiment object needs to be consolidated first, for this an `xp_template is needed`")
 
-        for i in [i for i in vars(self) if i.startswith('wd_')]: 
+        for i in [i for i in vars(self) if i in self.special_vars]: 
             wd_dir = getattr(self, i)
             if not os.path.exists(wd_dir):
                 os.system(f"mkdir -p {wd_dir}")
@@ -348,7 +383,7 @@ class Xp():
         ''' Saves current instance of an experiment to the sample_wd directory as default
         '''
         if out_fn is None:
-            out_fn = f'{self.sample_id}_xpconf.yaml'
+            out_fn = f'{self.target_sample}_xpconf.yaml'
         if out_dir is None:
             out_dir = f'{self.wd_xp}'
 
@@ -373,7 +408,7 @@ class Xp():
         run_bcl2fq(self, *args, **kwargs)
 
 
-def return_file_name(sample_id, field):
+def return_file_name(target_sample, field):
     '''field can be:
         [ge_lib, lin_lib, tabix, rc_tabix]
     '''
@@ -382,7 +417,7 @@ def return_file_name(sample_id, field):
 
     xps = (
         pl.read_csv('/local/users/polivar/src/artnilet/conf/xpdb_datain.txt', separator='\t')
-        .filter(pl.col('sample_id')==sample_id)
+        .filter(pl.col('target_sample')==target_sample)
     )
 
     lin_lib = xps['lin_lib'].to_list()[0]
@@ -401,7 +436,7 @@ def return_file_name(sample_id, field):
 def load_db(rootdir: str='/local/users/polivar/src/artnilet')-> None:
     rich.print(f'loaded {rootdir}')
 
-def create_db(rootdir: str | None= None, fields = ['sample_id', 'ge_lib', 'lin_lib'])-> None:
+def create_db(rootdir: str | None= None, fields = ['target_sample', 'ge_lib', 'lin_lib'])-> None:
     '''
     '''
     if rootdir is None:
@@ -458,9 +493,9 @@ def run_cranger(xp, force=False, dry=False, **args):
             cr_g['cmd']
             .replace('BIN', cr_g['bin'])
             .replace('UIPORT', cr_g['uiport'])
-            .replace('SAMPLE_ID', xp.sample_id)
+            .replace('SAMPLE_ID', xp.target_sample)
             .replace('FASTQ_DIR', f'{xp.wd_fastq}/{xp.scrna_suffix}')
-            .replace('FASTQ_SAMPLE_STR', f'{xp.sample_id}_{xp.scrna_suffix}')
+            .replace('FASTQ_SAMPLE_STR', f'{xp.target_sample}_{xp.scrna_suffix}')
             .replace('TRANSCRIPTOME', cr_g['transcriptome'])
             .replace('LOCAL_CORES', cr_g['localcores'])
             .replace('LOCAL_MEM', cr_g['localmem'])
