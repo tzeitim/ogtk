@@ -1,14 +1,12 @@
 from pathlib import Path
 import polars as pl
-import pandas as pd
 from functools import wraps
 import argparse
-from enum import Enum, auto
+from enum import Enum
 from typing import Any, NamedTuple, Callable, List
 from ogtk.utils.log import CustomLogger, Rlogger, call
-from ogtk.utils import tabulate_paired_10x_fastqs_rs, sfind #, another_function, yet_another_function
+from ogtk.utils import tabulate_paired_10x_fastqs_rs, sfind 
 from ogtk.utils.db import Xp
-from dataclasses import dataclass
 from ogtk.ltr.fracture.api_ext import PlDNA, PlPipeline, PllPipeline
 
 
@@ -45,11 +43,25 @@ class StepResults(NamedTuple):
     
 class PipelineStep(Enum):
     """Enum defining available pipeline steps"""
-    PARQUET = auto()
-    PREPROCESS = auto()
-    FRACTURE = auto()
-    SAVE = auto()
-    TEST = auto()
+    PARQUET = {
+        'required_params': {'umi_len', 'rev_comp', 'modality'},
+        'description': "Convert fastq reads to parquet format"
+    }
+    
+    PREPROCESS = {
+        'required_params': {'umi_len', 'anchor_ont'},
+        'description': "Preprocess the loaded data"
+    }
+    
+    FRACTURE = {
+        'required_params': {'umi_len', 'anchor_ont'},
+        'description': "Assemble short reads into contigs"
+    }
+    
+    TEST = {
+        'required_params': {'target_sample'},
+        'description': "Makes a downsampled fastq file for testing purposes"
+    }
     
     @classmethod
     def from_string(cls, step_name: str) -> "PipelineStep":
@@ -68,23 +80,39 @@ def pipeline_step(step: PipelineStep):
                 ppi.logger.io(f"Skipping {step.name.lower()}")
                 return None
             
-            results = func(ppi, *args, **kwargs)
-            
-            if getattr(ppi.xp, 'do_plot', False):
-                try:
-                    ppi.logger.step(f'Plotting {step.name.lower()} results')
+            try:
+                # Validate parameters
+                missing_params = [
+                    param for param in step.value['required_params']
+                    if not hasattr(ppi.xp, param)
+                ]
+                
+                if missing_params:
+                    error_msg = f"Missing required parameters for {step.name}: {', '.join(missing_params)}"
+                    ppi.logger.error(error_msg)
+                    raise ValueError(error_msg)
 
-                    # makes use of PlotDB to fetch the method
-                    plot_method = getattr(ppi.plotdb, f"plot_{step.name.lower()}", None)
+                # actually run the Step
+                results = func(ppi, *args, **kwargs)
+                
+                if getattr(ppi.xp, 'do_plot', False):
+                    try:
+                        ppi.logger.step(f'Plotting {step.name.lower()} results')
 
-                    if plot_method:
-                        ppi.logger.debug(f"Generating plots for {step.name.lower()}")
-                        plot_method(ppi, results)
+                        # makes use of PlotDB to fetch the method
+                        plot_method = getattr(ppi.plotdb, f"plot_{step.name.lower()}", None)
 
-                except Exception as e:
-                    ppi.logger.error(f"Plot generation failed: {str(e)}")
-            
-            return results
+                        if plot_method:
+                            ppi.logger.debug(f"Generating plots for {step.name.lower()}")
+                            plot_method(ppi, results)
+
+                    except Exception as e:
+                        ppi.logger.error(f"Plot generation failed: {str(e)}")
+                
+                return results
+            except Exception as e:
+                ppi.logger.error(f"Step {step.name} failed: {str(e)}")
+                raise
         return wrapper
     return decorator
 
