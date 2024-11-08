@@ -148,10 +148,14 @@ class Pipeline:
                 if param not in vars(self.xp):
                     raise ValueError(f"Missing required parameter: {param}")
 
-            sample_to_file = self.xp.organize_files_by_sample(self.xp.samples, input_files)
+            sample_to_file = self.xp.organize_files_by_sample(input_files, self.xp.samples)
+            
+            if any([len(i)>1 for i in sample_to_file.values()]):
+                self.logger.error(f"Some sample matches more than one file and should only match read 1 (R1)\n{sample_to_file}")
 
             if not self.xp.dry:
                 for sample_id, file in sample_to_file.items():
+                    file = file[0]
                     sample_dir = f'{self.xp.pro_workdir}/{sample_id}/' 
                     Path(sample_dir).mkdir(parents=True, exist_ok=True)
 
