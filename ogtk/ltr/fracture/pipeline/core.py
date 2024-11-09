@@ -152,6 +152,7 @@ class Pipeline:
                             file_path=file, 
                             out_fn=f'{sample_dir}/parsed_reads.parquet', 
                             out_dir='{sample_dir}/merged_reads.parquet',
+                            out_dir=f'{sample_dir}/merged_reads.parquet',
                             modality=self.xp.modality,     
                             umi_len=self.xp.umi_len,      
                             do_rev_comp=self.xp.rev_comp,  
