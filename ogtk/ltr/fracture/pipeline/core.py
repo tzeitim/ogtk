@@ -30,7 +30,7 @@ class PipelineStep(Enum):
         'description': "Assemble short reads into contigs"
     }
     
-    TEST = {
+    MAKE_TEST = {
         'required_params': {'target_sample'},
         'description': "Makes a downsampled fastq file for testing purposes"
     }
@@ -156,7 +156,6 @@ class Pipeline:
                             umi_len=self.xp.umi_len,      
                             do_rev_comp=self.xp.rev_comp,  
                             force=True) # add to step interface
-
             pass
 
         except Exception as e:
@@ -228,31 +227,42 @@ class Pipeline:
             
     @call  
     @pipeline_step(PipelineStep.FRACTURE)
-    def test(self) -> None:
+    def make_test(self) -> None:
         """Makes a downsampled fastq file for testing purposes"""
-            
         try:
             self.logger.step("Downsampling parquet to generate synthetic FASTQ")
 
-            required_params = ['target_sample']
+            input_files = sfind(f"{self.xp.pro_datain}", "*paired*parquet")
+            sample_to_file = self.xp.organize_files_by_sample(input_files, [self.xp.target_sample], max_files=1)
 
-            for param in required_params:
-                if param not in vars(self.xp):
-                    raise ValueError(f"Missing required parameter: {param}")
-
-            in_file = f"{self.xp.pro_datain}/{self.xp.target_sample}_R1_001.merged.parquet"
+            in_file = sample_to_file[self.xp.target_sample][0]
             out_file1= f"{self.xp.pro_datain}/TEST_{self.xp.target_sample}_R1_001.fastq.gz"
             out_file2= f"{self.xp.pro_datain}/TEST_{self.xp.target_sample}_R2_001.fastq.gz" 
             self.logger.io(f"exporting reads to {out_file1}\n{out_file2}")
 
             if not self.xp.dry:
-                (
-                    pl
-                    .scan_parquet(in_file)
-                    .pp.parse_reads(umi_len=self.xp.umi_len, anchor_ont=self.xp.anchor_ont) #pyright: ignore 
-                    .collect()
-                    .write_parquet(out_file)
+
+                df = (
+                    pl.scan_parquet(in_file)
+                    .with_columns(pl.len().over('umi').alias('reads'))
+                    .with_columns(
+                        pl.col('reads')
+                            .qcut(
+                                quantiles  = [0.0, 0.1,0.49, 0.50, 0.52, 0.99],
+                                labels = ['0','10%', '<50%', '50%', '>50%', '99%', '>99%'])
+                               .alias('qreads')
+                       )
+                       .filter(pl.col('qreads').is_in(['10%', '50%', '99%']))
+                       .filter(
+                           pl.col('umi').is_in(
+                               pl.col('umi').filter(pl.int_range(pl.len()).shuffle().over("qreads") < 10)
+                               )
+                           )
+                        #.group_by('qreads').agg(pl.col('umi').n_unique())
+                         .collect()
+           #         .write_parquet(out_file)
                 )
+                print(df.group_by('qreads').agg(pl.col('umi').n_unique()))
             pass
         except Exception as e:
             self.logger.error(f"Failed to preprocess data: {str(e)}")
