@@ -288,7 +288,9 @@ class Pipeline:
                     )
                 with gzip.open(out_file2, 'wb') as r2gz:
                     (
-                        df.dna.to_fastq(read_id_col="read_id", read_qual_col="r2_qual", read_col='r2_seq')
+                        df
+                        .with_columns(pl.col('read_id').str.replace("1:N:0:", "2:N:0:"))
+                        .dna.to_fastq(read_id_col="read_id", read_qual_col="r2_qual", read_col='r2_seq')
                         .select('r2_seq_fastq')
                         .write_csv(r2gz, 
                                    include_header=False,
