@@ -335,7 +335,7 @@ def tabulate_paired_10x_fastqs_rs(
     if modality =='single-molecule':
         cbc_len = 0
 
-    merged_fn = file_path.replace('fastq.gz', 'merged.parquet')
+    merged_fn = file_path.replace('_R1_', '_merged_').replace('fastq.gz', '.parquet')
     logger.info(f"{merged_fn=}")
 
     if not os.path.exists(merged_fn) or force:
