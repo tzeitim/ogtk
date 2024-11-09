@@ -234,18 +234,23 @@ class Pipeline:
 
             input_files = sfind(f"{self.xp.pro_datain}", f"{self.xp.target_sample}*paired*parquet")
             sample_to_file = self.xp.organize_files_by_sample(files=input_files, samples=self.xp.samples, max_files=1)
+            umi_len = self.xp.umi_len
 
             
             in_file = sample_to_file[self.xp.target_sample][0]
             
-            out_file1= f"{self.xp.pro_datain}/TEST_{self.xp.target_sample}_R1_001.fastq.gz"
-            out_file2= f"{self.xp.pro_datain}/TEST_{self.xp.target_sample}_R2_001.fastq.gz" 
-            self.logger.io(f"exporting reads to {out_file1}\n{out_file2}")
+            out_file1= Path(f"{self.xp.pro_datain}/TEST_{self.xp.target_sample}_R1_001.fastq.gz").as_posix()
+            out_file2= Path(f"{self.xp.pro_datain}/TEST_{self.xp.target_sample}_R2_001.fastq.gz").as_posix() 
+
+            self.logger.io(f"exporting reads to:\n{out_file1}\n{out_file2}")
 
             if not self.xp.dry:
 
+
+
                 df = (
                     pl.scan_parquet(in_file)
+                    .with_columns(pl.col('r1_seq').str.slice(0, umi_len).alias('umi'))
                     .with_columns(pl.len().over('umi').alias('reads'))
                     .with_columns(
                         pl.col('reads')
@@ -260,11 +265,35 @@ class Pipeline:
                                pl.col('umi').filter(pl.int_range(pl.len()).shuffle().over("qreads") < 10)
                                )
                            )
-                        #.group_by('qreads').agg(pl.col('umi').n_unique())
                          .collect()
            #         .write_parquet(out_file)
                 )
                 print(df.group_by('qreads').agg(pl.col('umi').n_unique()))
+
+                #Schema([('read_id', String),
+                #('r1_seq', String),
+                #('r1_qual', String),
+                #('r2_seq', String),
+                #('r2_qual', String)])
+    #def to_fastq(self, read_id_col: str, read_qual_col: str, read_col: str)-> pl.DataFrame:
+                (
+                        df.dna.to_fastq(read_id_col="read_id", read_qual_col="r1_qual", read_col='r1_seq')
+                        .select('fastq')
+                        .write_csv(out_file1, 
+                                   compression="gzip", 
+                                   has_header=False,
+                                   separator=""
+                                   )
+                    )
+                (
+                        df.dna.to_fastq(read_id_col="read_id", read_qual_col="r2_qual", read_col='r2_seq')
+                        .select('fastq')
+                        .write_csv(out_file2, 
+                                   compression="gzip", 
+                                   has_header=False,
+                                   separator=""
+                                   )
+                    )
             pass
         except Exception as e:
             self.logger.error(f"Failed to preprocess data: {str(e)}")
