@@ -268,28 +268,26 @@ class Pipeline:
                 import gzip
                 import warnings
 
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", message=".*Polars found a filename.*")
-                    with gzip.open(out_file1, 'wb') as r1gz:
-                        (
-                            df.dna.to_fastq(read_id_col="read_id", read_qual_col="r1_qual", read_col='r1_seq')
-                            .select('r1_seq_fastq')
-                            .write_csv(r1gz, 
-                                       quote_style='never',
-                                       include_header=False,
-                                       )
-                        )
-                    with gzip.open(out_file2, 'wb') as r2gz:
-                        (
-                            df
-                            .with_columns(pl.col('read_id').str.replace("1:N:0:", "2:N:0:"))
-                            .dna.to_fastq(read_id_col="read_id", read_qual_col="r2_qual", read_col='r2_seq')
-                            .select('r2_seq_fastq')
-                            .write_csv(r2gz, 
-                                       quote_style='never',
-                                       include_header=False,
-                                       )
-                        )
+                with gzip.open(out_file1, 'wb') as r1gz:
+                    (
+                        df.dna.to_fastq(read_id_col="read_id", read_qual_col="r1_qual", read_col='r1_seq')
+                        .select('r1_seq_fastq')
+                        .write_csv(r1gz, 
+                                   quote_style='never',
+                                   include_header=False,
+                                   )
+                    )
+                with gzip.open(out_file2, 'wb') as r2gz:
+                    (
+                        df
+                        .with_columns(pl.col('read_id').str.replace("1:N:0:", "2:N:0:"))
+                        .dna.to_fastq(read_id_col="read_id", read_qual_col="r2_qual", read_col='r2_seq')
+                        .select('r2_seq_fastq')
+                        .write_csv(r2gz, 
+                                   quote_style='never',
+                                   include_header=False,
+                                   )
+                    )
             pass
         except Exception as e:
             self.logger.error(f"Failed to preprocess data: {str(e)}")
