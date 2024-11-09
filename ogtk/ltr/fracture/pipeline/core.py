@@ -232,7 +232,7 @@ class Pipeline:
         try:
             self.logger.step("Downsampling parquet to generate synthetic FASTQ")
 
-            input_files = sfind(f"{self.xp.pro_datain}", f"{self.xp.target_sample}*paired*parquet")
+            input_files = sfind(f"{self.xp.pro_datain}", f"{self.xp.target_sample}*merged*parquet")
             sample_to_file = self.xp.organize_files_by_sample(files=input_files, samples=self.xp.samples, max_files=1)
             umi_len = self.xp.umi_len
 
