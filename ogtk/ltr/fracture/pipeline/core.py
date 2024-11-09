@@ -284,7 +284,6 @@ class Pipeline:
                         .select('r1_seq_fastq')
                         .write_csv(r1gz, 
                                    include_header=False,
-                                   separator=""
                                    )
                     )
                 with gzip.open(out_file2, 'wb') as r2gz:
@@ -293,7 +292,6 @@ class Pipeline:
                         .select('r2_seq_fastq')
                         .write_csv(r2gz, 
                                    include_header=False,
-                                   separator=""
                                    )
                     )
             pass
