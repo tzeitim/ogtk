@@ -245,9 +245,6 @@ class Pipeline:
             self.logger.io(f"exporting reads to:\n{out_file1}\n{out_file2}")
 
             if not self.xp.dry:
-
-
-
                 df = (
                     pl.scan_parquet(in_file)
                     .with_columns(pl.col('r1_seq').str.slice(0, umi_len).alias('umi'))
@@ -266,38 +263,33 @@ class Pipeline:
                                )
                            )
                          .collect()
-           #         .write_parquet(out_file)
                 )
-                print(df.group_by('qreads').agg(pl.col('umi').n_unique()))
-
-                #Schema([('read_id', String),
-                #('r1_seq', String),
-                #('r1_qual', String),
-                #('r2_seq', String),
-                #('r2_qual', String)])
-    #def to_fastq(self, read_id_col: str, read_qual_col: str, read_col: str)-> pl.DataFrame:
+                #print(df.group_by('qreads').agg(pl.col('umi').n_unique()))
                 import gzip
+                import warnings
 
-                with gzip.open(out_file1, 'wb') as r1gz:
-                    (
-                        df.dna.to_fastq(read_id_col="read_id", read_qual_col="r1_qual", read_col='r1_seq')
-                        .select('r1_seq_fastq')
-                        .write_csv(r1gz, 
-                                   quote_style='never',
-                                   include_header=False,
-                                   )
-                    )
-                with gzip.open(out_file2, 'wb') as r2gz:
-                    (
-                        df
-                        .with_columns(pl.col('read_id').str.replace("1:N:0:", "2:N:0:"))
-                        .dna.to_fastq(read_id_col="read_id", read_qual_col="r2_qual", read_col='r2_seq')
-                        .select('r2_seq_fastq')
-                        .write_csv(r2gz, 
-                                   quote_style='never',
-                                   include_header=False,
-                                   )
-                    )
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message=".*Polars found a filename.*")
+                    with gzip.open(out_file1, 'wb') as r1gz:
+                        (
+                            df.dna.to_fastq(read_id_col="read_id", read_qual_col="r1_qual", read_col='r1_seq')
+                            .select('r1_seq_fastq')
+                            .write_csv(r1gz, 
+                                       quote_style='never',
+                                       include_header=False,
+                                       )
+                        )
+                    with gzip.open(out_file2, 'wb') as r2gz:
+                        (
+                            df
+                            .with_columns(pl.col('read_id').str.replace("1:N:0:", "2:N:0:"))
+                            .dna.to_fastq(read_id_col="read_id", read_qual_col="r2_qual", read_col='r2_seq')
+                            .select('r2_seq_fastq')
+                            .write_csv(r2gz, 
+                                       quote_style='never',
+                                       include_header=False,
+                                       )
+                        )
             pass
         except Exception as e:
             self.logger.error(f"Failed to preprocess data: {str(e)}")
