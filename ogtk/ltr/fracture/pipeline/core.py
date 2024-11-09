@@ -226,7 +226,7 @@ class Pipeline:
             raise
             
     @call  
-    @pipeline_step(PipelineStep.FRACTURE)
+    @pipeline_step(PipelineStep.MAKE_TEST)
     def make_test(self) -> None:
         """Makes a downsampled fastq file for testing purposes"""
         try:
