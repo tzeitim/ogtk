@@ -283,7 +283,7 @@ class Pipeline:
                         df.dna.to_fastq(read_id_col="read_id", read_qual_col="r1_qual", read_col='r1_seq')
                         .select('r1_seq_fastq')
                         .write_csv(r1gz, 
-                                   quote_char='',
+                                   quote_style='never'
                                    include_header=False,
                                    )
                     )
@@ -294,7 +294,7 @@ class Pipeline:
                         .dna.to_fastq(read_id_col="read_id", read_qual_col="r2_qual", read_col='r2_seq')
                         .select('r2_seq_fastq')
                         .write_csv(r2gz, 
-                                   quote_char='',
+                                   quote_style='never'
                                    include_header=False,
                                    )
                     )
