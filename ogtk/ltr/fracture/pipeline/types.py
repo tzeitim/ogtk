@@ -36,9 +36,11 @@ class FractureXp(Xp):
                 if Path(f).name.startswith(sample_id):
                     sample_files[sample_id].append(f)
                     break
+
         if max_files is not None and isinstance(max_files, int):
             if any([len(i)>max_files for i in sample_files.values()]):
                 self.logger.error(f"Some sample(s) matched more than {max_files}\n{sample_files}")
+                raise ValueError("Verify that there are files that coorespond to all samples.")
             
         return sample_files
 
