@@ -232,10 +232,12 @@ class Pipeline:
         try:
             self.logger.step("Downsampling parquet to generate synthetic FASTQ")
 
-            input_files = sfind(f"{self.xp.pro_datain}", "*paired*parquet")
-            sample_to_file = self.xp.organize_files_by_sample(input_files, [self.xp.target_sample], max_files=1)
+            input_files = sfind(f"{self.xp.pro_datain}", f"{self.xp.target_sample}*paired*parquet")
+            sample_to_file = self.xp.organize_files_by_sample(files=input_files, samples=self.xp.samples, max_files=1)
 
+            
             in_file = sample_to_file[self.xp.target_sample][0]
+            
             out_file1= f"{self.xp.pro_datain}/TEST_{self.xp.target_sample}_R1_001.fastq.gz"
             out_file2= f"{self.xp.pro_datain}/TEST_{self.xp.target_sample}_R2_001.fastq.gz" 
             self.logger.io(f"exporting reads to {out_file1}\n{out_file2}")
