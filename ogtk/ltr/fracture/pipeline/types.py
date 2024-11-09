@@ -1,5 +1,6 @@
 from ogtk.utils.db import Xp
-from typing import Any, NamedTuple, Callable, List
+from pathlib import Path
+from typing import Any, List
 from ogtk.utils.log import CustomLogger, Rlogger, call
 from .plotting import PlotDB
 
@@ -32,7 +33,7 @@ class FractureXp(Xp):
         # Sort files into appropriate sample groups
         for f in files:
             for sample_id in sample_files:
-                if sample_id in f:
+                if Path(f).name.startswith(sample_id):
                     sample_files[sample_id].append(f)
                     break
         if max_files is not None and isinstance(max_files, int):
