@@ -270,6 +270,17 @@ class Pipeline:
 
     def run(self) -> bool:
         """Run the complete pipeline"""
+        if 'make_test' in self.xp.steps:
+            try:
+                self.logger.info("=== TEST MODE ===")
+                self.make_test()
+
+                return True
+
+            except Exception as e:
+                self.logger.error(f"Pipeline tests failed {str(e)}")
+                return False
+
         try:
             self.to_parquet()
             self.preprocess()
