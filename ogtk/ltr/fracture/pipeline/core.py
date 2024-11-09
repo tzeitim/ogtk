@@ -278,7 +278,7 @@ class Pipeline:
     #def to_fastq(self, read_id_col: str, read_qual_col: str, read_col: str)-> pl.DataFrame:
                 (
                         df.dna.to_fastq(read_id_col="read_id", read_qual_col="r1_qual", read_col='r1_seq')
-                        .select('fastq')
+                        .select('r1_seq_fastq')
                         .write_csv(out_file1, 
                                    compression="gzip", 
                                    has_header=False,
@@ -287,7 +287,7 @@ class Pipeline:
                     )
                 (
                         df.dna.to_fastq(read_id_col="read_id", read_qual_col="r2_qual", read_col='r2_seq')
-                        .select('fastq')
+                        .select('r2_seq_fastq')
                         .write_csv(out_file2, 
                                    compression="gzip", 
                                    has_header=False,
