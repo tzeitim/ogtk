@@ -141,6 +141,7 @@ class Pipeline:
 
             sample_to_file = self.xp.organize_files_by_sample(input_files, [{'id':self.xp.target_sample}], max_files=1)
             
+            # TODO cache
             if not self.xp.dry:
                 for sample_id, file in sample_to_file.items():
                     file = file[0]
@@ -262,7 +263,6 @@ class Pipeline:
 
             self.logger.io(f"exporting reads to:\n{out_file1}\n{out_file2}")
 
-            #TODO add clean to remove previous tests
             if os.path.exists(out_file1) and os.path.exists(out_file2):
                 self.logger.info(f"Using previous test files use --clean to remove all generated files")
                 return StepResults(
