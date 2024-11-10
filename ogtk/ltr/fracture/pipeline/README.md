@@ -58,6 +58,21 @@ steps:
   - fracture
 ```
 
+
+## System Configuration
+
+### Environment Variable
+
+The pipeline supports setting the system prefix through an environment variable:
+
+```bash
+# Set the system prefix
+export OGTK_SYSPREFIX="/path/to/your/workspace"
+
+# Run pipeline (will use OGTK_SYSPREFIX instead of config file prefix)
+python pipeline.py --config config.yml
+```
+
 ### Key Configuration Parameters
 
 - `system.prefixes`: Define different system paths for different environments
