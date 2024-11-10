@@ -8,17 +8,40 @@ from pipeline.types import FractureXp
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description="Data processing pipeline")
+
     parser.add_argument("--config", required=True, help="Path to config file")
+
     parser.add_argument(
         "--steps",
         nargs="+",
         choices=[name.lower() for name in PipelineStep.__members__],
         help="Specific steps to run (overrides config file)"
+        )
+
+    parser.add_argument(
+        "--make-test",
+        action="store_true",
+        help="Generate test data (overrides config file setting)"
+        )
+
+    parser.add_argument(
+        "--log-level", 
+        default="INFO",
+        choices=["CRITICAL", "INFO", "IO", "STEP", "DEBUG"],
+        help="Logging level"
+        )
+
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Remove all previous pipeline outputs before running"
     )
-    parser.add_argument("--log-level", 
-                       default="INFO",
-                       choices=["CRITICAL", "INFO", "IO", "STEP", "DEBUG"],
-                       help="Logging level")
+    parser.add_argument(
+        "--clean-test",
+        action="store_true",
+        help="Remove only test-related outputs before running"
+    )
+
     return parser.parse_args()
 
 
@@ -44,15 +67,24 @@ def main():
     try:
         # Initialize Xp configuration
         xp = FractureXp(conf_fn=args.config)
+        pipeline = Pipeline(xp)
         
-        if xp.make_test:
-            xp.steps.append("TEST")
+        # Handle cleaning if requested
+        if args.clean:
+            pipeline.clean_all()
+        elif args.clean_test:
+            pipeline.clean_test_outputs()
+
+        # Override make_test if specified in command line
+        if args.make_test:
+            xp.make_test = True
+            if "test" not in [step.lower() for step in xp.steps]:
+                xp.steps.append("test")
+
         # Override steps if specified in command line
         if args.steps:
             xp.steps = args.steps
 
-        # Initialize and run pipeline
-        pipeline = Pipeline(xp)
         success = pipeline.run()
         
         return 0 if success else 1

@@ -25,6 +25,6 @@ class PlotDB():
         plt.grid()
         plt.title("Reads per UMI")
 
-        xp.logger.io(f"saved {out_path}")
+        xp.logger.info(f"saved {out_path}")
         fig.savefig(out_path)
 

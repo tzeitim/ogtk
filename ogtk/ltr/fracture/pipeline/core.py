@@ -9,6 +9,7 @@ from ogtk.utils import sfind, tabulate_paired_10x_fastqs_rs
 from .plotting import PlotDB
 from .types import FractureXp
 
+
 class StepResults(NamedTuple):
     """Container for data to be passed to plotting"""
     results: dict  
@@ -125,12 +126,10 @@ class Pipeline:
     def to_parquet(self) -> None:
         """Convert fastq reads to parquet format"""
         try:
-            self.logger.info(f"Convertion to parquet:\nloading data from {self.xp.pro_datain}")
+            self.logger.info(f"Conversion to parquet:\nloading data from {self.xp.pro_datain}")
             input_files = sfind(f"{self.xp.pro_datain}", f"{self.xp.target_sample}*R1*.fastq.gz") # added R1
-
-            
             if len(input_files) == 0:
-                self.logger.error(f"No files found in {self.xp.pro_datain}")
+                raise ValueError(f"No files found in {self.xp.pro_datain}")
 
             self.logger.io(f"found {input_files}")
             
@@ -164,7 +163,7 @@ class Pipeline:
             
     @call  
     @pipeline_step(PipelineStep.PREPROCESS)
-    def preprocess(self) -> StepResults:
+    def preprocess(self) -> StepResults|None:
         """Preprocess the loaded data"""
         try:
             self.logger.step("Parsing reads and collecting molecule stats")
@@ -202,7 +201,7 @@ class Pipeline:
             
     @call  
     @pipeline_step(PipelineStep.FRACTURE)
-    def fracture(self) -> None:
+    def fracture(self) -> StepResults|None:
         """Asseble short reads into contigs"""
             
         try:
@@ -224,6 +223,11 @@ class Pipeline:
                 chi.write_parquet(out_file)
 
                 self.logger.critical(f"{(chi.get_column('length')==0).mean():.2%} failed")
+                
+                return StepResults(
+                        results={'xp': self.xp,
+                                 'contigs':out_file}
+                        )
 
             pass
         except Exception as e:
@@ -232,7 +236,7 @@ class Pipeline:
             
     @call  
     @pipeline_step(PipelineStep.TEST)
-    def test(self) -> None:
+    def test(self) -> StepResults|None:
         """Makes a downsampled fastq file for testing purposes"""
         try:
             import os
@@ -261,6 +265,9 @@ class Pipeline:
             #TODO add clean to remove previous tests
             if os.path.exists(out_file1) and os.path.exists(out_file2):
                 self.logger.info(f"Using previous test files use --clean to remove all generated files")
+                return StepResults(
+                        results={'xp': self.xp}
+                        )
                 pass
 
             if not self.xp.dry:
@@ -308,9 +315,66 @@ class Pipeline:
                                    include_header=False,
                                    )
                     )
+                
+                return StepResults(
+                        results={'xp': self.xp}
+                        )
             pass
         except Exception as e:
             self.logger.error(f"Failed generating tests: {str(e)}")
+            raise
+
+    def clean_test_outputs(self) -> None:
+        """Remove test-related outputs from previous runs"""
+        try:
+            import shutil
+
+            self.logger.step("Cleaning test outputs")
+            
+            # Clean test fastq files
+            test_pattern = "TEST_*_R[12]_001.fastq.gz"
+            test_files = Path(self.xp.pro_datain).glob(test_pattern)
+            for file in test_files:
+                self.logger.io(f"Removing {file}")
+                file.unlink(missing_ok=True)
+                
+            # Clean test working directories
+            if hasattr(self.xp, 'samples'):
+                for sample in self.xp.samples:
+                    if str(sample['id']).startswith('TEST_'):
+                        test_dir = Path(f"{self.xp.pro_workdir}/{sample['id']}")
+                        if test_dir.exists():
+                            self.logger.io(f"Removing directory {test_dir}")
+                            shutil.rmtree(test_dir)
+
+            self.logger.info("Test outputs cleaned successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to clean test outputs: {str(e)}")
+            raise
+
+    def clean_all(self) -> None:
+        """Remove all pipeline outputs from previous runs"""
+        try:
+            import shutil
+
+            self.logger.step("Cleaning all pipeline outputs")
+            
+            # First clean test outputs
+            self.clean_test_outputs()
+            
+            # Clean working directories for all samples
+            if hasattr(self.xp, 'samples'):
+                for sample in self.xp.samples:
+                    sample_dir = Path(f"{self.xp.pro_workdir}/{sample['id']}")
+                    if sample_dir.exists():
+                        self.logger.io(f"Removing directory {sample_dir}")
+                        shutil.rmtree(sample_dir)
+                    
+            self.logger.info("All pipeline outputs cleaned successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to clean pipeline outputs: {str(e)}")
             raise
 
     def run(self) -> bool:
