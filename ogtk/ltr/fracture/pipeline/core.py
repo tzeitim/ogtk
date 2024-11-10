@@ -298,9 +298,8 @@ class Pipeline:
         if 'make_test' in self.xp.steps:
             try:
                 self.logger.info("=== TEST MODE ===")
+                self.target_sample = f'TEST_{self.target_sample}'
                 self.make_test()
-
-                return True
 
             except Exception as e:
                 self.logger.error(f"Pipeline tests failed {str(e)}")

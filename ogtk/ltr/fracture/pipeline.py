@@ -49,8 +49,9 @@ def main():
         if args.steps:
             xp.steps = args.steps
 
+        if 'make_test' in xp.steps:
+            xp.target_sample = f'TEST_{xp.target_sample}'
         # Initialize and run pipeline
-        
         pipeline = Pipeline(xp)
         success = pipeline.run()
         
