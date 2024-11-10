@@ -126,7 +126,7 @@ class Pipeline:
         """Convert fastq reads to parquet format"""
         try:
             self.logger.info(f"Loading data from {self.xp.pro_datain}")
-            input_files = sfind(f"{self.xp.pro_datain}", "*R1*.fastq.gz") # added R1
+            input_files = sfind(f"{self.xp.pro_datain}", f"{self.xp.target_sample}*R1*.fastq.gz") # added R1
 
             
             if len(input_files) == 0:
