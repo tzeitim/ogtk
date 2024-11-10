@@ -8,8 +8,8 @@ class PlDNA:
     def to_fasta(self, read_id_col: str, read_col: str) -> pl.DataFrame:
         return  self._df.with_columns(
                 (">"+pl.col(read_id_col)\
-                 +"\n"+pl.col(read_col)\
-                 +"\n")
+                 +"\n"+pl.col(read_col)
+                 )
                  .alias(f'{read_col}_fasta')
         )
     def to_fastq(self, read_id_col: str, read_qual_col: str, read_col: str)-> pl.DataFrame:
@@ -17,8 +17,7 @@ class PlDNA:
                 ("@"+pl.col(read_id_col)\
                  +"\n"+pl.col(read_col)\
                  +"\n+"\
-                 +"\n"+pl.col(read_qual_col)\
-                 +"\n"\
+                 +"\n"+pl.col(read_qual_col)
                 )
                  .alias(f'{read_col}_fastq')
         )
