@@ -42,19 +42,28 @@ def parse_args():
         help="Remove only test-related outputs before running"
     )
 
+    parser.add_argument(
+        "--target-sample",
+        type=str,
+        help="Target sample to process (overrides config file setting)"
+    )
+
     return parser.parse_args()
 
 
 def main():
     '''
-    # Run all steps defined in config
-    python pipeline.py --config config.yml
+    # Process specific target sample
+    python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3"
 
-    # Run only specific steps (overrides config)
-    python pipeline.py --config config.yml --steps load analyze save
+    # Combine with other arguments
+    python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3" --steps parquet preprocess
 
-    # Set log level
-    python pipeline.py --config config.yml --log-level DEBUG
+    # Generate test data for specific sample
+    python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3" --make-test
+
+    # Clean and process specific sample
+    python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3" --clean
     '''
 
     # Parse arguments
@@ -67,6 +76,16 @@ def main():
     try:
         # Initialize Xp configuration
         xp = FractureXp(conf_fn=args.config)
+        if args.target_sample:
+            logger.info(f"Overriding target sample from config with: {args.target_sample}")
+            # Verify sample exists in samples list
+            sample_ids = [sample['id'] for sample in xp.samples]
+            if args.target_sample not in sample_ids:
+                raise ValueError(f"Target sample '{args.target_sample}' not found in samples list: {sample_ids}")
+            
+            xp.target_sample = args.target_sample
+            xp.consolidate_conf(update=True)
+
         pipeline = Pipeline(xp)
         
         # Handle cleaning if requested
