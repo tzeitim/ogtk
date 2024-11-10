@@ -264,11 +264,11 @@ class Xp():
         setattr(self, 'prefix', prefix)
 
 
-    def _populate_special(self, dic: Dict, var_pref: str):
+    def _populate_special(self, dic: Dict, var_pref: str, update=False):
         ''' '''
         for k,v in dic.items():
             if k.startswith(var_pref):
-                if k not in vars(self): 
+                if k not in vars(self) or update: 
                     setattr(self, k, eval(v))
                 else:
                     logger.debug(f'kept {k} from experiment conf instead of template:\n{getattr(self, k)}')
@@ -296,7 +296,7 @@ class Xp():
              attrs[k] =[v]
         return pl.DataFrame(attrs)
 
-    def consolidate_conf(self):
+    def consolidate_conf(self, update=False):
         ''' The self-referencing pointers in the configuration are evaluated '''
 
         if not hasattr(self, 'xp_template'):
@@ -314,7 +314,7 @@ class Xp():
             # following the hierachy: xp_ -> pro_ -> sample_
             self.special_patterns = xp_template['special_patterns']
             for var_pref in self.special_patterns:
-                self._populate_special(xp_template, var_pref)
+                self._populate_special(xp_template, var_pref, update)
 
             # match special patterns to variables
             self.special_vars = []
