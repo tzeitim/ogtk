@@ -298,7 +298,7 @@ class Pipeline:
         if 'make_test' in self.xp.steps:
             try:
                 self.logger.info("=== TEST MODE ===")
-                self.target_sample = f'TEST_{self.target_sample}'
+                self.xp.target_sample = f'TEST_{self.xp.target_sample}'
                 self.make_test()
 
             except Exception as e:
