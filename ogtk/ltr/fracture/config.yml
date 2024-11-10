@@ -1,0 +1,16 @@
+_prefix: "/home/labs/nyosef/pedro/"
+prefix: "/home/pedro/wexac/"
+date: "test"
+input_dir: "projects/lt/datain/20241020/fracture"
+output_dir: "projects/lt/test_pp"
+sample_id: "sb_rna_fracture_S3" # we need to think on a way of selecting one out of many
+steps:
+  - parquet
+  - preprocess 
+parameters:
+  anchor_ont: "GGCACACTGTCCT"
+  modality: "single-molecule"
+  umi_len: 12
+  rev_comp: True
+xp_template: "f'{self.prefix}/projects/lt/conf/fracture_xp_template.yml'"
+dry: False #True
