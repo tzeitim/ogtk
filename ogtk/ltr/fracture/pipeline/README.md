@@ -1,339 +1,178 @@
-# Fracture Pipeline Tutorial
+# Fracture Pipeline Implementation Details
 
-This tutorial guides you through using the fracture pipeline for processing and assembling sequencing data. The pipeline provides functionality for converting FASTQ files to parquet format, preprocessing data, and assembling contigs.
+Technical documentation for the fracture pipeline implementation.
 
-## Table of Contents
-1. [Installation](#installation)
-2. [Pipeline Configuration](#pipeline-configuration)
-3. [Basic Usage](#basic-usage)
-4. [Pipeline Steps](#pipeline-steps)
-5. [Sample Management](#sample-management)
-6. [Advanced Usage](#advanced-usage)
-7. [Troubleshooting](#troubleshooting)
+## Component Overview
 
-## Installation
+### Core Components
 
-1. Clone the repository:
-```bash
-git clone <repository-url>
-cd pipeline
+- `core.py`: Pipeline infrastructure
+  - `PipelineStep`: Step definition and validation
+  - `Pipeline`: Main pipeline class
+  - Progress tracking
+  - Dependency management
+
+- `types.py`: Type definitions
+  - `FractureXp`: Extended experiment configuration
+  - Supporting type definitions
+
+- `api_ext.py`: Polars API extensions
+  - Custom DataFrame operations
+  - DNA/RNA processing utilities
+
+- `plotting.py`: Visualization utilities
+  - Quality control plots
+  - Progress visualization
+  - Results plotting
+
+## Pipeline Architecture
+
+### Step Definition
+
+Steps are defined using the `PipelineStep` enum with `StepIO` metadata:
+
+```python
+class PipelineStep(Enum):
+    PARQUET = StepIO(
+        required_files=[
+            "${pro_datain}/{target_sample}_R1_001.fastq.gz",
+            "${pro_datain}/{target_sample}_R2_001.fastq.gz"
+        ],
+        output_files=[
+            "${pro_workdir}/{target_sample}/parsed_reads.parquet"
+        ],
+        description="Convert fastq reads to parquet format",
+        required_params={'umi_len', 'rev_comp', 'modality'}
+    )
 ```
 
-2. Set up the environment:
-```bash
-conda create -n fracture python=3.10
-conda activate fracture
-pip install -r requirements.txt
+### Dependency Management
+
+Dependencies are automatically managed through file IO specifications:
+
+```python
+def get_step_dependencies(self) -> Dict[str, Set[str]]:
+    """Get dependencies between pipeline steps based on file IO"""
+    dependencies = {}
+    step_outputs = {}
+    
+    # Collect all step outputs
+    for step in PipelineStep:
+        _, outputs = step.format_paths(self.xp)
+        for output in outputs:
+            step_outputs[output] = step.name
 ```
 
-## Pipeline Configuration
+### Progress Tracking
 
-The pipeline uses YAML configuration files to specify parameters and paths. Here's a basic configuration template:
+Progress bars are implemented using the rich library:
 
-```yaml
-system:
-  prefixes:
-    yoseflab1: "/home/pedro/wexac/"
-    wexac: "/home/labs/nyosef/pedro/"
-    mac: "/Volumes/pedro/"
-  default: "wexac"  # Default prefix to use
-
-project: "20241020" # always start with date
-xp_template: "${prefix}/projects/lt/conf/fracture_xp_template.yml"
-modality: "single-molecule"
-umi_len: 12
-
-target_sample: "sb_rna_fracture_S3"  # Default target sample
-samples:  # List of all available samples
-  - id: "sb_rna_fracture_S3"
-  - id: "s4_dna_fracture_S5"
-  - id: "sc_rna_fracture_S4"
-
-dry: False  # Set to True for dry run
-do_plot: True  # Enable plotting
-
-steps:
-  - parquet
-  - preprocess
-  - fracture
+```python
+def polars_bar(total: int, title: str = "Processing", transient: bool = True) -> Progress:
+    """Create a progress bar for Polars operations"""
+    bar = Progress(
+        SpinnerColumn(),
+        *Progress.get_default_columns(),
+        TimeElapsedColumn(),
+        transient=transient
+    )
 ```
 
+## Adding New Steps
 
-## System Configuration
-
-### Environment Variable
-
-The pipeline supports setting the system prefix through an environment variable:
-
-```bash
-# Set the system prefix
-export OGTK_SYSPREFIX="/path/to/your/workspace"
-
-# Run pipeline (will use OGTK_SYSPREFIX instead of config file prefix)
-python pipeline.py --config config.yml
+1. Define step in `PipelineStep` enum:
+```python
+NEW_STEP = StepIO(
+    required_files=[...],
+    output_files=[...],
+    description="Step description",
+    required_params={...}
+)
 ```
 
-### Key Configuration Parameters
-
-- `system.prefixes`: Define different system paths for different environments
-- `system.default`: Select which prefix to use
-- `project`: Project identifier (use date format YYYYMMDD)
-- `xp_template`: Path to experiment template file
-- `modality`: Data modality (e.g., "single-molecule")
-- `umi_len`: Length of UMI sequences
-- `target_sample`: Default sample to process
-- `samples`: List of all samples in the project
-- `dry`: Enable dry run mode (no file writing)
-- `do_plot`: Enable generation of plots
-- `steps`: List of pipeline steps to execute
-
-## Basic Usage
-
-### Running the Complete Pipeline
-
-```bash
-# Process default target sample
-python pipeline.py --config config.yml
-
-# Process specific sample
-python pipeline.py --config config.yml --target-sample "s4_dna_fracture_S5"
+2. Implement step function with decorator:
+```python
+@pipeline_step(PipelineStep.NEW_STEP)
+def new_step(self) -> None:
+    """Implementation"""
+    pass
 ```
 
-### Running Specific Steps
+## Development Guidelines
 
-```bash
-# Run steps on default sample
-python pipeline.py --config config.yml --steps parquet preprocess
+### Code Style
 
-# Run steps on specific sample
-python pipeline.py --config config.yml --target-sample "sc_rna_fracture_S4" --steps parquet preprocess
+- Use type hints
+- Document functions with docstrings
+- Follow PEP 8
+- Use dataclasses for structured data
+
+### Testing
+
+Add tests for:
+- Step validation
+- File dependencies
+- Parameter validation
+- Progress tracking
+
+### Error Handling
+
+Use custom exceptions:
+```python
+class PipelineError(Exception):
+    """Base class for pipeline exceptions"""
+    pass
+
+class ValidationError(PipelineError):
+    """Validation failed"""
+    pass
 ```
 
-### Generating Test Data
+## Extending the Pipeline
 
-```bash
-# Generate test data for default sample
-python pipeline.py --config config.yml --make-test
+### Adding Polars Extensions
 
-# Generate test data for specific sample
-python pipeline.py --config config.yml --target-sample "s4_dna_fracture_S5" --make-test
+```python
+@pl.api.register_dataframe_namespace("custom")
+class PlCustom:
+    def __init__(self, df: pl.DataFrame) -> None:
+        self._df = df
+        
+    def custom_method(self):
+        """Implementation"""
+        pass
 ```
 
-### Cleaning Previous Outputs
+### Adding Plot Types
 
-```bash
-# Clean all outputs
-python pipeline.py --config config.yml --clean
-
-# Clean only test outputs
-python pipeline.py --config config.yml --clean-test
-
-# Clean and process specific sample
-python pipeline.py --config config.yml --clean --target-sample "sc_rna_fracture_S4"
+```python
+@call
+def plot_new_analysis(self, ppi, results):
+    """Add new plot type"""
+    pass
 ```
 
-### Setting Log Level
+## Performance Considerations
 
-```bash
-python pipeline.py --config config.yml --log-level DEBUG
-```
+- Use Polars for data processing
+- Implement progress callbacks
+- Enable parallel processing where possible
+- Monitor memory usage
 
-## Pipeline Steps
+## Debugging
 
-### 1. Parquet Conversion (`parquet`)
-Converts FASTQ files to parquet format for efficient processing.
-
-Required parameters:
-- `umi_len`
-- `rev_comp`
-- `modality`
-
-```bash
-python pipeline.py --config config.yml --steps parquet
-```
-
-### 2. Preprocessing (`preprocess`)
-Preprocesses the data, including read parsing and molecule statistics.
-
-Required parameters:
-- `umi_len`
-- `anchor_ont`
-
-```bash
-python pipeline.py --config config.yml --steps preprocess
-```
-
-### 3. Fracture Assembly (`fracture`)
-Assembles short reads into contigs.
-
-Required parameters:
-- `umi_len`
-- `anchor_ont`
-
-```bash
-python pipeline.py --config config.yml --steps fracture
-```
-
-### 4. Test Data Generation (`test`)
-Creates downsampled data for testing.
-
-Required parameters:
-- `target_sample`
-
-```bash
-python pipeline.py --config config.yml --make-test
-```
-
-## Sample Management
-
-### Working with Multiple Samples
-
-The pipeline supports processing multiple samples defined in the config file. You can:
-
-1. Define samples in config:
-```yaml
-samples:
-  - id: "sb_rna_fracture_S3"
-  - id: "s4_dna_fracture_S5"
-  - id: "sc_rna_fracture_S4"
-```
-
-2. Select target sample via command line:
-```bash
-python pipeline.py --config config.yml --target-sample "s4_dna_fracture_S5"
-```
-
-### Sample Validation
-
-The pipeline validates that the specified target sample exists in the samples list:
-- Prevents processing undefined samples
-- Ensures consistent sample naming
-- Maintains data organization
-
-### Sample-specific Operations
-
-```bash
-# Generate test data for specific sample
-python pipeline.py --config config.yml --target-sample "s4_dna_fracture_S5" --make-test --clean-test
-
-# Process specific sample with custom steps
-python pipeline.py --config config.yml --target-sample "sc_rna_fracture_S4" --steps parquet preprocess
-
-# Clean and process specific sample
-python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3" --clean --steps fracture
-```
-
-## Advanced Usage
-
-### Working with Test Data
-
-1. Generate test data for specific sample:
-```bash
-python pipeline.py --config config.yml --target-sample "s4_dna_fracture_S5" --make-test --clean-test
-```
-
-2. Run pipeline on test data:
-```bash
-python pipeline.py --config config.yml --target-sample "TEST_s4_dna_fracture_S5" --steps parquet preprocess fracture
-```
-
-### Monitoring Progress
-
-The pipeline includes progress bars for tracking:
-- Overall step progress
-- Individual operations within steps
-- Assembly progress for each UMI
-
-Example output:
-```
-Assembling contigs [######################] 100%
-├── Validating input
-├── Loading and preprocessing data
-└── Running assembly
-    └── Assembling molecules by UMI [#####################] 1000/1000
-```
-
-### Using Different Log Levels
-
-Available log levels:
-- `CRITICAL`: Only critical messages
-- `INFO`: General information
-- `IO`: Input/output operations
-- `STEP`: Step-level progress
-- `DEBUG`: Detailed debugging information
-
+Enable debug logging:
 ```bash
 python pipeline.py --config config.yml --log-level DEBUG
 ```
 
-## Troubleshooting
+## Contributing
 
-### Common Issues
+1. Fork the repository
+2. Create feature branch
+3. Add tests
+4. Submit pull request
 
-1. Missing Configuration Parameters
-```
-Error: Missing required parameter: umi_len
-```
-Solution: Check your configuration file includes all required parameters for the step.
+## API Reference
 
-2. Invalid Sample Specification
-```
-Error: Target sample 'invalid_sample' not found in samples list
-```
-Solution: Verify the sample ID exists in the config file's samples list.
-
-3. File Not Found
-```
-Error: No files found in /path/to/data
-```
-Solution: Verify file paths in configuration and check file permissions.
-
-4. Memory Issues
-```
-Error: Memory error during assembly
-```
-Solution: Reduce batch size or use test data to verify pipeline.
-
-### Debug Mode
-
-Run in debug mode for detailed logging:
-```bash
-python pipeline.py --config config.yml --log-level DEBUG
-```
-
-### Cleaning Up
-
-If you encounter issues, try cleaning previous outputs:
-```bash
-python pipeline.py --config config.yml --clean
-```
-
-### Getting Help
-
-Run with --help to see all available options:
-```bash
-python pipeline.py --help
-```
-
-## Best Practices
-
-1. Always use version control for configuration files
-2. Start with test data before running on full dataset
-3. Use dry runs to verify configuration
-4. Monitor log files for errors and warnings
-5. Keep backup copies of important data
-6. Use descriptive sample names and consistent naming conventions
-7. Verify sample IDs before processing
-8. Clean outputs between different sample runs
-
-## Next Steps
-
-After successfully running the pipeline:
-1. Check output quality metrics
-2. Verify assembly success rates
-3. Review generated plots if enabled
-4. Archive results and configurations
-5. Document any custom parameters used
-6. Compare results across different samples
-
-For more details, refer to the codebase documentation or reach out to the development team.
+See individual module docstrings for detailed API documentation.
