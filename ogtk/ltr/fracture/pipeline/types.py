@@ -9,6 +9,7 @@ class FractureXp(Xp):
     """Extended Xp class with pipeline-specific functionality"""
     steps: Any
     dry: bool
+    make_test: bool
     logger: CustomLogger
     pro_datain: str
     modality: str
@@ -24,6 +25,8 @@ class FractureXp(Xp):
         super().__init__(*args, **kwargs)
         self.steps = getattr(self, 'steps', None)
         self.dry = getattr(self, 'dry', False)
+        self.make_test = getattr(self, 'make_test', False)
+
 
     @call
     def organize_files_by_sample(self, files, samples, max_files=None):
@@ -31,11 +34,14 @@ class FractureXp(Xp):
         sample_files = {sample['id']: [] for sample in samples}
         
         # Sort files into appropriate sample groups
+        empty_keys = []
         for f in files:
             for sample_id in sample_files:
                 if Path(f).name.startswith(sample_id):
                     sample_files[sample_id].append(f)
                     break
+                else:
+                    empty_keys.append(sample_id)
 
         if max_files is not None and isinstance(max_files, int):
             if any([len(i)>max_files for i in sample_files.values()]):

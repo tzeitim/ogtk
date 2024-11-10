@@ -45,6 +45,8 @@ def main():
         # Initialize Xp configuration
         xp = FractureXp(conf_fn=args.config)
         
+        if xp.make_test:
+            xp.steps.append("TEST")
         # Override steps if specified in command line
         if args.steps:
             xp.steps = args.steps

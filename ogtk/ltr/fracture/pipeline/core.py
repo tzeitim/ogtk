@@ -30,7 +30,7 @@ class PipelineStep(Enum):
         'description': "Assemble short reads into contigs"
     }
     
-    MAKE_TEST = {
+    TEST = {
         'required_params': {'target_sample'},
         'description': "Makes a downsampled fastq file for testing purposes"
     }
@@ -125,7 +125,7 @@ class Pipeline:
     def to_parquet(self) -> None:
         """Convert fastq reads to parquet format"""
         try:
-            self.logger.info(f"Loading data from {self.xp.pro_datain}")
+            self.logger.info(f"Convertion to parquet:\nloading data from {self.xp.pro_datain}")
             input_files = sfind(f"{self.xp.pro_datain}", f"{self.xp.target_sample}*R1*.fastq.gz") # added R1
 
             
@@ -140,12 +140,12 @@ class Pipeline:
                 if param not in vars(self.xp):
                     raise ValueError(f"Missing required parameter: {param}")
 
-            sample_to_file = self.xp.organize_files_by_sample(input_files, self.xp.samples, max_files=1)
+            sample_to_file = self.xp.organize_files_by_sample(input_files, [{'id':self.xp.target_sample}], max_files=1)
             
             if not self.xp.dry:
                 for sample_id, file in sample_to_file.items():
                     file = file[0]
-                    sample_dir = f'{self.xp.pro_workdir}/{sample_id}/' 
+                    sample_dir = f'{self.xp.pro_workdir}/{sample_id}' 
                     Path(sample_dir).mkdir(parents=True, exist_ok=True)
 
                     tabulate_paired_10x_fastqs_rs(
@@ -159,7 +159,7 @@ class Pipeline:
             pass
 
         except Exception as e:
-            self.logger.error(f"Failed to load data: {str(e)}")
+            self.logger.error(f"Failed to convert {self.xp.target_sample} to parquet: {str(e)}")
             raise
             
     @call  
@@ -174,18 +174,23 @@ class Pipeline:
             for param in required_params:
                 if param not in vars(self.xp):
                     raise ValueError(f"Missing required parameter: {param}")
-            in_file = f"{self.xp.pro_datain}/{self.xp.target_sample}_R1_001.merged.parquet"
+
+            in_file = f"{self.xp.pro_workdir}/{self.xp.target_sample}/{self.xp.target_sample}_merged_001.parquet"
             out_file = f"{self.xp.sample_wd}/parsed_reads.parquet" #pyright:ignore
-            self.logger.io(f"exporting reads to {out_file}")
+            self.logger.io(f"reading from {in_file}")
 
             if not self.xp.dry:
                 (
                     pl
                     .scan_parquet(in_file)
-                    .pp.parse_reads(umi_len=self.xp.umi_len, anchor_ont=self.xp.anchor_ont) #pyright: ignore
+                    .pp.parse_reads(umi_len=self.xp.umi_len,  
+                                    anchor_ont=self.xp.anchor_ont,
+                                    intbc_5prime=self.xp.intbc_5prime)
                     .collect()
                     .write_parquet(out_file)
                 )
+                self.logger.info(f"exported parsed reads to {out_file}")
+
                 return StepResults(
                         results={'xp': self.xp,
                                  'parsed_reads':out_file}
@@ -208,41 +213,55 @@ class Pipeline:
             for param in required_params:
                 if param not in vars(self.xp):
                     raise ValueError(f"Missing required parameter: {param}")
-            in_file = f"{self.xp.pro_datain}/{self.xp.target_sample}_R1_001.merged.parquet"
-            out_file = f"{self.xp.sample_wd}/parsed_reads.parquet" #pyright:ignore
-            self.logger.io(f"exporting reads to {out_file}")
+            in_file = f"{self.xp.sample_wd}/parsed_reads.parquet" #pyright:ignore
+            out_file = f"{self.xp.sample_wd}/contigs.parquet" #pyright:ignore
+            self.logger.info(f"exporting assembled contigs to {out_file}")
 
             if not self.xp.dry:
-                (
-                    pl
-                    .scan_parquet(in_file)
-                    .pp.parse_reads(umi_len=self.xp.umi_len, anchor_ont=self.xp.anchor_ont) #pyright: ignore 
-                    .collect()
-                    .write_parquet(out_file)
+                chi = (
+                    pl.read_parquet(in_file).pp.assembly_with_opt()
                 )
+                chi.write_parquet(out_file)
+
+                self.logger.critical(f"{(chi.get_column('length')==0).mean():.2%} failed")
+
             pass
         except Exception as e:
             self.logger.error(f"Failed to preprocess data: {str(e)}")
             raise
             
     @call  
-    @pipeline_step(PipelineStep.MAKE_TEST)
-    def make_test(self) -> None:
+    @pipeline_step(PipelineStep.TEST)
+    def test(self) -> None:
         """Makes a downsampled fastq file for testing purposes"""
         try:
+            import os
             self.logger.step("Downsampling parquet to generate synthetic FASTQ")
 
-            input_files = sfind(f"{self.xp.pro_datain}", f"{self.xp.target_sample}*merged*parquet")
-            sample_to_file = self.xp.organize_files_by_sample(files=input_files, samples=self.xp.samples, max_files=1)
-            umi_len = self.xp.umi_len
+            #input file is the merged parquet from the original FASTQ
+            original_sample = self.xp.target_sample.replace('TEST_', '') #pyright: ignore
+            pattern = f"{original_sample}*merged*parquet"
+            input_files = sfind(f"{self.xp.pro_workdir}/{original_sample}/", pattern)
 
+            if len(input_files)==0:
+                raise ValueError(f"\nNo files matched:\n'{pattern}'\nin\n{self.xp.pro_datain}")
+
+            sample_to_file = self.xp.organize_files_by_sample(input_files, [{'id':original_sample}], max_files=1)
+            umi_len = self.xp.umi_len
             
-            in_file = sample_to_file[self.xp.target_sample][0]
+            # with sample_to_file we get the _merged_parquet of the original sample
+            # the parsed file is not useful since we will recreate the fastq 
+            in_file = sample_to_file[original_sample][0]
             
-            out_file1= Path(f"{self.xp.pro_datain}/TEST_{self.xp.target_sample}_R1_001.fastq.gz").as_posix()
-            out_file2= Path(f"{self.xp.pro_datain}/TEST_{self.xp.target_sample}_R2_001.fastq.gz").as_posix() 
+            out_file1= Path(f"{self.xp.pro_datain}/{self.xp.target_sample}_R1_001.fastq.gz").as_posix()
+            out_file2= Path(f"{self.xp.pro_datain}/{self.xp.target_sample}_R2_001.fastq.gz").as_posix() 
 
             self.logger.io(f"exporting reads to:\n{out_file1}\n{out_file2}")
+
+            #TODO add clean to remove previous tests
+            if os.path.exists(out_file1) and os.path.exists(out_file2):
+                self.logger.info(f"Using previous test files use --clean to remove all generated files")
+                pass
 
             if not self.xp.dry:
                 df = (
@@ -253,6 +272,7 @@ class Pipeline:
                         pl.col('reads')
                             .qcut(
                                 quantiles  = [0.0, 0.1,0.49, 0.50, 0.52, 0.99],
+                                allow_duplicates=True,
                                 labels = ['0','10%', '<50%', '50%', '>50%', '99%', '>99%'])
                                .alias('qreads')
                        )
@@ -264,9 +284,9 @@ class Pipeline:
                            )
                          .collect()
                 )
+                #QC
                 #print(df.group_by('qreads').agg(pl.col('umi').n_unique()))
                 import gzip
-                import warnings
 
                 with gzip.open(out_file1, 'wb') as r1gz:
                     (
@@ -290,26 +310,32 @@ class Pipeline:
                     )
             pass
         except Exception as e:
-            self.logger.error(f"Failed to preprocess data: {str(e)}")
+            self.logger.error(f"Failed generating tests: {str(e)}")
             raise
 
     def run(self) -> bool:
         """Run the complete pipeline"""
-        if 'make_test' in self.xp.steps:
+        if self.xp.make_test:
             try:
                 self.logger.info("=== TEST MODE ===")
                 self.xp.target_sample = f'TEST_{self.xp.target_sample}'
-                self.make_test()
+                self.xp.samples.append({'id':self.xp.target_sample})
+                self.xp.consolidate_conf(update=True)
+                self.xp.init_workdir()
+
+                self.logger.info(f"Created test alias {self.xp.target_sample} and initialized workdir")
+                self.test()
+                self.run_all()
+
+                self.logger.info("Pipeline (TEST) completed successfully")
+                return True
 
             except Exception as e:
-                self.logger.error(f"Pipeline tests failed {str(e)}")
+                self.logger.error(f"Pipeline (TEST) tests failed {str(e)}")
                 return False
 
         try:
-            self.to_parquet()
-            self.preprocess()
-            #self.analyze_data()
-            #self.save_results()
+            self.run_all()
             
             self.logger.info("Pipeline completed successfully")
             return True
@@ -318,3 +344,11 @@ class Pipeline:
             self.logger.error(f"Pipeline failed: {str(e)}")
             return False
 
+    def run_all(self):
+        ''' Run all steps'''
+        self.logger.info("==== Running pipeline ====")
+
+        self.to_parquet()
+        self.preprocess()
+        self.fracture()
+        #self.save_results()
