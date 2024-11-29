@@ -98,6 +98,7 @@ def process_indices(primer_db: Path,
 
     if i5_rc:
         result = result.with_columns(pl.col('index2').map_elements(reverse_complement, return_dtype=pl.Utf8))
+    result = result.with_columns(pl.col('index').map_elements(reverse_complement, return_dtype=pl.Utf8))
 
     if i5_len is not None:
         result = result.with_columns(pl.col('index2').str.slice(0, i5_len))
