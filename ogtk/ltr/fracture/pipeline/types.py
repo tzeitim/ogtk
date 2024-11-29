@@ -20,6 +20,7 @@ class FractureXp(Xp):
     pro_workdir: str
     plotdb: PlotDB
     do_plot: bool    
+    fracture: dict
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
