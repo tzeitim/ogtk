@@ -62,7 +62,7 @@ sc=[
 rs=[
     'rogtk @ git+https://github.com/tzeitim/rogtk.git',
     'maturin', 
-    'patchelf'
+   # 'patchelf'
 ]
 doc=[
  "docutils>=0.8,!=0.18.*,!=0.19.*",
