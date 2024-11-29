@@ -18,7 +18,7 @@ class PlDNA:
         )
     def to_fastq(self,
          read_id_col: str,
-         read_qual_col: str,
+         read_qual_col: str|None,
          read_col: str)-> pl.DataFrame:
         return self._df.with_columns(
                 ("@"+pl.col(read_id_col)\
@@ -36,16 +36,17 @@ class PlPipeline:
         self._df = df
    
     def assembly_with_opt(self,
-         start_k=25,
-         start_min_coverage=17,
-         start_anchor="GAGACTGCATGG",
-         end_anchor="TTTAGTGAGGGT"):
+                          start_k:int=25,
+                          start_min_coverage:int=17,
+                          start_anchor:str="GAGACTGCATGG",
+                          end_anchor:str="TTTAGTGAGGGT",
+                          min_reads:int=100):
         return (
                 self._df
                 .filter(pl.col('reads')>100)
                 .with_columns(pl.col('r2_seq').str.replace(f'^.+?{start_anchor}', start_anchor))
                 .group_by(['umi']).agg(
-                      rogtk.optimize_assembly(
+                    rogtk.optimize_assembly( #pyright: ignore
                           expr=pl.col('r2_seq'), 
                           start_k=start_k, 
                           start_min_coverage=start_min_coverage, 
@@ -69,14 +70,14 @@ class PlPipeline:
                 .filter(pl.col('umi')==target_umi)
                 .with_columns(pl.col('r2_seq').str.replace(f'^.+?{intbc_5prime}', intbc_5prime))
                  .group_by(['umi']).agg(
-                  rogtk.assemble_sequences(
-                    expr=pl.col("r2_seq"),
-                    k=k,
-                    min_coverage=min_cov,
-                    auto_k=auto_k,
-                    only_largest=only_largest,
-                    export_graphs=export_graphs,
-                    prefix=f"{target_umi}_"
+                     rogtk.assemble_sequences( #pyright: ignore
+                        expr=pl.col("r2_seq"),
+                        k=k,
+                        min_coverage=min_cov,
+                        auto_k=auto_k,
+                        only_largest=only_largest,
+                        export_graphs=export_graphs,
+                        prefix=f"{target_umi}_"
                     ).alias('contig')
                   )
             )
