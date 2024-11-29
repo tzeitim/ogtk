@@ -20,6 +20,7 @@ class PlDNA:
          read_id_col: str,
          read_qual_col: str|None,
          read_col: str)-> pl.DataFrame:
+
         return self._df.with_columns(
                 ("@"+pl.col(read_id_col)\
                  +"\n"+pl.col(read_col)\
