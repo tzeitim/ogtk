@@ -21,6 +21,22 @@ class PlDNA:
          read_qual_col: str|None,
          read_col: str)-> pl.DataFrame:
 
+        if read_qual_col is None:
+            read_qual_col = 'fake_qual'
+
+            return (
+                    self._df
+                    .with_columns(pl.col(read_col).str.replace_all('.', "I").alias('fake_qual'))
+                    .with_columns(
+                    ("@"+pl.col(read_id_col)\
+                     +"\n"+pl.col(read_col)\
+                     +"\n+"\
+                     +"\n"+pl.col(read_qual_col)
+                    )
+                     .alias(f'{read_col}_fastq')
+                )
+            )
+
         return self._df.with_columns(
                 ("@"+pl.col(read_id_col)\
                  +"\n"+pl.col(read_col)\
@@ -44,7 +60,7 @@ class PlPipeline:
                           min_reads:int=100):
         return (
                 self._df
-                .filter(pl.col('reads')>100)
+                .filter(pl.col('reads')>min_reads)
                 .with_columns(pl.col('r2_seq').str.replace(f'^.+?{start_anchor}', start_anchor))
                 .group_by(['umi']).agg(
                     rogtk.optimize_assembly( #pyright: ignore
