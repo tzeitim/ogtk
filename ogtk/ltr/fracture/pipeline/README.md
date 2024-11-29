@@ -63,20 +63,6 @@ def get_step_dependencies(self) -> Dict[str, Set[str]]:
             step_outputs[output] = step.name
 ```
 
-### Progress Tracking
-
-Progress bars are implemented using the rich library:
-
-```python
-def polars_bar(total: int, title: str = "Processing", transient: bool = True) -> Progress:
-    """Create a progress bar for Polars operations"""
-    bar = Progress(
-        SpinnerColumn(),
-        *Progress.get_default_columns(),
-        TimeElapsedColumn(),
-        transient=transient
-    )
-```
 
 ## Adding New Steps
 
@@ -165,13 +151,6 @@ Enable debug logging:
 ```bash
 python pipeline.py --config config.yml --log-level DEBUG
 ```
-
-## Contributing
-
-1. Fork the repository
-2. Create feature branch
-3. Add tests
-4. Submit pull request
 
 ## API Reference
 

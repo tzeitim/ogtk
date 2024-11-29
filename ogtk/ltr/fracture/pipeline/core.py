@@ -186,6 +186,7 @@ class Pipeline:
                     .pp.parse_reads(umi_len=self.xp.umi_len,  
                                     anchor_ont=self.xp.anchor_ont,
                                     intbc_5prime=self.xp.intbc_5prime)
+                    .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                     .collect()
                     .write_parquet(out_file)
                 )
@@ -217,9 +218,22 @@ class Pipeline:
             out_file = f"{self.xp.sample_wd}/contigs.parquet" #pyright:ignore
             self.logger.info(f"exporting assembled contigs to {out_file}")
 
+            if not hasattr(self.xp, 'fracture'):
+                setattr(self.xp, 'fracture', {})
+                self.xp.fracture['start_min_coverage'] = 25
+                self.xp.fracture['start_k'] = 17
+                self.xp.fracture['min_reads'] = 100 
+
             if not self.xp.dry:
+                self.logger.info(f'Reading {in_file}')
                 chi = (
-                    pl.read_parquet(in_file).pp.assembly_with_opt()
+                    pl.read_parquet(in_file)
+                    .pp.assembly_with_opt( #pyright: ignore
+                        start_k=self.xp.fracture['start_k'], 
+                        start_min_coverage=self.xp.fracture['start_min_coverage'],
+                        min_reads=self.xp.fracture['min_reads'], 
+                        )
+                    .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                 )
                 chi.write_parquet(out_file)
 
@@ -258,6 +272,8 @@ class Pipeline:
             # the parsed file is not useful since we will recreate the fastq 
             in_file = sample_to_file[original_sample][0]
             
+            out_file= Path(f"{self.xp.sample_wd}/{self.xp.target_sample}.test.parquet").as_posix()
+
             out_file1= Path(f"{self.xp.pro_datain}/{self.xp.target_sample}_R1_001.fastq.gz").as_posix()
             out_file2= Path(f"{self.xp.pro_datain}/{self.xp.target_sample}_R2_001.fastq.gz").as_posix() 
 
@@ -270,6 +286,7 @@ class Pipeline:
                         )
                 pass
 
+            umis_per_group = 30
             if not self.xp.dry:
                 df = (
                     pl.scan_parquet(in_file)
@@ -278,21 +295,22 @@ class Pipeline:
                     .with_columns(
                         pl.col('reads')
                             .qcut(
-                                quantiles  = [0.0, 0.1,0.49, 0.50, 0.52, 0.99],
+                                quantiles  = [0.0, 0.1,0.49, 0.50, 0.52, 0.90],
                                 allow_duplicates=True,
-                                labels = ['0','10%', '<50%', '50%', '>50%', '99%', '>99%'])
+                                labels = ['0','10%', '<50%', '50%', '>50%', '90%', '>90%'])
                                .alias('qreads')
                        )
-                       .filter(pl.col('qreads').is_in(['10%', '50%', '99%']))
+                       .filter(pl.col('qreads').is_in(['10%', '50%', '90%']))
                        .filter(
                            pl.col('umi').is_in(
-                               pl.col('umi').filter(pl.int_range(pl.len()).shuffle().over("qreads") < 10)
+                               pl.col('umi').filter(pl.int_range(pl.len()).shuffle().over("qreads") <= umis_per_group)
                                )
                            )
                          .collect()
                 )
                 #QC
                 #print(df.group_by('qreads').agg(pl.col('umi').n_unique()))
+                df.write_parquet(out_file)
                 import gzip
 
                 with gzip.open(out_file1, 'wb') as r1gz:
@@ -304,6 +322,7 @@ class Pipeline:
                                    include_header=False,
                                    )
                     )
+                    # TODO: there is a bug here since we are not rev_complementing back the sequences/nor reversing the quality
                 with gzip.open(out_file2, 'wb') as r2gz:
                     (
                         df

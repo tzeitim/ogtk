@@ -23,7 +23,9 @@ class PlotDB():
                 stat='count')
 
         plt.grid()
-        plt.title("Reads per UMI")
+        plt.title(f"Reads per UMI\n{xp.target_sample}")
+        plt.ylim(1, 1e5)
+        plt.xlim(1, 2e5)
 
         xp.logger.info(f"saved {out_path}")
         fig.savefig(out_path)
