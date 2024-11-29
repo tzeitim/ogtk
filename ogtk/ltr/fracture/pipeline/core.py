@@ -225,8 +225,15 @@ class Pipeline:
                 self.xp.fracture['min_reads'] = 100 
 
             if not self.xp.dry:
+                self.logger.info(f'Reading {in_file}')
                 chi = (
-                    pl.read_parquet(in_file).pp.assembly_with_opt()
+                    pl.read_parquet(in_file)
+                    .pp.assembly_with_opt( #pyright: ignore
+                        start_k=self.xp.fracture['start_k'], 
+                        start_min_coverage=self.xp.fracture['start_min_coverage'],
+                        min_reads=self.xp.fracture['min_reads'], 
+                        )
+                    .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                 )
                 chi.write_parquet(out_file)
 
@@ -266,6 +273,7 @@ class Pipeline:
             in_file = sample_to_file[original_sample][0]
             
             out_file= Path(f"{self.xp.sample_wd}/{self.xp.target_sample}.test.parquet").as_posix()
+
             out_file1= Path(f"{self.xp.pro_datain}/{self.xp.target_sample}_R1_001.fastq.gz").as_posix()
             out_file2= Path(f"{self.xp.pro_datain}/{self.xp.target_sample}_R2_001.fastq.gz").as_posix() 
 
