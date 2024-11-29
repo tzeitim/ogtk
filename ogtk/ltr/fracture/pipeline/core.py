@@ -186,6 +186,7 @@ class Pipeline:
                     .pp.parse_reads(umi_len=self.xp.umi_len,  
                                     anchor_ont=self.xp.anchor_ont,
                                     intbc_5prime=self.xp.intbc_5prime)
+                    .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                     .collect()
                     .write_parquet(out_file)
                 )
@@ -216,6 +217,12 @@ class Pipeline:
             in_file = f"{self.xp.sample_wd}/parsed_reads.parquet" #pyright:ignore
             out_file = f"{self.xp.sample_wd}/contigs.parquet" #pyright:ignore
             self.logger.info(f"exporting assembled contigs to {out_file}")
+
+            if not hasattr(self.xp, 'fracture'):
+                setattr(self.xp, 'fracture', {})
+                self.xp.fracture['start_min_coverage'] = 25
+                self.xp.fracture['start_k'] = 17
+                self.xp.fracture['min_reads'] = 100 
 
             if not self.xp.dry:
                 chi = (
