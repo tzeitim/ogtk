@@ -307,6 +307,7 @@ class Pipeline:
                                    include_header=False,
                                    )
                     )
+                    # TODO: there is a bug here since we are not rev_complementing back the sequences/nor reversing the quality
                 with gzip.open(out_file2, 'wb') as r2gz:
                     (
                         df
