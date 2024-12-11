@@ -48,11 +48,28 @@ def parse_args():
         help="Target sample to process (overrides config file setting)"
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        "--all-all",
+        action="store_true",
+        help="Run all steps for all samples. No questions asked."
+    )
 
+    parser.add_argument(
+        "--all-samples",
+        action="store_true",
+        help="Run specified steps (conf file or argument) for all samples in the configuratio"
+    )
+
+    return parser.parse_args()
 
 def main():
     '''
+    # Process all samples with all steps
+    python pipeline.py --config config.yml --all-all
+
+    # Process for the specified steps all samples in the configuration
+    python pipeline.py --config config.yml --all-samples
+
     # Process specific target sample
     python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3"
 
@@ -76,6 +93,60 @@ def main():
     try:
         # Initialize Xp configuration
         xp = FractureXp(conf_fn=args.config)
+
+        # Handle --all-all flag
+        if args.all_all:
+            logger.info("Processing all steps for all samples")
+            # Set steps to include all available steps
+            xp.steps = [step.name.lower() for step in PipelineStep]
+            success = True
+            
+            # Process each sample
+            for sample in xp.samples:
+                logger.info(f"\nProcessing sample: {sample['id']}")
+                xp.target_sample = sample['id']
+                xp.consolidate_conf(update=True)
+                pipeline = Pipeline(xp)
+                
+                # Handle cleaning if requested
+                if args.clean:
+                    pipeline.clean_all()
+                elif args.clean_test:
+                    pipeline.clean_test_outputs()
+                
+                sample_success = pipeline.run()
+                success = success and sample_success
+            
+            return 0 if success else 1
+
+        # Handle --all-samples flag
+        elif args.all_samples:
+            logger.info("Processing specified steps for all samples")
+            # Use steps from command line if provided, otherwise use config
+            if args.steps:
+                xp.steps = args.steps
+            
+            success = True
+            
+            # Process each sample
+            for sample in xp.samples:
+                logger.info(f"\nProcessing sample: {sample['id']}")
+                xp.target_sample = sample['id']
+                xp.consolidate_conf(update=True)
+                pipeline = Pipeline(xp)
+                
+                # Handle cleaning if requested
+                if args.clean:
+                    pipeline.clean_all()
+                elif args.clean_test:
+                    pipeline.clean_test_outputs()
+                
+                sample_success = pipeline.run()
+                success = success and sample_success
+            
+            return 0 if success else 1
+
+        # Handle single sample processing
         if args.target_sample:
             logger.info(f"Overriding target sample from config with: {args.target_sample}")
             # Verify sample exists in samples list
