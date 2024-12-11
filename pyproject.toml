@@ -60,7 +60,7 @@ sc=[
         'scanpy',
 ]
 rs=[
-    'rogtk @ git+https://github.com/tzeitim/rogtk.git',
+    'rogtk',
     'maturin', 
    # 'patchelf'
 ]
