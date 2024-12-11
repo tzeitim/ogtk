@@ -62,7 +62,8 @@ sc=[
 rs=[
     'rogtk',
     'maturin', 
-   # 'patchelf'
+    'patchelf; sys_platform != "darwin"',  # Install patchelf only on non-macOS systems
+
 ]
 doc=[
  "docutils>=0.8,!=0.18.*,!=0.19.*",
