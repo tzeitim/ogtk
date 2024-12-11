@@ -223,6 +223,7 @@ class Pipeline:
                 self.xp.fracture['start_min_coverage'] = 25
                 self.xp.fracture['start_k'] = 17
                 self.xp.fracture['min_reads'] = 100 
+                self.xp.fracture['prioritize_length'] = False
 
             if not self.xp.dry:
                 self.logger.info(f'Reading {in_file}')
@@ -232,6 +233,7 @@ class Pipeline:
                         start_k=self.xp.fracture['start_k'], 
                         start_min_coverage=self.xp.fracture['start_min_coverage'],
                         min_reads=self.xp.fracture['min_reads'], 
+                        prioritize_length=self.xp.fracture['prioritize_length'],
                         )
                     .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                 )

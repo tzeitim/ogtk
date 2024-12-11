@@ -57,6 +57,7 @@ class PlPipeline:
                           start_min_coverage:int=17,
                           start_anchor:str="GAGACTGCATGG",
                           end_anchor:str="TTTAGTGAGGGT",
+                          prioritize_length:bool=False,
                           min_reads:int=100):
         return (
                 self._df
@@ -69,6 +70,7 @@ class PlPipeline:
                           start_min_coverage=start_min_coverage, 
                           start_anchor=start_anchor, 
                           end_anchor=end_anchor,
+                          prioritize_length=prioritize_length,
                           max_iterations=250))
                 .unnest('r2_seq')
                 .with_columns((pl.col('length')==0).alias('failed'))
