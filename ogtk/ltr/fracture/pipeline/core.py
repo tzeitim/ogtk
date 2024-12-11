@@ -48,13 +48,25 @@ class PipelineStep(Enum):
 def pipeline_step(step: PipelineStep):
     def decorator(func: Callable) -> Callable:
         @wraps(func)
-        # Pipeline instance = ppi
         def wrapper(ppi: Any, *args: Any, **kwargs: Any) -> Any:
             if not ppi.should_run_step(step):
                 ppi.logger.io(f"Skipping {step.name.lower()}")
                 return None
             
             try:
+                # Set up step-specific logging
+                step_log_dir = Path(f"{ppi.xp.pro_workdir}/{ppi.xp.target_sample}/logs")
+                step_log_file = step_log_dir / f"{step.name.lower()}.log"
+                
+                # Enable step-specific file logging
+                logger = Rlogger()
+                logger.enable_file_logging(
+                    filepath=step_log_file,
+                    level=ppi.xp.log_level if hasattr(ppi.xp, 'log_level') else "INFO",
+                    format_string="%(asctime)s - %(levelname)s - %(message)s",
+                    mode='w'  # Start fresh log for each step run
+                )
+                
                 # Validate parameters
                 missing_params = [
                     param for param in step.value['required_params']
@@ -66,27 +78,34 @@ def pipeline_step(step: PipelineStep):
                     ppi.logger.error(error_msg)
                     raise ValueError(error_msg)
 
-                # actually run the Step
+                # Run the step
+                ppi.logger.info(f"Starting {step.name} step")
                 results = func(ppi, *args, **kwargs)
                 
                 if getattr(ppi.xp, 'do_plot', False):
                     try:
                         ppi.logger.step(f'Plotting {step.name.lower()} results')
-
-                        # makes use of PlotDB to fetch the method
                         plot_method = getattr(ppi.plotdb, f"plot_{step.name.lower()}", None)
-
+                        
                         if plot_method:
                             ppi.logger.debug(f"Generating plots for {step.name.lower()}")
                             plot_method(ppi, results)
-
                     except Exception as e:
                         ppi.logger.error(f"Plot generation failed: {str(e)}")
                 
+                ppi.logger.info(f"Completed {step.name} step")
+                
+                # Disable step-specific logging
+                logger.disable_file_logging()
+                
                 return results
+                
             except Exception as e:
                 ppi.logger.error(f"Step {step.name} failed: {str(e)}")
+                # Ensure we disable file logging even if there's an error
+                logger.disable_file_logging()
                 raise
+                
         return wrapper
     return decorator
 

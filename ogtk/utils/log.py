@@ -6,6 +6,7 @@ import inspect
 import polars as pl
 import pandas as pd
 from typing import Any, Optional
+from pathlib import Path
 
 # Define custom log levels
 IO_LEVEL_NUM = 19
@@ -28,6 +29,7 @@ class CustomLogger(logging.Logger):
 class Rlogger:
     _instance: Optional['Rlogger'] = None
     logger: CustomLogger
+    file_handler: Optional[logging.FileHandler] = None
 
     levels = {
         "CRITICAL": logging.CRITICAL, #50
@@ -55,10 +57,53 @@ class Rlogger:
         self.logger = logging.getLogger("rich_logger")  # type: ignore
         self.logger.setLevel(logging.INFO)
         
-        handler = RichHandler(console=Console(width=250))
-        formatter = logging.Formatter("%(message)s", datefmt="[%X]")
-        handler.setFormatter(formatter)
-        self.logger.addHandler(handler)
+        # Console handler setup
+        console_handler = RichHandler(console=Console(width=250))
+        console_formatter = logging.Formatter("%(message)s", datefmt="[%X]")
+        console_handler.setFormatter(console_formatter)
+        self.logger.addHandler(console_handler)
+
+    def enable_file_logging(self, 
+                          filepath: str | Path, 
+                          level: str = "INFO", 
+                          mode: str = 'a',
+                          format_string: str = "%(asctime)s - %(levelname)s - %(message)s") -> None:
+        """
+        Enable logging to a file with customizable settings.
+        
+        Args:
+            filepath: Path to the log file
+            level: Logging level for the file output
+            mode: File opening mode ('w' for write, 'a' for append)
+            format_string: Format string for log messages
+        """
+        # Create directory if it doesn't exist
+        Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+        
+        # Remove existing file handler if present
+        if self.file_handler is not None:
+            self.logger.removeHandler(self.file_handler)
+            self.file_handler.close()
+
+        # Create new file handler
+        self.file_handler = logging.FileHandler(filepath, mode=mode)
+        self.file_handler.setLevel(self.levels.get(level, logging.INFO))
+        
+        # Create formatter and add it to the handler
+        file_formatter = logging.Formatter(format_string)
+        self.file_handler.setFormatter(file_formatter)
+        
+        # Add the handler to the logger
+        self.logger.addHandler(self.file_handler)
+        self.logger.info(f"File logging enabled: {filepath}")
+
+    def disable_file_logging(self) -> None:
+        """Disable file logging and close the file handler."""
+        if self.file_handler is not None:
+            self.logger.info("File logging disabled")
+            self.logger.removeHandler(self.file_handler)
+            self.file_handler.close()
+            self.file_handler = None
 
     def get_logger(self) -> CustomLogger:
         """Get the configured logger instance"""
@@ -70,7 +115,7 @@ class Rlogger:
             raise ValueError(f"levels supported {list(self.levels.keys())}")
         self.logger.setLevel(self.levels[level])
 
-# Your call decorator
+# Your call decorator and helper functions remain unchanged
 def call(func):
     """Decorator to log function calls with arguments"""
     @wraps(func)
@@ -87,7 +132,6 @@ def call(func):
         return value
     return wrapper
 
-# Your helper functions
 def format_arg(arg: Any) -> str:
     """Format argument for logging"""
     if isinstance(arg, pd.DataFrame):
