@@ -33,11 +33,13 @@ source ~/.zshrc  # or source ~/.bash_profile
 4. Install the package:
 ```bash
 pip install ogtk
+#or for all-inclusive functionality
+pip install 'ogtk[sc,rs'] 
 ```
 
 ## With Rust Support
 
-### Linux/Windows
+### Linux
 ```bash
 pip install ogtk[rs]
 ```
@@ -53,6 +55,23 @@ brew install llvm patchelf
 3. Install the package:
 ```bash
 pip install ogtk[rs]
+```
+## astral uv
+
+After having installed [astral-uv](https://docs.astral.sh/uv/)
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Initialize project
+```bash
+uv init uvogtk
+cd uvogtk
+add ogtk
+add ipython
+uv venv --python 3.10
+uv sync
 ```
 
 ## Troubleshooting
