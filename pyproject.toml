@@ -23,7 +23,6 @@ description="General tools for genomics and lineage tracing"
 urls.Home-page="https://github.com/tzeitim/ogtk"
 dependencies=[
     'numpy>=1.21.0,<2.0.0',
-    'bgzip',
     'colorhash',
     #'fasta',
     'fastcluster',
@@ -48,6 +47,15 @@ dependencies=[
     'pyseq_align',
     'tables'
 ] 
+
+# Platform-specific core dependencies
+dependencies-macos=[
+    'bgzip; sys_platform == "darwin"',  # Will be installed after manual LLVM setup
+]
+dependencies-other=[
+    'bgzip; sys_platform != "darwin"',  # Direct install on non-macOS platforms
+]
+
 classifiers=[
   "Programming Language :: Rust",
   "Programming Language :: Python :: 3",
