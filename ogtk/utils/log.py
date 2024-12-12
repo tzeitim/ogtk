@@ -95,12 +95,12 @@ class Rlogger:
         
         # Add the handler to the logger
         self.logger.addHandler(self.file_handler)
-        self.logger.info(f"File logging enabled: {filepath}")
+        self.logger.debug(f"File logging enabled: {filepath}")
 
     def disable_file_logging(self) -> None:
         """Disable file logging and close the file handler."""
         if self.file_handler is not None:
-            self.logger.info("File logging disabled")
+            self.logger.debug("File logging disabled")
             self.logger.removeHandler(self.file_handler)
             self.file_handler.close()
             self.file_handler = None
