@@ -64,7 +64,7 @@ After having installed [astral-uv](https://docs.astral.sh/uv/)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Initialize project
+Initialize project and add packages. 
 ```bash
 uv init uvogtk
 cd uvogtk
