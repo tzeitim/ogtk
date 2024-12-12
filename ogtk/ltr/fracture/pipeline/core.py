@@ -171,6 +171,7 @@ class Pipeline:
                             file_path=file, 
                             out_fn=f'{sample_dir}/parsed_reads.parquet', 
                             out_dir=f'{sample_dir}',
+                            merged_fn = f'{sample_dir}/merged_reads.parquet',
                             modality=self.xp.modality,     
                             umi_len=self.xp.umi_len,      
                             do_rev_comp=self.xp.rev_comp,  
@@ -194,7 +195,7 @@ class Pipeline:
                 if param not in vars(self.xp):
                     raise ValueError(f"Missing required parameter: {param}")
 
-            in_file = f"{self.xp.pro_workdir}/{self.xp.target_sample}/{self.xp.target_sample}_merged_001.parquet"
+            in_file = f"{self.xp.pro_workdir}/{self.xp.target_sample}/merged_reads.parquet"
             out_file = f"{self.xp.sample_wd}/parsed_reads.parquet" #pyright:ignore
             self.logger.io(f"reading from {in_file}")
 

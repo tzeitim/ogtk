@@ -3,6 +3,7 @@ from ogtk.utils.log import Rlogger
 
 from pipeline.core import PipelineStep, Pipeline
 from pipeline.types import FractureXp
+from pipeline.plot_gen import PlotRegenerator
 
 
 def parse_args():
@@ -57,8 +58,14 @@ def parse_args():
     parser.add_argument(
         "--all-samples",
         action="store_true",
-        help="Run specified steps (conf file or argument) for all samples in the configuratio"
+        help="Run specified steps (conf file or argument) for all samples in the configuration"
     )
+	
+    parser.add_argument(
+		"--regenerate-plots",
+		nargs="*",
+		help="Regenerate plots for specified steps (or all if no steps provided)"
+	)
 
     return parser.parse_args()
 
@@ -81,6 +88,15 @@ def main():
 
     # Clean and process specific sample
     python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3" --clean
+
+	# Regenerate plots for all steps
+	python pipeline.py --config config.yml --regenerate-plots
+
+	# Regenerate plots for specific steps
+	python pipeline.py --config config.yml --regenerate-plots preprocess fracture
+
+	# Regenerate plots for a specific sample
+	python pipeline.py --config config.yml --target-sample "sample_id" --regenerate-plots
     '''
 
     # Parse arguments
@@ -94,7 +110,15 @@ def main():
         # Initialize Xp configuration
         xp = FractureXp(conf_fn=args.config)
 
-        # Handle --all-all flag
+		# Skip the pipeline if we are only plotting
+        if args.regenerate_plots is not None:
+            logger.info("Regenerating plots")
+            pipeline = Pipeline(xp)
+            plot_regenerator = PlotRegenerator(pipeline)
+            plot_regenerator.regenerate_plots(steps=args.regenerate_plots)
+            return 0
+
+        # Handle --all-all flag (all samples, all steps)
         if args.all_all:
             logger.info("Processing all steps for all samples")
             # Set steps to include all available steps
