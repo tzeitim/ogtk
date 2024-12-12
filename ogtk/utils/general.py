@@ -311,6 +311,7 @@ def tabulate_paired_10x_fastqs_rs(
     umi_len = 10,
     do_rev_comp = False,
     force = False,
+    merged_fn: str|None = None,
     out_dir: str|None = None,
     ):
     ''' Merges umified paired gzipped fastqs (e.g. 10x fastqs) into a single parquet file 
@@ -336,7 +337,9 @@ def tabulate_paired_10x_fastqs_rs(
     if modality =='single-molecule':
         cbc_len = 0
 
-    merged_fn = file_path.replace('_R1_', '_merged_').replace('.fastq.gz', '.parquet')
+    if merged_fn is None:
+        merged_fn = file_path.replace('_R1_', '_merged_').replace('.fastq.gz', '.parquet')
+
     if out_dir is not None:
         from pathlib import Path
         p = Path(merged_fn)
