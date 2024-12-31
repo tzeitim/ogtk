@@ -382,6 +382,8 @@ def tabulate_paired_10x_fastqs_rs(
         final_columns.remove("cbc")
         final_columns.remove("cbc_qual")
     
+    logger.debug(lazy_df.explain(streaming=True))
+
     (
         lazy_df
         .select(final_columns)
