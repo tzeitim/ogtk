@@ -166,6 +166,10 @@ class Pipeline:
                     file = file[0]
                     sample_dir = f'{self.xp.pro_workdir}/{sample_id}' 
                     Path(sample_dir).mkdir(parents=True, exist_ok=True)
+                    if hasattr(self.xp, "force_tab"):
+                        force_tab = self.xp.force_tab
+                    else:
+                        force_tab = False
 
                     tabulate_paired_10x_fastqs_rs(
                             file_path=file, 
@@ -175,7 +179,7 @@ class Pipeline:
                             modality=self.xp.modality,     
                             umi_len=self.xp.umi_len,      
                             do_rev_comp=self.xp.rev_comp,  
-                            force=True) # add to step interface
+                            force=force_tab) # add to step interface
             pass
 
         except Exception as e:
