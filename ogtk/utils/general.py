@@ -359,12 +359,13 @@ def tabulate_paired_10x_fastqs_rs(
     else:
         logger.info(f"found pre-computed {merged_fn=}. \nPass force=True to re-compute.")
     
-    logger.step('extracting features')
+    logger.info('extracting features')
 
     final_columns = set(['read_id', 'cbc', 'umi', 'cbc_qual', 'umi_qual', 'seq', 'seq_qual']) 
     renaming_dict = {'r2_seq':'seq', 'r2_qual':'seq_qual'}
-
-    df = (
+    
+    logger.info(f"scanning {merged_fn}")
+    lazy_df = (
         pl.scan_parquet(merged_fn)
         .with_columns(
             cbc=pl.col('r1_seq').str.slice(0, cbc_len), 
@@ -373,21 +374,21 @@ def tabulate_paired_10x_fastqs_rs(
             umi_qual=pl.col('r1_qual').str.slice(cbc_len, cbc_len+umi_len)
         )
         .rename(renaming_dict)
-        .collect()
+        .drop('r1_seq', 'r1_qual')
     )
     
     if modality == 'single-molecule':
-        df = df.drop('cbc', 'cbc_qual')
+        lazy_df = lazy_df.drop(['cbc', 'cbc_qual'])
         final_columns.remove("cbc")
         final_columns.remove("cbc_qual")
-
-    df = (
-            df.drop('r1_seq', 'r1_qual')
-            .select(final_columns)
-            .write_parquet(out_fn) 
-         )
-
-    df = None
+    
+    (
+        lazy_df
+        .select(final_columns)
+        .collect(streaming=True)
+        .write_parquet(out_fn)
+    )
+    
 
 
 def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False, rev_comp_r2=False, export_parquet = False, outdir: str|None=None):
