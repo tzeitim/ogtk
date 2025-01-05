@@ -365,6 +365,7 @@ def tabulate_paired_10x_fastqs_rs(
     renaming_dict = {'r2_seq':'seq', 'r2_qual':'seq_qual'}
     
     logger.info(f"scanning {merged_fn}")
+
     lazy_df = (
         pl.scan_parquet(merged_fn)
         .with_columns(
@@ -382,13 +383,14 @@ def tabulate_paired_10x_fastqs_rs(
         final_columns.remove("cbc")
         final_columns.remove("cbc_qual")
     
-    logger.debug(lazy_df.explain(streaming=True))
+    logger.info(lazy_df.explain(streaming=True))
 
     (
         lazy_df
         .select(final_columns)
-        .collect(streaming=True)
-        .write_parquet(out_fn)
+        .sink_parquet(out_fn)
+        #.collect(streaming=True)
+        #.write_parquet(out_fn)
     )
     
 
