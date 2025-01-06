@@ -239,31 +239,32 @@ class Pipeline:
                 if param not in vars(self.xp):
                     raise ValueError(f"Missing required parameter: {param}")
             in_file = f"{self.xp.sample_wd}/parsed_reads.parquet" #pyright:ignore
-            out_file = f"{self.xp.sample_wd}/contigs.parquet" #pyright:ignore
-            self.logger.info(f"exporting assembled contigs to {out_file}")
 
             if not hasattr(self.xp, 'fracture'):
                 setattr(self.xp, 'fracture', {})
                 self.xp.fracture['start_min_coverage'] = 25
                 self.xp.fracture['start_k'] = 17
                 self.xp.fracture['min_reads'] = 100 
-                self.xp.fracture['prioritize_length'] = False
 
             if not self.xp.dry:
                 self.logger.info(f'Reading {in_file}')
-                chi = (
-                    pl.read_parquet(in_file)
-                    .pp.assembly_with_opt( #pyright: ignore
-                        start_k=self.xp.fracture['start_k'], 
-                        start_min_coverage=self.xp.fracture['start_min_coverage'],
-                        min_reads=self.xp.fracture['min_reads'], 
-                        prioritize_length=self.xp.fracture['prioritize_length'],
-                        )
-                    .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
-                )
-                chi.write_parquet(out_file)
+                for priority in [True, False]:
+                    out_file = f"{self.xp.sample_wd}/contigs_pl_{priority}.parquet" #pyright:ignore
+                    self.logger.info(f"exporting assembled contigs to {out_file}")
+                    
+                    chi = (
+                        pl.read_parquet(in_file)
+                        .pp.assembly_with_opt( #pyright: ignore
+                            start_k=self.xp.fracture['start_k'], 
+                            start_min_coverage=self.xp.fracture['start_min_coverage'],
+                            min_reads=self.xp.fracture['min_reads'], 
+                            prioritize_length=priority,
+                            )
+                        .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
+                    )
+                    chi.write_parquet(out_file)
 
-                self.logger.critical(f"{(chi.get_column('length')==0).mean():.2%} failed")
+                    self.logger.critical(f"{(chi.get_column('length')==0).mean():.2%} failed")
                 
                 return StepResults(
                         results={'xp': self.xp,
