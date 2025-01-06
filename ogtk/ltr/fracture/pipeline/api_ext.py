@@ -77,13 +77,13 @@ class PlPipeline:
         )
 
     def assemble_umi(self,
-         target_umi,
-         k=15,
-         min_cov=20,
-         auto_k=True,
-         export_graphs=True,
-         only_largest=True,
-         intbc_5prime='GAGACTGCATGG'):
+                target_umi:str,
+                k=15,
+                min_cov=20,
+                auto_k=True,
+                export_graphs=True,
+                only_largest=True,
+                intbc_5prime='GAGACTGCATGG'):
         return(
                 self._df
                 .filter(pl.col('umi')==target_umi)
@@ -100,6 +100,39 @@ class PlPipeline:
                     ).alias('contig')
                   )
             )
+
+    def assemble_sweep_params_umi(self,
+                target_umi: str,
+                k_start: int = 5,  
+                k_end: int = 35,
+                k_step: int = 1,
+                cov_start: int = 1,
+                cov_end: int = 250, 
+                cov_step: int = 1,
+                export_graphs: bool = False,
+                intbc_5prime='GAGACTGCATGG',
+                prefix: str | None = None) -> pl.DataFrame:
+
+        return ( self._df
+                .filter(pl.col('umi')==target_umi)
+                
+                .with_columns(pl.col('r2_seq').str.replace(f'^.+?{intbc_5prime}', intbc_5prime))
+                 .group_by(['umi']).agg(
+                    rogtk.sweep_assembly_params(
+                        expr=pl.col("r2_seq"),
+                        k_start=k_start,
+                        k_end=k_end,
+                        k_step=k_step,
+                        cov_start=cov_start,
+                        cov_end=cov_end,
+                        cov_step=cov_step,
+                        export_graphs=export_graphs,
+                        prefix=f"{target_umi}_",
+                 ).alias("assembly_results")
+                )
+                .explode("assembly_results")
+                .unnest("assembly_results")
+        )
 
 @pl.api.register_lazyframe_namespace("pp")
 class PllPipeline:
