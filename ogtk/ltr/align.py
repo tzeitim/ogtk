@@ -1,6 +1,6 @@
 import polars as pl
 import pyseq_align
-from pyseq_align import NeedlemanWunsch#, SmithWaterman
+from pyseq_align import NeedlemanWunsch, SmithWaterman
 from functools import lru_cache
 import ngs_tools
 
@@ -13,6 +13,19 @@ def lambda_needlemanw(seq, foc_ref, aligner):
     ''' 
     '''
     alignment = aligner.align(foc_ref, seq)
+
+    return {
+        'cigar_str': ngs_tools.sequence.alignment_to_cigar(alignment.result_a, alignment.result_b),
+        'aligned_ref':  alignment.result_a,
+        'aligned_seq':  alignment.result_b,
+        'alignment_score':  alignment.score
+        }
+
+@lru_cache
+def lambda_smithwaterman(seq, foc_ref, aligner):
+    ''' 
+    '''
+    alignment = aligner.align(foc_ref, seq, 0)[0]
 
     return {
         'cigar_str': ngs_tools.sequence.alignment_to_cigar(alignment.result_a, alignment.result_b),
@@ -106,12 +119,14 @@ def return_aligned_alleles(
     query = df.select(seq_trim_field).unique()
 
     # perform the alignment
+    alignment_udf = lambda_needlemanw if isinstance(aligner, NeedlemanWunsch) else lambda_smithwaterman
+
     query =(
             query
             .with_columns(
                 alignment= pl.col(seq_trim_field)
                    .map_elements(
-                       lambda x: lambda_needlemanw(x, ref_str, aligner), 
+                       lambda x: alignment_udf(x, ref_str, aligner), 
                                 return_dtype=pl.Struct(alignment_schema)
                     )
             )
