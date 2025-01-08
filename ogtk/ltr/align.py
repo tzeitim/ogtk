@@ -18,20 +18,24 @@ def lambda_needlemanw(seq, foc_ref, aligner):
         'cigar_str': ngs_tools.sequence.alignment_to_cigar(alignment.result_a, alignment.result_b),
         'aligned_ref':  alignment.result_a,
         'aligned_seq':  alignment.result_b,
-        'alignment_score':  alignment.score
+        'alignment_score':  alignment.score,
+        'start_ref': alignment.pos_a,
+        'start_seq': alignment.pos_b,
         }
 
 @lru_cache
 def lambda_smithwaterman(seq, foc_ref, aligner):
     ''' 
     '''
-    alignment = aligner.align(foc_ref, seq, 0)[0]
+    alignment = aligner.align(foc_ref, seq, 1)[0]
 
     return {
         'cigar_str': ngs_tools.sequence.alignment_to_cigar(alignment.result_a, alignment.result_b),
         'aligned_ref':  alignment.result_a,
         'aligned_seq':  alignment.result_b,
-        'alignment_score':  alignment.score
+        'alignment_score':  alignment.score,
+        'start_ref': alignment.pos_a,
+        'start_seq': alignment.pos_b,
         }
 
 def default_aligner():
@@ -91,6 +95,8 @@ def return_aligned_alleles(
            'aligned_ref': pl.Utf8, 
            'aligned_seq': pl.Utf8, 
            'alignment_score': pl.Int64,
+           'start_ref': pl.Int64,
+           'start_seq': pl.Int64,
            }
     
     merged_schema = query_schema.copy()
@@ -139,6 +145,8 @@ def return_aligned_alleles(
                 aligned_ref=pl.col('alignment').struct.field('aligned_ref'), 
                 aligned_seq=pl.col('alignment').struct.field('aligned_seq'), 
                 alignment_score=pl.col('alignment').struct.field('alignment_score'), 
+                start_ref=pl.col('alignment').struct.field('start_ref'),
+                start_seq=pl.col('alignment').struct.field('start_seq'),
             )
             .drop('alignment')
         )
