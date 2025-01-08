@@ -155,3 +155,30 @@ def return_aligned_alleles(
     alignment = alignment.select(list(merged_schema.keys()))
     return alignment
 
+def compute_coverage(df, ref_str):
+    dfa = return_aligned_alleles(df, ref_str=ref_str, seq_trim_field='r2_seq', aligner=SmithWaterman())
+
+    result = (dfa
+        .with_columns(
+            pl.struct(['start_ref', 'r2_seq'])
+            .map_elements(lambda x: list(range(x['start_ref'], x['start_ref'] + len(x['r2_seq']))), return_dtype=pl.List(pl.Int64))
+            .alias('covered_positions')
+        )
+        .explode('covered_positions')
+        .group_by('covered_positions')
+        .len()
+        .sort('covered_positions')
+    )
+
+    # add missing positions with zero counts by lending a 1
+    dummy_positions = pl.DataFrame([(i, 1) for i in range(0, result['covered_positions'].max()+1)], orient='row', schema=result.schema)
+
+    result = (
+        pl.concat( [result, dummy_positions])
+        .with_columns(pl.col('len'))
+        .group_by('covered_positions')
+        .agg(pl.col('len').sum()-1) # we get back the 1 we lend
+        .sort('covered_positions')
+        .rename({'len':'coverage'})
+     )
+    return result
