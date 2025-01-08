@@ -114,6 +114,7 @@ def return_aligned_alleles(
     foc_int = df[intbc_field][0]
 
     if df.shape[0]<min_group_size:
+        logger.debug(f"No entries found in group/data frame ")
         return pl.DataFrame(schema=merged_schema)
 
     ### delete?
@@ -122,6 +123,7 @@ def return_aligned_alleles(
         return pl.DataFrame(schema=merged_schema)
 
 
+    # TODO: make this optional
     query = df.select(seq_trim_field).unique()
 
     # perform the alignment
@@ -155,13 +157,13 @@ def return_aligned_alleles(
     alignment = alignment.select(list(merged_schema.keys()))
     return alignment
 
-def compute_coverage(df, ref_str):
-    dfa = return_aligned_alleles(df, ref_str=ref_str, seq_trim_field='r2_seq', aligner=SmithWaterman())
+def compute_coverage(df, ref_str, seq_field='r2_seq', max_range:int|None=None)-> pl.DataFrame:
+    dfa = return_aligned_alleles(df, ref_str=ref_str, seq_trim_field=seq_field, aligner=SmithWaterman())
 
     result = (dfa
         .with_columns(
-            pl.struct(['start_ref', 'r2_seq'])
-            .map_elements(lambda x: list(range(x['start_ref'], x['start_ref'] + len(x['r2_seq']))), return_dtype=pl.List(pl.Int64))
+            pl.struct(['start_ref', seq_field])
+            .map_elements(lambda x: list(range(x['start_ref'], x['start_ref'] + len(x[seq_field]))), return_dtype=pl.List(pl.Int64))
             .alias('covered_positions')
         )
         .explode('covered_positions')
@@ -171,7 +173,10 @@ def compute_coverage(df, ref_str):
     )
 
     # add missing positions with zero counts by lending a 1
-    dummy_positions = pl.DataFrame([(i, 1) for i in range(0, result['covered_positions'].max()+1)], orient='row', schema=result.schema)
+    if max_range is None:
+        max_range = result['covered_positions'].max()
+
+    dummy_positions = pl.DataFrame([(i, 1) for i in range(0, max_range+1)], orient='row', schema=result.schema)
 
     result = (
         pl.concat( [result, dummy_positions])
