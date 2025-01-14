@@ -80,18 +80,24 @@ class PlPipeline:
                 target_umi:str,
                 k=15,
                 min_cov=20,
+                method: str =  "shortest_path",
                 auto_k=True,
                 export_graphs=True,
                 only_largest=True,
-                intbc_5prime='GAGACTGCATGG'):
+                start_anchor='GAGACTGCATGG',
+                end_anchor='TTTAGTGAGGGT'):
         return(
                 self._df
                 .filter(pl.col('umi')==target_umi)
-                .with_columns(pl.col('r2_seq').str.replace(f'^.+?{intbc_5prime}', intbc_5prime))
+                .with_columns(pl.col('r2_seq').str.replace(f'^.*?{start_anchor}', start_anchor))
+                .with_columns(pl.col('r2_seq').str.replace(f'{end_anchor}.*$', end_anchor))
                  .group_by(['umi']).agg(
                      rogtk.assemble_sequences( #pyright: ignore
                         expr=pl.col("r2_seq"),
                         k=k,
+                        method=method,
+                        start_anchor=start_anchor,
+                        end_anchor=end_anchor,
                         min_coverage=min_cov,
                         auto_k=auto_k,
                         only_largest=only_largest,
