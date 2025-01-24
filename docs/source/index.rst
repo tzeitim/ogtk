@@ -6,7 +6,7 @@ Features
 --------
 - single-molecule routines
 - lineage-tracing modules
-- De Bruijn graph assembly via rogtk
+- De Bruijn graph assembly (via rogtk)
 - FASTQ processing 
 
 
