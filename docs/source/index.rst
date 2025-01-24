@@ -1,20 +1,14 @@
-Welcome to rogtk's documentation
+Welcome to ogtk's documentation
 ===============================
 
-rogtk is a high-performance sequence assembly tool combining Python and Rust.
 
 Features
 --------
-- De Bruijn graph assembly
-- FASTQ processing
-- Interactive visualization
+- single-molecule routines
+- lineage-tracing modules
+- De Bruijn graph assembly via rogtk
+- FASTQ processing 
 
-
-.. note::
-
-   This project is written as a stand-alone set of functionalities and it is
-   currently mainly used by the `ogtk python package
-   <https://github.com/tzeitim/ogtk>`
 
 .. toctree::
    :maxdepth: 2
