@@ -4,5 +4,4 @@ polars>=0.20.0
 maturin>=1.4.0
 rogtk
 anndata
-
-
+metacells
