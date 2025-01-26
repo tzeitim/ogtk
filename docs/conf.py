@@ -31,7 +31,4 @@ html_logo = "honeyomics4.jpg"
 autosummary_generate = True
 
 from sphinx_pyproject import SphinxConfig
-
 config = SphinxConfig("../pyproject.toml", globalns=globals())
-
-
