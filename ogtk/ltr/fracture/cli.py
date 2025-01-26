@@ -70,35 +70,54 @@ def parse_args():
     return parser.parse_args()
 
 def main():
-    '''
-    # Process all samples with all steps
-    python pipeline.py --config config.yml --all-all
+    """Run the Fracture pipeline with command line arguments.
 
-    # Process for the specified steps all samples in the configuration
-    python pipeline.py --config config.yml --all-samples
+    This function serves as the main entry point for the Fracture pipeline,
+    processing command line arguments and executing the appropriate pipeline steps.
 
-    # Process specific target sample
-    python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3"
+    Examples
+    --------
+    Process all samples with all steps::
 
-    # Combine with other arguments
-    python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3" --steps parquet preprocess
+        $ python pipeline.py --config config.yml --all-all
 
-    # Generate test data for specific sample
-    python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3" --make-test
+    Process specified steps for all samples::
 
-    # Clean and process specific sample
-    python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3" --clean
+        $ python pipeline.py --config config.yml --all-samples
 
-	# Regenerate plots for all steps
-	python pipeline.py --config config.yml --regenerate-plots
+    Process specific target sample::
 
-	# Regenerate plots for specific steps
-	python pipeline.py --config config.yml --regenerate-plots preprocess fracture
+        $ python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3"
 
-	# Regenerate plots for a specific sample
-	python pipeline.py --config config.yml --target-sample "sample_id" --regenerate-plots
-    '''
+    Combine with other arguments::
 
+        $ python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3" --steps parquet preprocess
+
+    Generate test data for specific sample::
+
+        $ python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3" --make-test
+
+    Clean and process specific sample::
+
+        $ python pipeline.py --config config.yml --target-sample "sb_rna_fracture_S3" --clean
+
+    Regenerate plots for all steps::
+
+        $ python pipeline.py --config config.yml --regenerate-plots
+
+    Regenerate plots for specific steps::
+
+        $ python pipeline.py --config config.yml --regenerate-plots preprocess fracture
+
+    Regenerate plots for a specific sample::
+
+        $ python pipeline.py --config config.yml --target-sample "sample_id" --regenerate-plots
+
+    Returns
+    -------
+    int
+        0 for successful execution, 1 for failure
+    """
     # Parse arguments
     args = parse_args()
     
