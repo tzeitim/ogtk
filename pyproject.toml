@@ -94,3 +94,5 @@ doc=[
 ]
 
 
+[tool.sphinx-pyproject]
+config-overrides = true
