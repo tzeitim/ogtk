@@ -47,17 +47,13 @@ dependencies=[
     'tables'
 ] 
 
-dependencies = [
-    'bgzip; sys_platform == "darwin"',
-    'bgzip; sys_platform != "darwin"'
+# Platform-specific core dependencies
+dependencies-macos=[
+    'bgzip; sys_platform == "darwin"',  # Will be installed after manual LLVM setup
 ]
-# # Platform-specific core dependencies
-# dependencies-macos=[
-#     'bgzip; sys_platform == "darwin"',  # Will be installed after manual LLVM setup
-# ]
-# dependencies-other=[
-#     'bgzip; sys_platform != "darwin"',  # Direct install on non-macOS platforms
-# ]
+dependencies-other=[
+    'bgzip; sys_platform != "darwin"',  # Direct install on non-macOS platforms
+]
 
 classifiers=[
   "Programming Language :: Rust",
@@ -81,7 +77,7 @@ doc=[
  "docutils>=0.8,!=0.18.*,!=0.19.*",
   "sphinx>=4",
   "sphinx-book-theme>=1.0.0",
-  "sphinx-book-theme"
+  "sphinx-book-theme",
   "sphinxcontrib-bibtex>=1.0.0",
   "sphinx-autodoc-typehints",
   "sphinxext-opengraph",
