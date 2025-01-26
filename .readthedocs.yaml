@@ -7,7 +7,7 @@ build:
     rust: "1.82"
 
 sphinx:
-  configuration: docs/source/conf.py
+  configuration: docs/conf.py
 
 python:
   install:
