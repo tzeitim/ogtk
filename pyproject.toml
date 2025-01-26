@@ -36,7 +36,6 @@ dependencies=[
     'pyfaidx', 
     'pyfasta', 
     'fastparquet',
-    'numpy>=1.21.0,<2.0.0',
     'regex', 
     'rich',
     'scipy',
@@ -48,13 +47,17 @@ dependencies=[
     'tables'
 ] 
 
-# Platform-specific core dependencies
-dependencies-macos=[
-    'bgzip; sys_platform == "darwin"',  # Will be installed after manual LLVM setup
+dependencies = [
+    'bgzip; sys_platform == "darwin"',
+    'bgzip; sys_platform != "darwin"'
 ]
-dependencies-other=[
-    'bgzip; sys_platform != "darwin"',  # Direct install on non-macOS platforms
-]
+# # Platform-specific core dependencies
+# dependencies-macos=[
+#     'bgzip; sys_platform == "darwin"',  # Will be installed after manual LLVM setup
+# ]
+# dependencies-other=[
+#     'bgzip; sys_platform != "darwin"',  # Direct install on non-macOS platforms
+# ]
 
 classifiers=[
   "Programming Language :: Rust",
@@ -67,12 +70,13 @@ sc=[
         'metacells',
         'scanpy',
 ]
+
 rs=[
     'rogtk',
     'maturin', 
     'patchelf; sys_platform != "darwin"',  # Install patchelf only on non-macOS systems
-
 ]
+
 doc=[
  "docutils>=0.8,!=0.18.*,!=0.19.*",
   "sphinx>=4",
@@ -86,8 +90,7 @@ doc=[
   "myst-nb",
   "myst-parser",
   "sphinx-autobuild",
-  # theme
-  "furo",
+  "furo", #theme
   "ipykernel",
   "ipython",
   "pandas",
