@@ -83,6 +83,7 @@ doc=[
   "sphinxext-opengraph",
   "sphinx-copybutton",
   "sphinx-pyproject",
+  "sphinxarg.ext",
   "myst-nb",
   "myst-parser",
   "sphinx-autobuild",
