@@ -2,14 +2,35 @@ import polars as pl
 import rogtk
 
 
+__all__ = [
+        'PlDNA',
+        'PlPipeline'
+]
+
 @pl.api.register_dataframe_namespace("dna")
 class PlDNA:
+    """Provides DNA sequence manipulation methods for Polars DataFrames.
+
+    Methods are registered under the 'dna' namespace and can be accessed via df.dna.*
+    """
     def __init__(self, df: pl.DataFrame) -> None:
         self._df = df
 
     def to_fasta(self,
          read_id_col: str,
          read_col: str) -> pl.DataFrame:
+        """Converts reads to FASTA format.
+
+        Generates FASTA formatted strings by combining read IDs and sequences.
+
+        Args:
+            read_id_col (str): Column containing read identifiers
+            read_col (str): Column containing DNA sequences
+
+        Returns:
+            pl.DataFrame: DataFrame with new column '{read_col}_fasta' containing FASTA formatted strings
+        """
+
         return  self._df.with_columns(
                 (">"+pl.col(read_id_col)\
                  +"\n"+pl.col(read_col)
@@ -20,6 +41,18 @@ class PlDNA:
          read_id_col: str,
          read_qual_col: str|None,
          read_col: str)-> pl.DataFrame:
+        """Converts reads to FASTQ format.
+
+        Generates FASTQ formatted strings by combining read IDs, sequences, and quality scores.
+
+        Args:
+            read_id_col (str): Column containing read identifiers
+            read_qual_col (str|None): Column containing quality scores. If None, generates fake scores
+            read_col (str): Column containing DNA sequences
+
+        Returns:
+            pl.DataFrame: DataFrame with new column '{read_col}_fastq' containing FASTQ formatted strings
+        """
 
         if read_qual_col is None:
             read_qual_col = 'fake_qual'
@@ -49,6 +82,10 @@ class PlDNA:
 
 @pl.api.register_dataframe_namespace("pp")
 class PlPipeline:
+    """Provides sequence assembly and optimization methods for Polars DataFrames.
+
+    Methods are registered under the 'pp' namespace and can be accessed via df.pp.*
+    """
     def __init__(self, df: pl.DataFrame) -> None:
         self._df = df
    
@@ -63,20 +100,22 @@ class PlPipeline:
                          prioritize_length: bool = False,
                          min_reads: int = 100) -> pl.DataFrame:
         """Optimize assembly parameters for sequences with given anchors.
-        
+
+        Performs De Bruijn graph assembly with parameter optimization.
+
         Args:
-            start_k: Initial k-mer size for graph construction
-            start_min_coverage: Initial minimum k-mer coverage threshold
-            method: Assembly method ('compression' or 'shortest_path')
-            start_anchor: Start sequence anchor for shortest_path method
-            end_anchor: End sequence anchor for shortest_path method
-            min_length: Minimum contig length to return
-            export_graphs: Whether to export graph visualization files
-            prioritize_length: Optimize for length over anchor presence
-            min_reads: Minimum number of reads to attempt assembly
-            
+            start_k (int): Initial k-mer size for graph construction
+            start_min_coverage (int): Initial minimum k-mer coverage threshold
+            method (str): Assembly method ('compression' or 'shortest_path')
+            start_anchor (str|None): Start sequence anchor for shortest_path method
+            end_anchor (str|None): End sequence anchor for shortest_path method 
+            min_length (int|None): Minimum contig length to return
+            export_graphs (bool): Whether to export graph visualization files
+            prioritize_length (bool): Optimize for length over anchor presence
+            min_reads (int): Minimum number of reads to attempt assembly
+
         Returns:
-            DataFrame with assembly results including contig sequences and parameters
+            pl.DataFrame: DataFrame with assembly results including contig sequences and parameters
         """
         return (
             self._df
@@ -111,23 +150,26 @@ class PlPipeline:
                     only_largest: bool = True,
                     prefix: str | None = None) -> pl.DataFrame:
         """Assemble sequences for a specific UMI using de Bruijn graphs.
-        
+
+        Performs targeted assembly of reads sharing a UMI.
+
         Args:
-            target_umi: UMI sequence to assemble
-            k: K-mer size for graph construction (used if auto_k=False)
-            min_coverage: Minimum k-mer coverage threshold
-            method: Assembly method ('compression' or 'shortest_path')
-            start_anchor: Start sequence anchor for shortest_path method
-            end_anchor: End sequence anchor for shortest_path method
-            min_length: Minimum contig length to return
-            auto_k: Automatically estimate optimal k-mer size
-            export_graphs: Whether to export graph visualization files
-            only_largest: Return only the largest contig
-            prefix: Prefix for output files
-            
+            target_umi (str): UMI sequence to assemble
+            k (int): K-mer size for graph construction (used if auto_k=False)
+            min_coverage (int): Minimum k-mer coverage threshold
+            method (str): Assembly method ('compression' or 'shortest_path')
+            start_anchor (str|None): Start sequence anchor for shortest_path method
+            end_anchor (str|None): End sequence anchor for shortest_path method
+            min_length (int|None): Minimum contig length to return
+            auto_k (bool): Automatically estimate optimal k-mer size
+            export_graphs (bool): Whether to export graph visualization files
+            only_largest (bool): Return only the largest contig
+            prefix (str|None): Prefix for output files
+
         Returns:
-            DataFrame with assembly results per UMI
+            pl.DataFrame: DataFrame with assembly results per UMI
         """
+
         return (
             self._df
             .filter(pl.col('umi')==target_umi)
@@ -165,26 +207,29 @@ class PlPipeline:
                              export_graphs: bool = False,
                              auto_k: bool = False,
                              prefix: str | None = None) -> pl.DataFrame:
+
         """Run sequence assembly across ranges of k-mer size and coverage parameters.
-        
+
+        Performs parameter sweep to identify optimal assembly settings.
+
         Args:
-            target_umi: UMI sequence to assemble
-            k_start: Starting k-mer size
-            k_end: Ending k-mer size
-            k_step: Step size for k-mer iteration
-            cov_start: Starting minimum coverage
-            cov_end: Ending minimum coverage  
-            cov_step: Step size for coverage iteration
-            method: Assembly method ('compression' or 'shortest_path')
-            start_anchor: Start sequence anchor for shortest_path method
-            end_anchor: End sequence anchor for shortest_path method
-            min_length: Minimum contig length to return
-            export_graphs: Whether to export graph visualization files
-            auto_k: Automatically estimate optimal k-mer size
-            prefix: Prefix for output files
-            
+            target_umi (str): UMI sequence to assemble
+            k_start (int): Starting k-mer size
+            k_end (int): Ending k-mer size
+            k_step (int): Step size for k-mer iteration
+            cov_start (int): Starting minimum coverage
+            cov_end (int): Ending minimum coverage
+            cov_step (int): Step size for coverage iteration
+            method (str): Assembly method ('compression' or 'shortest_path')
+            start_anchor (str|None): Start sequence anchor for shortest_path method
+            end_anchor (str|None): End sequence anchor for shortest_path method
+            min_length (int|None): Minimum contig length to return
+            export_graphs (bool): Whether to export graph visualization files
+            auto_k (bool): Automatically estimate optimal k-mer size
+            prefix (str|None): Prefix for output files
+
         Returns:
-            DataFrame with assembly results for each parameter combination
+            pl.DataFrame: DataFrame with assembly results for each parameter combination
         """
         return (
             self._df
