@@ -3,9 +3,9 @@ copyright = '2025, Pedro Olivares'
 author = 'Pedro Olivares'
 
 extensions = [
-        # moving away from mk for docs
-        # https://www.ericholscher.com/blog/2016/mar/15/dont-use-markdown-for-technical-docs/
-        #'myst_parser',
+    # moving away from mk for docs
+    # https://www.ericholscher.com/blog/2016/mar/15/dont-use-markdown-for-technical-docs/
+    #'myst_parser',
     'sphinx.ext.duration',
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
@@ -17,6 +17,7 @@ source_suffix = {
     '.rst': 'restructuredtext',
     #'.md': 'markdown',
         }
+
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
