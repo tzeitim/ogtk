@@ -56,22 +56,22 @@ def sitedb_generate_miniref(sitedb_yaml):
 
 
 def extract_reads(sitedb_yaml, use_unmapped = True, FORCE = False, with_chr = True):
-    ''' 
-    expects a sitedb yaml file
-       provides a hits reference in FASTA format fo be computed before
-       requires yaml file with reference to xp.wordir
-        xp.name
+    '''
+    Expects a sitedb yaml file that provides hits reference in FASTA format.
+ 
+    Required YAML fields:
+        xp.workdir
+        xp.name 
         xp.tenex_bam
         xp.all_hit_bam
         ref.mini_ref
  
     Steps:
-        1 - get unmapped reads into a fastq file that retains the CR and UR tags (umapped)
-        2 - extract the reads around the genes of interest into a fastq file retaining the CR and UR tags (hits)
-        3 - concatenate hits and umapped
-        4 - map using minimap2
-        5 - profit
-
+        1. Get unmapped reads into fastq file retaining CR/UR tags
+        2. Extract reads around genes of interest into fastq with CR/UR tags 
+        3. Concatenate hits and unmapped
+        4. Map using minimap2
+        5. Profit
     '''
     import os
     import time
@@ -241,13 +241,16 @@ def generate_correction_dictionaries(sitedb_yaml, FORCE = False, verbose = False
 
 def call_alleles(sitedb_yaml, correction_dictionaries, window = 120/2, n_reads = None):
     '''
-    ifn_bam = output from minimap of a concatenated set of reads of hits on targets and unmapped reads. Reads are expected to include the CR and UR tags from the 10x bam 
-    e.g. 
-        @NS500648:472:HF7WWAFX2:1:11102:17555:11614_CR:Z:AAAAAAAAAAAACAAT_UR:Z:AAAAAAAAAAAA
-
-    n_reads = number of reads to consume from the bam; None means all.
-
-    real call:
+    ifn_bam = output from minimap of a concatenated set of reads of hits on targets 
+    and unmapped reads. Reads are expected to include the CR and UR tags from the 
+    10x bam, e.g.:
+    
+    @NS500648:472:HF7WWAFX2:1:11102:17555:11614_CR:Z:AAAAAAAAAAAACAAT_UR:Z:AAAAAAAAAAAA
+    
+    Parameters:
+        n_reads: number of reads to consume from the bam; None means all.
+    
+    Real call example:
     _call_alleles(ifn_bam, ofn, loci, correction_dictionaries)
     '''
     import pyaml
