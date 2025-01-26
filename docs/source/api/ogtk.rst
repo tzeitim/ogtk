@@ -85,14 +85,6 @@ ogtk.split\_fastq module
    :undoc-members:
    :show-inheritance:
 
-ogtk.tt module
---------------
-
-.. automodule:: ogtk.tt
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 Module contents
 ---------------
 
