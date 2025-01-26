@@ -78,12 +78,16 @@ doc=[
   "sphinx>=4",
   "sphinx-book-theme>=1.0.0",
   "myst-nb",
+  "myst-parser",
+  "sphinx-autobuild",
+  "furo",
+  "sphinx-book-theme"
   "sphinxcontrib-bibtex>=1.0.0",
   "sphinx-autodoc-typehints",
   "sphinxext-opengraph",
+  "sphinx-copybutton",
   "ipykernel",
   "ipython",
-  "sphinx-copybutton",
   "pandas",
 ]
 
