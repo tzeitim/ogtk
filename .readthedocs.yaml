@@ -19,3 +19,10 @@ python:
 formats:
   - pdf
 
+build:
+  branches:
+    only:
+      - main
+  tags:
+    only:
+      - "v*.*.*"  
