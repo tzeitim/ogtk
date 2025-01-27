@@ -1,10 +1,14 @@
 import argparse
 from ogtk.utils.log import Rlogger
 
-from pipeline.core import PipelineStep, Pipeline
-from pipeline.types import FractureXp
-from pipeline.plot_gen import PlotRegenerator
+from .pipeline.core import PipelineStep, Pipeline
+from .pipeline.types import FractureXp
+from .pipeline.plot_gen import PlotRegenerator
 
+__all__ = [
+        'main',
+        'parse_args',
+]
 
 def parse_args():
     """Parse command line arguments"""
@@ -26,7 +30,7 @@ def parse_args():
         )
 
     parser.add_argument(
-        "--log-level", 
+        "--log-level",
         default="INFO",
         choices=["CRITICAL", "INFO", "IO", "STEP", "DEBUG"],
         help="Logging level"
@@ -60,14 +64,14 @@ def parse_args():
         action="store_true",
         help="Run specified steps (conf file or argument) for all samples in the configuration"
     )
-	
+
     parser.add_argument(
 		"--regenerate-plots",
 		nargs="*",
 		help="Regenerate plots for specified steps (or all if no steps provided)"
 	)
 
-    return parser.parse_args()
+    return parser
 
 def main():
     """Run the Fracture pipeline with command line arguments.
@@ -119,12 +123,12 @@ def main():
         0 for successful execution, 1 for failure
     """
     # Parse arguments
-    args = parse_args()
-    
+    args = parse_args().parse_args()
+
     # Initialize logger
     logger = Rlogger().get_logger()
     Rlogger().set_level(args.log_level)
-    
+
     try:
         # Initialize Xp configuration
         xp = FractureXp(conf_fn=args.config)
@@ -143,23 +147,23 @@ def main():
             # Set steps to include all available steps
             xp.steps = [step.name.lower() for step in PipelineStep]
             success = True
-            
+
             # Process each sample
             for sample in xp.samples:
                 logger.info(f"\nProcessing sample: {sample['id']}")
                 xp.target_sample = sample['id']
                 xp.consolidate_conf(update=True)
                 pipeline = Pipeline(xp)
-                
+
                 # Handle cleaning if requested
                 if args.clean:
                     pipeline.clean_all()
                 elif args.clean_test:
                     pipeline.clean_test_outputs()
-                
+
                 sample_success = pipeline.run()
                 success = success and sample_success
-            
+
             return 0 if success else 1
 
         # Handle --all-samples flag
@@ -168,25 +172,25 @@ def main():
             # Use steps from command line if provided, otherwise use config
             if args.steps:
                 xp.steps = args.steps
-            
+
             success = True
-            
+
             # Process each sample
             for sample in xp.samples:
                 logger.info(f"\nProcessing sample: {sample['id']}")
                 xp.target_sample = sample['id']
                 xp.consolidate_conf(update=True)
                 pipeline = Pipeline(xp)
-                
+
                 # Handle cleaning if requested
                 if args.clean:
                     pipeline.clean_all()
                 elif args.clean_test:
                     pipeline.clean_test_outputs()
-                
+
                 sample_success = pipeline.run()
                 success = success and sample_success
-            
+
             return 0 if success else 1
 
         # Handle single sample processing
@@ -196,12 +200,12 @@ def main():
             sample_ids = [sample['id'] for sample in xp.samples]
             if args.target_sample not in sample_ids:
                 raise ValueError(f"Target sample '{args.target_sample}' not found in samples list: {sample_ids}")
-            
+
             xp.target_sample = args.target_sample
             xp.consolidate_conf(update=True)
 
         pipeline = Pipeline(xp)
-        
+
         # Handle cleaning if requested
         if args.clean:
             pipeline.clean_all()
@@ -219,9 +223,9 @@ def main():
             xp.steps = args.steps
 
         success = pipeline.run()
-        
+
         return 0 if success else 1
-        
+
     except Exception as e:
         logger.error(f"Pipeline execution failed: {str(e)}")
         return 1
