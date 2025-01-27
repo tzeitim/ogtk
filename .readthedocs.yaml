@@ -5,12 +5,13 @@ build:
   tools:
     python: "3.10"
     rust: "1.82"
-  branches:
-    only:
-      - main
-  tags:
-    only:
-      - "v*.*.*"  
+
+branches:
+  only:
+    - main
+tags:
+  only:
+    - "v*.*.*"  
 
 sphinx:
   configuration: docs/conf.py
