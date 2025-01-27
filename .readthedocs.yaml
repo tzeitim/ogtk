@@ -6,11 +6,6 @@ build:
     python: "3.10"
     rust: "1.82"
 
-branches:
-    - main
-tags:
-    - "v*.*.*"  
-
 sphinx:
   configuration: docs/conf.py
 
