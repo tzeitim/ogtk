@@ -1,6 +1,6 @@
 from pathlib import Path 
 from functools import wraps
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, NamedTuple, Dict, Set
 from enum import Enum
 import polars as pl
 
@@ -45,6 +45,109 @@ class PipelineStep(Enum):
             raise ValueError(f"Invalid step name: {step_name}. Valid steps are: {[s.name for s in cls]}")
 
 
+def log_invocation_params(logger: Any, step: PipelineStep, xp: Any, kwargs: Dict = None) -> None:
+    """
+    Log the invocation parameters for a pipeline step to both the logger and a file.
+    
+    Args:
+        logger: Logger instance to use for logging
+        step: The pipeline step being executed
+        xp: The experiment configuration object
+        kwargs: Additional parameters passed to the step function
+    """
+    from datetime import datetime
+    
+    # Helper function to recursively extract nested parameters
+    def extract_nested_params(obj, prefix=""):
+        params = {}
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                key = f"{prefix}.{k}" if prefix else k
+                if isinstance(v, (dict, list)):
+                    params.update(extract_nested_params(v, key))
+                else:
+                    params[key] = v
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                key = f"{prefix}[{i}]"
+                if isinstance(item, (dict, list)):
+                    params.update(extract_nested_params(item, key))
+                else:
+                    params[key] = item
+        return params
+    
+    # Log required parameters to logger
+    logger.info(f"=== {step.name} Parameters ===")
+    for param in step.value['required_params']:
+        if hasattr(xp, param):
+            param_value = getattr(xp, param)
+            logger.info(f"  {param}: {param_value}")
+    
+    # Log step-specific nested configurations
+    step_specific_configs = {
+        PipelineStep.FRACTURE: ['fracture'],
+        PipelineStep.PARQUET: ['force_tab'],
+        # Add other step-specific params as needed
+    }
+    
+    if step in step_specific_configs:
+        for config_attr in step_specific_configs[step]:
+            if hasattr(xp, config_attr):
+                config_value = getattr(xp, config_attr)
+                if isinstance(config_value, dict):
+                    logger.info(f"  {config_attr} configuration:")
+                    for k, v in config_value.items():
+                        logger.info(f"    {k}: {v}")
+                else:
+                    logger.info(f"  {config_attr}: {config_value}")
+    
+    # Log additional parameters from kwargs
+    if kwargs:
+        logger.info("  Additional parameters:")
+        for k, v in kwargs.items():
+            logger.info(f"    {k}: {v}")
+    
+    # Record parameters to a separate file for easy retrieval
+    step_log_dir = Path(f"{xp.pro_workdir}/{xp.target_sample}/logs")
+    param_file = step_log_dir / f"{step.name.lower()}_params.log"
+    
+    with open(param_file, 'w') as f:
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        f.write(f"=== {step.name} Parameters - {timestamp} ===\n")
+        
+        # Write required parameters
+        for param in step.value['required_params']:
+            if hasattr(xp, param):
+                param_value = getattr(xp, param)
+                f.write(f"{param}: {param_value}\n")
+        
+        # Write step-specific nested configurations
+        if step in step_specific_configs:
+            f.write(f"\n=== {step.name} Specific Configuration ===\n")
+            for config_attr in step_specific_configs[step]:
+                if hasattr(xp, config_attr):
+                    config_value = getattr(xp, config_attr)
+                    if isinstance(config_value, (dict, list)):
+                        nested_params = extract_nested_params(config_value, config_attr)
+                        for k, v in nested_params.items():
+                            f.write(f"{k}: {v}\n")
+                    else:
+                        f.write(f"{config_attr}: {config_value}\n")
+        
+        # Include other important configuration parameters
+        important_params = ['target_sample', 'pro_workdir', 'pro_datain']
+        f.write("\n=== Additional Configuration ===\n")
+        for param in important_params:
+            if hasattr(xp, param):
+                param_value = getattr(xp, param)
+                f.write(f"{param}: {param_value}\n")
+        
+        if kwargs:
+            f.write("\n=== Function Arguments ===\n")
+            for k, v in kwargs.items():
+                f.write(f"{k}: {v}\n")
+
+
 def pipeline_step(step: PipelineStep):
     def decorator(func: Callable) -> Callable:
         @wraps(func)
@@ -80,6 +183,11 @@ def pipeline_step(step: PipelineStep):
 
                 # Run the step
                 ppi.logger.info(f"Starting {step.name} step")
+                
+                # Log invocation parameters
+                log_invocation_params(ppi.logger, step, ppi.xp, kwargs)
+                
+                # Execute the step function
                 results = func(ppi, *args, **kwargs)
                 
                 if getattr(ppi.xp, 'do_plot', False):
