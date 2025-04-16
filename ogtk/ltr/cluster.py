@@ -43,7 +43,7 @@ class Exp():
     def _ls_pq(self):
         self.parquets = ut.sfind(self.input_dir, pattern = "*_R1_*.mols.parquet")
         return self.parquets
-        ifn = "/home/labs/nyosef/pedro/projects/wlt/workdir/20240515/caspp/05_mol_table.parquet"
+        ifn = "/home/projects/nyosef/pedro/projects/wlt/workdir/20240515/caspp/05_mol_table.parquet"
     
     def load_cas(self, ifn, min_clone_size=0.01, intbc_filter_expr=pl.col('intBC').str.len_chars()==14):
         print(f"Keeping only clones as little as {min_clone_size:.2%}")
