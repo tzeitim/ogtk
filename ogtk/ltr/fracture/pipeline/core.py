@@ -353,6 +353,7 @@ class Pipeline:
             in_file = f"{self.xp.sample_wd}/parsed_reads.parquet" #pyright:ignore
 
             if not hasattr(self.xp, 'fracture'):
+                self.logger.warning("using hardcoded arguments for assembly as no configuration was found.")
                 setattr(self.xp, 'fracture', {})
                 self.xp.fracture['start_min_coverage'] = 25
                 self.xp.fracture['start_k'] = 17
@@ -371,6 +372,9 @@ class Pipeline:
                             start_min_coverage=self.xp.fracture['start_min_coverage'],
                             min_reads=self.xp.fracture['min_reads'], 
                             prioritize_length=priority,
+                            method=self.xp.fracture['assembly_method'],
+                            start_anchor=self.xp.start_anchor,
+                            end_anchor=self.xp.end_anchor,
                             )
                         .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                     )

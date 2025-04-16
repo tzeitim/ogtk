@@ -1,6 +1,7 @@
 import polars as pl
 import rogtk
 
+from ogtk.utils.log import Rlogger, call
 
 __all__ = [
         'PlDNA',
@@ -89,6 +90,7 @@ class PlPipeline:
     def __init__(self, df: pl.DataFrame) -> None:
         self._df = df
    
+    @call
     def assembly_with_opt(self,
                          start_k: int = 25,
                          start_min_coverage: int = 17,

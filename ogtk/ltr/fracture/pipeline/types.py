@@ -21,6 +21,8 @@ class FractureXp(Xp):
     plotdb: PlotDB
     do_plot: bool    
     fracture: dict
+    start_anchor: str
+    end_anchor: str
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
