@@ -352,6 +352,9 @@ class Xp():
 
         for i in [i for i in vars(self) if i in self.special_vars]: 
             wd_dir = getattr(self, i)
+            if not wd_dir:
+                raise ValueError(f"Empty directory path for special variable '{i}'. Special variables must have non-empty values for directory creation.")
+                
             if not os.path.exists(wd_dir):
                 os.system(f"mkdir -p {wd_dir}")
                 logger.debug(f":construction:\t{wd_dir}", extra={"markup": True})
