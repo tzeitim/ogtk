@@ -1,9 +1,9 @@
 import argparse
 from ogtk.utils.log import Rlogger
 
-from .pipeline.core import PipelineStep, Pipeline
-from .pipeline.types import FractureXp
-from .pipeline.plot_gen import PlotRegenerator
+from ogtk.ltr.fracture.pipeline.core import PipelineStep, Pipeline
+from ogtk.ltr.fracture.pipeline.types import FractureXp
+from ogtk.ltr.fracture.pipeline.plot_gen import PlotRegenerator
 
 __all__ = [
         'main',
