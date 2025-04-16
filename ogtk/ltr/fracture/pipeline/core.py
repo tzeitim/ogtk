@@ -109,6 +109,8 @@ def log_invocation_params(logger: Any, step: PipelineStep, xp: Any, kwargs: Dict
     
     # Record parameters to a separate file for easy retrieval
     step_log_dir = Path(f"{xp.pro_workdir}/{xp.target_sample}/logs")
+    # Create logs directory if it doesn't exist
+    step_log_dir.mkdir(parents=True, exist_ok=True)
     param_file = step_log_dir / f"{step.name.lower()}_params.log"
     
     with open(param_file, 'w') as f:
@@ -159,6 +161,8 @@ def pipeline_step(step: PipelineStep):
             try:
                 # Set up step-specific logging
                 step_log_dir = Path(f"{ppi.xp.pro_workdir}/{ppi.xp.target_sample}/logs")
+                # Create logs directory if it doesn't exist
+                step_log_dir.mkdir(parents=True, exist_ok=True)
                 step_log_file = step_log_dir / f"{step.name.lower()}.log"
                 
                 # Enable step-specific file logging
