@@ -33,6 +33,7 @@ def compute_double_anchor(ifn, sample_n = 50, reps=10, start_anchor = "GAGACTGCA
 
     
 def compute_anchor_stats(ifn, sample_n = 50, reps=1, start_anchor = "GAGACTGCATGG", end_anchor="TTTAGTGAGGGT"):
+
     return [
         pl.scan_parquet(ifn)
         .filter(pl.col('ont'))
@@ -62,7 +63,7 @@ def generate_sample_sizes(max_sample_size, reps=1, log_scale=False, samples_rep=
     return np.hstack([ np.array(all_points, dtype=int) for _ in range(reps)])
 
 
-def compute_saturation_curve(ifn, name=None, max_sample_size=250_000, reps=3, kw_sizes={}, threshold=1):
+def compute_saturation_curve(ifn, name=None, max_sample_size=250_000, reps=3, kw_sizes={}, threshold=1, velocity=True):
     """
     ifn = "merged_reads.parquet"
 
@@ -86,7 +87,8 @@ def compute_saturation_curve(ifn, name=None, max_sample_size=250_000, reps=3, kw
     sizes = generate_sample_sizes(max_sample_size, reps, **kw_sizes)  
     
     offsets = [random.randint(0, dataset_size - max(sizes)) for _ in range(len(sizes))]
-    return pl.concat(
+    
+    df_saturation = pl.concat(
         [
             lazy_df.slice(offset, int(size))
              .with_columns(
@@ -103,7 +105,27 @@ def compute_saturation_curve(ifn, name=None, max_sample_size=250_000, reps=3, kw
                 max_reads_umi =pl.col('umi_cov').max(),
                 min_reads_umi =pl.col('umi_cov').min(),
             )
-            for i, (offset, size) in enumerate(zip(offsets, sizes))]
-    ).with_columns(name=pl.lit(name))
+         for i, (offset, size) in enumerate(zip(offsets, sizes))]
+        )
+        
+    df_saturation = (
+            df_saturation
+            .with_columns(name=pl.lit(name))
+            .sort('name', 'reads')
+            .group_by('reads', 'name', maintain_order=True)
+            .agg(pl.col('total_umis').mean())
+            )
 
+    if not velocity:
+        return df_saturation
+
+    else:
+        return (
+                df_saturation
+                .with_columns(
+                        (pl.col('total_umis').diff() / pl.col('reads').diff()).alias('velocity'))
+                .sort('name', 'reads')
+                .with_columns(pl.col('velocity').rolling_mean(min_samples=1, window_size=10).over('name'))
+                .sort('name', 'reads')
+        )
 
