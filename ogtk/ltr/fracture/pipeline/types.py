@@ -23,6 +23,7 @@ class FractureXp(Xp):
     fracture: dict
     start_anchor: str
     end_anchor: str
+    allow_wildcards: bool
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
