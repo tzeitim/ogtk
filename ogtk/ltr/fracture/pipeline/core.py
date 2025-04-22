@@ -270,32 +270,72 @@ class Pipeline:
                 if param not in vars(self.xp):
                     raise ValueError(f"Missing required parameter: {param}")
 
-            sample_to_file = self.xp.organize_files_by_sample(input_files, [{'id':self.xp.target_sample}], max_files=1)
+            max_files = self.xp.allow_wildcards if hasattr(self.xp, "allow_wildcards") else 1  
+            sample_to_file = self.xp.organize_files_by_sample(
+                                input_files, 
+                                [{'id':self.xp.target_sample}], 
+                                max_files=max_files
+                            )
             
             # TODO cache
             if not self.xp.dry:
-                for sample_id, file in sample_to_file.items():
-                    file = file[0]
+                for sample_id, files in sample_to_file.items():
                     sample_dir = f'{self.xp.pro_workdir}/{sample_id}' 
                     Path(sample_dir).mkdir(parents=True, exist_ok=True)
-                    if hasattr(self.xp, "force_tab"):
-                        force_tab = self.xp.force_tab
+                    force_tab = getattr(self.xp, "force_tab", False)
+                    out_fn=f'{sample_dir}/parsed_reads.parquet'
+                    merged_fn = f'{sample_dir}/merged_reads.parquet'
+                    
+                    # Check if multiple files should be processed
+                    if len(files) > 1 and max_files > 1:
+                        self.logger.info(f"Processing {len(files)} input files for sample {sample_id}")
+                        temp_parsed_files = []
+                        temp_merged_files = []
+                        
+                        for i, file in enumerate(files):
+                            temp_out_fn = f'{sample_dir}/temp_parsed_reads_{i}.parquet'
+                            temp_merged_fn = f'{sample_dir}/temp_merged_reads_{i}.parquet'
+                            
+                            self.logger.info(f"Processing file {i+1}/{len(files)}: {file}")
+                            tabulate_paired_10x_fastqs_rs(
+                                file_path=file, 
+                                out_fn=temp_out_fn,
+                                merged_fn=temp_merged_fn,
+                                out_dir=sample_dir,
+                                modality=self.xp.modality,     
+                                umi_len=self.xp.umi_len,      
+                                do_rev_comp=self.xp.rev_comp,  
+                                force=force_tab)
+                            
+                            temp_parsed_files.append(temp_out_fn)
+                            temp_merged_files.append(temp_merged_fn)
+                        
+                        self.logger.info(f"Concatenating results from {len(files)} files")
+                        (pl.concat([pl.scan_parquet(f) for f in temp_parsed_files]).sink_parquet(out_fn))
+                        (pl.concat([pl.scan_parquet(f) for f in temp_merged_files]).sink_parquet(merged_fn))
+                        
+                        for f in temp_parsed_files + temp_merged_files:
+                            Path(f).unlink(missing_ok=True)
+                            
+                        self.logger.info(f"Successfully concatenated results")
                     else:
-                        force_tab = False
-
-                    tabulate_paired_10x_fastqs_rs(
+                        file = files[0]
+                        self.logger.info(f"Processing single file: {file}")
+                        tabulate_paired_10x_fastqs_rs(
                             file_path=file, 
-                            out_fn=f'{sample_dir}/parsed_reads.parquet', 
-                            out_dir=f'{sample_dir}',
-                            merged_fn = f'{sample_dir}/merged_reads.parquet',
+                            out_fn=out_fn,
+                            merged_fn=merged_fn,
+                            out_dir=sample_dir,
                             modality=self.xp.modality,     
                             umi_len=self.xp.umi_len,      
                             do_rev_comp=self.xp.rev_comp,  
-                            force=force_tab) # add to step interface
+                            force=force_tab)# expose to cli?
+
                 # TODO why are merged files and parsed files so similar? can we get read of merged?
                 return StepResults(results={
                     'parsed_fn': out_fn
                     })
+
             pass
 
         except Exception as e:
@@ -335,7 +375,6 @@ class Pipeline:
 
                 return StepResults(
                         results={'xp': self.xp,
-                                 'parsed_reads':out_file}
                                  'parsed_reads':out_file,
                                  'total_reads_ont':pl.scan_parquet(out_file).collect().height
                                  }
