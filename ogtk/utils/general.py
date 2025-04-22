@@ -383,8 +383,6 @@ def tabulate_paired_10x_fastqs_rs(
         final_columns.remove("cbc")
         final_columns.remove("cbc_qual")
     
-    logger.info(lazy_df.explain(streaming=True))
-
     (
         lazy_df
         .select(final_columns)
@@ -392,8 +390,6 @@ def tabulate_paired_10x_fastqs_rs(
         #.collect(streaming=True)
         #.write_parquet(out_fn)
     )
-    
-
 
 def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, single_molecule = False, force = False, comparable=False, rev_comp_r2=False, export_parquet = False, outdir: str|None=None):
     ''' merge umified paired fastqs (e.g. 10x fastqs) into a single one tab file with fields:
