@@ -327,8 +327,9 @@ class Pipeline:
                                     anchor_ont=self.xp.anchor_ont,
                                     intbc_5prime=self.xp.intbc_5prime)
                     .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
-                    .collect()
-                    .write_parquet(out_file)
+                    #.collect()
+                    #.write_parquet(out_file)
+                    .sink_parquet(out_file)
                 )
                 self.logger.info(f"exported parsed reads to {out_file}")
 
