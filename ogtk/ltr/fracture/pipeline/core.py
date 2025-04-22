@@ -77,11 +77,11 @@ def log_invocation_params(logger: Any, step: PipelineStep, xp: Any, kwargs: Dict
         return params
     
     # Log required parameters to logger
-    logger.info(f"=== {step.name} Parameters ===")
+    logger.debug(f"=== {step.name} Parameters ===")
     for param in step.value['required_params']:
         if hasattr(xp, param):
             param_value = getattr(xp, param)
-            logger.info(f"  {param}: {param_value}")
+            logger.debug(f"  {param}: {param_value}")
     
     # Log step-specific nested configurations
     step_specific_configs = {
@@ -166,6 +166,7 @@ def pipeline_step(step: PipelineStep):
                 step_log_file = step_log_dir / f"{step.name.lower()}.log"
                 
                 # Enable step-specific file logging
+                # why is this not the same logger as the one in the class??
                 logger = Rlogger()
                 logger.enable_file_logging(
                     filepath=step_log_file,
@@ -206,8 +207,7 @@ def pipeline_step(step: PipelineStep):
                         ppi.logger.error(f"Plot generation failed: {str(e)}")
                 
                 ppi.logger.info(f"Completed {step.name} step")
-                
-                # Disable step-specific logging
+                ppi.update_pipeline_summary(step, results)
                 logger.disable_file_logging()
                 
                 return results
@@ -254,7 +254,7 @@ class Pipeline:
         
     @call
     @pipeline_step(PipelineStep.PARQUET)
-    def to_parquet(self) -> None:
+    def to_parquet(self) -> StepResults|None:
         """Convert fastq reads to parquet format"""
         try:
             self.logger.info(f"Conversion to parquet:\nloading data from {self.xp.pro_datain}")
@@ -292,6 +292,10 @@ class Pipeline:
                             umi_len=self.xp.umi_len,      
                             do_rev_comp=self.xp.rev_comp,  
                             force=force_tab) # add to step interface
+                # TODO why are merged files and parsed files so similar? can we get read of merged?
+                return StepResults(results={
+                    'parsed_fn': out_fn
+                    })
             pass
 
         except Exception as e:
@@ -331,6 +335,9 @@ class Pipeline:
                 return StepResults(
                         results={'xp': self.xp,
                                  'parsed_reads':out_file}
+                                 'parsed_reads':out_file,
+                                 'total_reads_ont':pl.scan_parquet(out_file).collect().height
+                                 }
                         )
             pass
         except Exception as e:
@@ -353,7 +360,6 @@ class Pipeline:
             in_file = f"{self.xp.sample_wd}/parsed_reads.parquet" #pyright:ignore
 
             if not hasattr(self.xp, 'fracture'):
-                self.logger.warning("using hardcoded arguments for assembly as no configuration was found.")
                 setattr(self.xp, 'fracture', {})
                 self.xp.fracture['start_min_coverage'] = 25
                 self.xp.fracture['start_k'] = 17
@@ -577,4 +583,184 @@ class Pipeline:
         self.to_parquet()
         self.preprocess()
         self.fracture()
-        #self.save_results()
+        #self.run_qcs()
+
+    def update_pipeline_summary(self, step: PipelineStep, results: StepResults) -> None:
+        """Update the pipeline summary with results from a specific step."""
+        import json
+        import datetime
+        from pathlib import Path
+        
+        # Path to the summary file
+        summary_path = Path(f"{self.xp.pro_workdir}/{self.xp.target_sample}/pipeline_summary.json")
+        
+        # Load existing summary if available
+        if summary_path.exists():
+            try:
+                with open(summary_path, 'r') as f:
+                    summary = json.load(f)
+            except json.JSONDecodeError:
+                summary = {}
+        else:
+            summary = {}
+        
+        # Get timestamp
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Create step summary
+        step_summary = {
+            'timestamp': timestamp,
+            'params_file': f"logs/{step.name.lower()}_params.log",
+            'log_file': f"logs/{step.name.lower()}.log",
+        }
+        
+        # Add step-specific metrics
+        if step == PipelineStep.PARQUET:
+            if results and 'parsed_reads' in results.results:
+                step_summary['metrics'] = {
+                'total_reads': pl.scan_parquet(results.results['parsed_reads']).collect().height,
+                'total_umis': pl.scan_parquet(results.results['parsed_reads']).select('umi').unique().collect().height,
+            }
+        elif step == PipelineStep.PREPROCESS:
+            if results and 'parsed_reads' in results.results:
+                step_summary['metrics'] = {
+                    'total_umis_ont': pl.scan_parquet(results.results['parsed_reads']).select('umi').unique().collect().height,
+                }
+        elif step == PipelineStep.FRACTURE:
+            if results and 'contigs' in results.results:
+                df = pl.read_parquet(results.results['contigs'])
+                step_summary['metrics'] = {
+                    'total_contigs': df.height,
+                    'mean_contig_length': df.filter(pl.col('length') > 0).get_column('length').mean(),
+                    'success_rate': (1 - (df.get_column('length') == 0).mean()) * 100,
+                    # Add other metrics
+                }
+        
+        # Update summary
+        summary[step.name.lower()] = step_summary
+        
+        # Write updated summary
+        with open(summary_path, 'w') as f:
+            json.dump(summary, f, indent=2)
+        
+        # Generate markdown report
+        self._generate_markdown_report(summary)
+    def _generate_markdown_report(self, summary: dict) -> None:
+        """
+        Generate a markdown report from the summary JSON.
+        Includes a summary table of all metrics across all steps.
+        """
+        from pathlib import Path
+        import datetime
+        
+        report_path = Path(f"{self.xp.pro_workdir}/{self.xp.target_sample}/pipeline_summary.md")
+        
+        with open(report_path, 'w') as f:
+            # Generate report header
+            current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            f.write(f"# Pipeline Summary for {self.xp.target_sample}\n\n")
+            f.write(f"*Last updated: {current_time}*\n\n")
+            
+            # Create a consolidated metrics table
+            f.write("## Consolidated Metrics\n\n")
+            
+            # Collect all unique metrics across all steps
+            all_metrics = set()
+            for step_info in summary.values():
+                if 'metrics' in step_info:
+                    all_metrics.update(step_info['metrics'].keys())
+            
+            # Sort metrics for consistent display
+            all_metrics = sorted(all_metrics)
+            
+            if all_metrics:
+                # Generate table header
+                f.write("| Metric | " + " | ".join(step.capitalize() for step in summary.keys()) + " |\n")
+                f.write("|--------|" + "|".join(["------" for _ in summary]) + "|\n")
+                
+                # Generate table rows
+                for metric in all_metrics:
+                    metric_display = metric.replace('_', ' ').title()
+                    row = f"| {metric_display} |"
+                    
+                    for step in summary.keys():
+                        step_info = summary[step]
+                        if 'metrics' in step_info and metric in step_info['metrics']:
+                            value = step_info['metrics'][metric]
+                            # Format numeric values with commas and round floats
+                            if isinstance(value, int):
+                                formatted_value = f"{value:,}"
+                            elif isinstance(value, float):
+                                formatted_value = f"{value:.2f}"
+                            else:
+                                formatted_value = str(value)
+                            row += f" {formatted_value} |"
+                        else:
+                            row += " - |"
+                    
+                    f.write(row + "\n")
+                
+                f.write("\n")
+            else:
+                f.write("*No metrics available yet*\n\n")
+            
+            # Timeline of step execution
+            f.write("## Pipeline Timeline\n\n")
+            f.write("| Step | Timestamp | Status |\n")
+            f.write("|------|-----------|--------|\n")
+            
+            for step_name, step_info in summary.items():
+                timestamp = step_info.get('timestamp', 'Unknown')
+                
+                # Determine status based on metrics
+                if 'metrics' in step_info and step_info['metrics']:
+                    status = "✅ Completed"
+                else:
+                    status = "⚠️ Incomplete"
+                    
+                f.write(f"| {step_name.capitalize()} | {timestamp} | {status} |\n")
+            
+            f.write("\n")
+            
+            # Detailed section for each step
+            f.write("## Step Details\n\n")
+            
+            for step_name, step_info in summary.items():
+                f.write(f"### {step_name.capitalize()}\n\n")
+                f.write(f"**Run Time:** {step_info.get('timestamp', 'Unknown')}\n\n")
+                
+                # Show links to log files
+                if 'params_file' in step_info:
+                    f.write(f"**Parameter File:** [{step_name}_params.log]({step_info['params_file']})\n\n")
+                
+                if 'log_file' in step_info:
+                    f.write(f"**Log File:** [{step_name}.log]({step_info['log_file']})\n\n")
+                
+                # Show output files
+                if 'output_files' in step_info and step_info['output_files']:
+                    f.write("**Output Files:**\n\n")
+                    for file_path in step_info['output_files']:
+                        file_name = Path(file_path).name
+                        f.write(f"- {file_name}\n")
+                    f.write("\n")
+                
+                # Show detailed metrics
+                if 'metrics' in step_info and step_info['metrics']:
+                    f.write("**Metrics:**\n\n")
+                    f.write("| Metric | Value |\n")
+                    f.write("|--------|-------|\n")
+                    for metric, value in step_info['metrics'].items():
+                        metric_display = metric.replace('_', ' ').title()
+                        
+                        # Format numeric values
+                        if isinstance(value, int):
+                            formatted_value = f"{value:,}"
+                        elif isinstance(value, float):
+                            formatted_value = f"{value:.2f}"
+                        else:
+                            formatted_value = str(value)
+                            
+                        f.write(f"| {metric_display} | {formatted_value} |\n")
+                
+                f.write("\n---\n\n")
+
