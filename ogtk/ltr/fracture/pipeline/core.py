@@ -1,6 +1,6 @@
 from pathlib import Path 
 from functools import wraps
-from typing import Any, Callable, NamedTuple, Dict, Set
+from typing import Any, Callable, NamedTuple, Dict, Optional
 from enum import Enum
 import polars as pl
 
@@ -11,8 +11,18 @@ from .types import FractureXp
 
 
 class StepResults(NamedTuple):
-    """Container for data to be passed to plotting"""
+    #TODO is it necessary so many levels? (results, metrics)
+    """Container for data to be passed to plotting or QCs
+        - results: is meant to contain elements or objects related to the pipeline progression
+        - metrics: keeps track of values that are used to generate the final summary and compute stats 
+    """
     results: dict  
+    metrics: dict = {}
+
+    def has_metrics(self):
+        """Check if a step returned any metrics """
+        return len(self.metrics)>0
+
     
 class PipelineStep(Enum):
     """Enum defining available pipeline steps"""
@@ -183,7 +193,7 @@ def pipeline_step(step: PipelineStep):
                 
                 if missing_params:
                     error_msg = f"Missing required parameters for {step.name}: {', '.join(missing_params)}"
-                    ppi.logger.error(error_msg)
+                    ppi.logger.error(error_msg, with_traceback=True)
                     raise ValueError(error_msg)
 
                 # Run the step
@@ -204,7 +214,10 @@ def pipeline_step(step: PipelineStep):
                             ppi.logger.debug(f"Generating plots for {step.name.lower()}")
                             plot_method(ppi, results)
                     except Exception as e:
-                        ppi.logger.error(f"Plot generation failed: {str(e)}")
+                        ppi.logger.error(f"Plot generation failed: {str(e)}", with_traceback=True)
+
+                # run QCs relevant for the step
+                ppi.logger.step(f'Running QCS {step.name}')
                 
                 ppi.logger.info(f"Completed {step.name} step")
                 ppi.update_pipeline_summary(step, results)
@@ -213,7 +226,7 @@ def pipeline_step(step: PipelineStep):
                 return results
                 
             except Exception as e:
-                ppi.logger.error(f"Step {step.name} failed: {str(e)}")
+                ppi.logger.error(f"Step {step.name} failed: {str(e)}", with_traceback=True)
                 # Ensure we disable file logging even if there's an error
                 logger.disable_file_logging()
                 raise
@@ -242,7 +255,7 @@ class Pipeline:
                 self.plt = plt
                 self.logger.debug("Initialized plotting dependencies")
             except ImportError as e:
-                self.logger.error(f"Failed to import plotting dependencies: {str(e)}")
+                self.logger.error(f"Failed to import plotting dependencies: {str(e)}", with_traceback=True)
                 self.xp.do_plot = False 
 
 
@@ -286,6 +299,12 @@ class Pipeline:
                     out_fn=f'{sample_dir}/parsed_reads.parquet'
                     merged_fn = f'{sample_dir}/merged_reads.parquet'
                     
+                    # TODO the Rust implementation doesn't seem to respect the limit argument
+                    limit = getattr(self.xp, "limit",  None)
+
+                    if limit is not None:
+                        self.logger.warning(f"Only loading {limit} reads")
+
                     # Check if multiple files should be processed
                     if len(files) > 1 and max_files > 1:
                         self.logger.info(f"Processing {len(files)} input files for sample {sample_id}")
@@ -305,6 +324,7 @@ class Pipeline:
                                 modality=self.xp.modality,     
                                 umi_len=self.xp.umi_len,      
                                 do_rev_comp=self.xp.rev_comp,  
+                                limit=limit,
                                 force=force_tab)
                             
                             temp_parsed_files.append(temp_out_fn)
@@ -313,6 +333,8 @@ class Pipeline:
                         self.logger.info(f"Concatenating results from {len(files)} files")
                         (pl.concat([pl.scan_parquet(f) for f in temp_parsed_files]).sink_parquet(out_fn))
                         (pl.concat([pl.scan_parquet(f) for f in temp_merged_files]).sink_parquet(merged_fn))
+
+                        #TODO if limit is set, downsample the concatenation too
                         
                         for f in temp_parsed_files + temp_merged_files:
                             Path(f).unlink(missing_ok=True)
@@ -332,14 +354,29 @@ class Pipeline:
                             force=force_tab)# expose to cli?
 
                 # TODO why are merged files and parsed files so similar? can we get read of merged?
-                return StepResults(results={
-                    'parsed_fn': out_fn
-                    })
+                return StepResults(
+                        results={
+                        'parsed_fn': out_fn,
+                        },
+                        metrics = {
+                        'total_reads': (
+                                pl.scan_parquet(out_fn)
+                                .collect()
+                                .height),
+                        'total_umis': (
+                                pl.scan_parquet(out_fn)
+                                .select('umi')
+                                .unique()
+                                .collect()
+                                .height),
+                        'downsampled': limit
+                        }
+                        )
 
             pass
 
         except Exception as e:
-            self.logger.error(f"Failed to convert {self.xp.target_sample} to parquet: {str(e)}")
+            self.logger.error(f"Failed to convert {self.xp.target_sample} to parquet: {str(e)}", with_traceback=True)
             raise
             
     @call  
@@ -367,8 +404,6 @@ class Pipeline:
                                     anchor_ont=self.xp.anchor_ont,
                                     intbc_5prime=self.xp.intbc_5prime)
                     .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
-                    #.collect()
-                    #.write_parquet(out_file)
                     .sink_parquet(out_file)
                 )
                 self.logger.info(f"exported parsed reads to {out_file}")
@@ -376,12 +411,20 @@ class Pipeline:
                 return StepResults(
                         results={'xp': self.xp,
                                  'parsed_reads':out_file,
-                                 'total_reads_ont':pl.scan_parquet(out_file).collect().height
-                                 }
+                                 },
+                        metrics={
+                                 'total_reads_ont':pl.scan_parquet(out_file).collect().height,
+                                 'total_umis_ont': (
+                                    pl.scan_parquet(out_file)
+                                    .select('umi')
+                                    .unique()
+                                    .collect()
+                                    .height),
+                             }
                         )
             pass
         except Exception as e:
-            self.logger.error(f"Failed to preprocess data: {str(e)}")
+            self.logger.error(f"Failed to preprocess data: {str(e)}", with_traceback=True)
             raise
             
     @call  
@@ -407,35 +450,50 @@ class Pipeline:
 
             if not self.xp.dry:
                 self.logger.info(f'Reading {in_file}')
-                for priority in [True, False]:
-                    out_file = f"{self.xp.sample_wd}/contigs_pl_{priority}.parquet" #pyright:ignore
-                    self.logger.info(f"exporting assembled contigs to {out_file}")
-                    
-                    chi = (
+                out_file = f"{self.xp.sample_wd}/contigs_pl_direct.parquet" #pyright:ignore
+                self.logger.info(f"exporting assembled contigs to {out_file}")
+                
+                filter_expr= pl.col('reads')>=self.xp.fracture['min_reads']
+                df_contigs = (
                         pl.read_parquet(in_file)
-                        .pp.assembly_with_opt( #pyright: ignore
-                            start_k=self.xp.fracture['start_k'], 
-                            start_min_coverage=self.xp.fracture['start_min_coverage'],
-                            min_reads=self.xp.fracture['min_reads'], 
-                            prioritize_length=priority,
-                            method=self.xp.fracture['assembly_method'],
-                            start_anchor=self.xp.start_anchor,
-                            end_anchor=self.xp.end_anchor,
-                            )
+                        .filter(filter_expr)
+                        .pp.assemble_umis( #pyright: ignore
+                                          k=self.xp.fracture['start_k'], 
+                                          min_coverage=self.xp.fracture['start_min_coverage'],
+                                          start_anchor=self.xp.start_anchor,
+                                          end_anchor=self.xp.end_anchor,
+                                          min_length=None,
+                                          auto_k=False,
+                                          export_graphs=False,
+                                          only_largest=True,
+                                          method=self.xp.fracture['assembly_method'],
+                                          )
+                        .with_columns(pl.col('contig').str.len_chars().alias('length'))
                         .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
-                    )
-                    chi.write_parquet(out_file)
+                        .join(pl.scan_parquet(in_file).select('umi','reads').filter(filter_expr).unique().collect(), 
+                              left_on='umi', right_on='umi', how='left')
+                        )
 
-                    self.logger.critical(f"{(chi.get_column('length')==0).mean():.2%} failed")
+                df_contigs.write_parquet(out_file)
+
+                success_rate = (df_contigs.get_column('length')>0).mean()
+                total_assembled = (df_contigs.get_column('length')>0).sum()
+               
+                self.logger.critical(f"{total_assembled} assembled ({success_rate:.2%} success)")
                 
                 return StepResults(
-                        results={'xp': self.xp,
-                                 'contigs':out_file}
+                        results={'xp': self.xp, 
+                                 'contigs':out_file},
+                        metrics={'success_rate':success_rate,
+                                 'total_assembled':total_assembled,
+                                 'mean_contig_length': df_contigs.filter(pl.col('length')>0).get_column('length').mean(),
+                                 'mdian_contig_length': df_contigs.filter(pl.col('length')>0).get_column('length').median(),
+                                 },
                         )
 
             pass
         except Exception as e:
-            self.logger.error(f"Failed to preprocess data: {str(e)}")
+            self.logger.error(f"Failed to preprocess data: {str(e)}", with_traceback=True)
             raise
             
     @call  
@@ -471,7 +529,8 @@ class Pipeline:
             if os.path.exists(out_file1) and os.path.exists(out_file2):
                 self.logger.info(f"Using previous test files use --clean to remove all generated files")
                 return StepResults(
-                        results={'xp': self.xp}
+                        results={'xp': self.xp},
+                        metrics={}
                         )
                 pass
 
@@ -525,11 +584,11 @@ class Pipeline:
                     )
                 
                 return StepResults(
-                        results={'xp': self.xp}
+                        results={'xp': self.xp},
                         )
             pass
         except Exception as e:
-            self.logger.error(f"Failed generating tests: {str(e)}")
+            self.logger.error(f"Failed generating tests: {str(e)}", with_traceback=True)
             raise
 
     def clean_test_outputs(self) -> None:
@@ -558,7 +617,7 @@ class Pipeline:
             self.logger.info("Test outputs cleaned successfully")
             
         except Exception as e:
-            self.logger.error(f"Failed to clean test outputs: {str(e)}")
+            self.logger.error(f"Failed to clean test outputs: {str(e)}", with_traceback=True)
             raise
 
     def clean_all(self) -> None:
@@ -582,7 +641,7 @@ class Pipeline:
             self.logger.info("All pipeline outputs cleaned successfully")
             
         except Exception as e:
-            self.logger.error(f"Failed to clean pipeline outputs: {str(e)}")
+            self.logger.error(f"Failed to clean pipeline outputs: {str(e)}", with_traceback=True)
             raise
 
     def run(self) -> bool:
@@ -603,7 +662,7 @@ class Pipeline:
                 return True
 
             except Exception as e:
-                self.logger.error(f"Pipeline (TEST) tests failed {str(e)}")
+                self.logger.error(f"Pipeline (TEST) tests failed {str(e)}", with_traceback=True)
                 return False
 
         try:
@@ -613,7 +672,7 @@ class Pipeline:
             return True
             
         except Exception as e:
-            self.logger.error(f"Pipeline failed: {str(e)}")
+            self.logger.error(f"Pipeline failed: {str(e)}", with_traceback=True)
             return False
 
     def run_all(self):
@@ -655,26 +714,14 @@ class Pipeline:
         }
         
         # Add step-specific metrics
-        if step == PipelineStep.PARQUET:
-            if results and 'parsed_reads' in results.results:
-                step_summary['metrics'] = {
-                'total_reads': pl.scan_parquet(results.results['parsed_reads']).collect().height,
-                'total_umis': pl.scan_parquet(results.results['parsed_reads']).select('umi').unique().collect().height,
-            }
-        elif step == PipelineStep.PREPROCESS:
-            if results and 'parsed_reads' in results.results:
-                step_summary['metrics'] = {
-                    'total_umis_ont': pl.scan_parquet(results.results['parsed_reads']).select('umi').unique().collect().height,
-                }
-        elif step == PipelineStep.FRACTURE:
-            if results and 'contigs' in results.results:
-                df = pl.read_parquet(results.results['contigs'])
-                step_summary['metrics'] = {
-                    'total_contigs': df.height,
-                    'mean_contig_length': df.filter(pl.col('length') > 0).get_column('length').mean(),
-                    'success_rate': (1 - (df.get_column('length') == 0).mean()) * 100,
-                    # Add other metrics
-                }
+        if results and results.results and results.has_metrics():
+            metrics = results.metrics
+            if step == PipelineStep.PARQUET:
+                step_summary['metrics'] = metrics
+            elif step == PipelineStep.PREPROCESS:
+                step_summary['metrics'] = metrics
+            elif step == PipelineStep.FRACTURE:
+                step_summary['metrics'] = metrics
         
         # Update summary
         summary[step.name.lower()] = step_summary
