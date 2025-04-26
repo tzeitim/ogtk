@@ -1,14 +1,16 @@
 import argparse
-from ogtk.utils.log import Rlogger
+import sys
+from importlib import import_module
+from typing import List
 
-from ogtk.ltr.fracture.pipeline.core import PipelineStep, Pipeline
-from ogtk.ltr.fracture.pipeline.types import FractureXp
-from ogtk.ltr.fracture.pipeline.plot_gen import PlotRegenerator
-
+# Lazy load the heavy dependencies
 __all__ = [
         'main',
         'parse_args',
 ]
+
+# Define the pipeline step names for argument parsing without importing PipelineStep
+PIPELINE_STEP_NAMES = ['parquet', 'preprocess', 'fracture', 'test']
 
 def parse_args():
     """Parse command line arguments"""
@@ -19,7 +21,7 @@ def parse_args():
     parser.add_argument(
         "--steps",
         nargs="+",
-        choices=[name.lower() for name in PipelineStep.__members__],
+        choices=PIPELINE_STEP_NAMES,
         help="Specific steps to run (overrides config file)"
         )
 
@@ -73,6 +75,21 @@ def parse_args():
 
     return parser
 
+def lazy_import():
+    """Lazily import heavier modules only when needed"""
+    # Import all required modules
+    modules = {}
+    # First import the logger, which is needed but might still be heavy
+    from ogtk.utils.log import Rlogger
+    modules['Rlogger'] = Rlogger
+    
+    # Then import the really heavy pipeline modules
+    modules['PipelineStep'] = import_module('ogtk.ltr.fracture.pipeline.core').PipelineStep
+    modules['Pipeline'] = import_module('ogtk.ltr.fracture.pipeline.core').Pipeline
+    modules['FractureXp'] = import_module('ogtk.ltr.fracture.pipeline.types').FractureXp
+    modules['PlotRegenerator'] = import_module('ogtk.ltr.fracture.pipeline.plot_gen').PlotRegenerator
+    return modules
+
 def main():
     """Run the Fracture pipeline with command line arguments.
 
@@ -122,18 +139,37 @@ def main():
     int
         0 for successful execution, 1 for failure
     """
+    # Handle --help or no arguments first, before creating the parser
+    # This avoids importing any heavy modules for help display
+    if len(sys.argv) == 1 or '--help' in sys.argv or '-h' in sys.argv:
+        parser = parse_args()
+        parser.print_help()
+        return 0
+    
     # Parse arguments
-    args = parse_args().parse_args()
-
-    # Initialize logger
-    logger = Rlogger().get_logger()
-    Rlogger().set_level(args.log_level)
+    parser = parse_args()
+    args = parser.parse_args()
 
     try:
+        # Only import modules when we're actually running the pipeline
+        modules = lazy_import()
+        Rlogger = modules['Rlogger']
+        
+        # Initialize logger
+        logger = Rlogger().get_logger()
+        Rlogger().set_level(args.log_level)
+        
+        # Reference the heavy modules
+        logger.debug("Loading pipeline modules...")
+        PipelineStep = modules['PipelineStep']
+        Pipeline = modules['Pipeline']
+        FractureXp = modules['FractureXp']
+        PlotRegenerator = modules['PlotRegenerator']
+        
         # Initialize Xp configuration
         xp = FractureXp(conf_fn=args.config)
 
-		# Skip the pipeline if we are only plotting
+        # Skip the pipeline if we are only plotting
         if args.regenerate_plots is not None:
             logger.info("Regenerating plots")
             pipeline = Pipeline(xp)
@@ -227,7 +263,11 @@ def main():
         return 0 if success else 1
 
     except Exception as e:
-        logger.error(f"Pipeline execution failed: {str(e)}")
+        # If it's just a command line error or config error, don't show traceback
+        if isinstance(e, (ValueError, FileNotFoundError, argparse.ArgumentError)):
+            logger.error(f"Error: {str(e)}")
+        else:
+            logger.error(f"Pipeline execution failed: {str(e)}", with_traceback=True)
         return 1
 
 if __name__ == "__main__":
