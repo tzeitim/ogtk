@@ -23,7 +23,9 @@ class FractureXp(Xp):
     fracture: dict
     start_anchor: str
     end_anchor: str
+    force_tab: bool
     allow_wildcards: bool
+    intbc_5prime: str
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -49,7 +51,7 @@ class FractureXp(Xp):
 
         if max_files is not None and isinstance(max_files, int):
             if any([len(i)>max_files for i in sample_files.values()]):
-                self.logger.error(f"Some sample(s) matched more than {max_files}\n{sample_files}")
+                self.logger.error(f"Some sample(s) matched more than {max_files}\n{sample_files}", with_traceback=True)
                 raise ValueError("Verify that there are files that coorespond to all samples.")
             
         return sample_files
