@@ -25,6 +25,23 @@ class CustomLogger(logging.Logger):
         """Log message at STEP level"""
         if self.isEnabledFor(STEP_LEVEL_NUM):
             self._log(STEP_LEVEL_NUM, message, args, **kws)
+            
+    def error(self, message: Any, *args: Any, with_traceback: bool = False, **kws: Any) -> None:
+        """
+        Log message at ERROR level with optional traceback.
+        
+        Args:
+            message: The message to log
+            with_traceback: If True, automatically capture and include the current exception traceback
+            *args, **kws: Additional arguments to pass to the logger
+        """
+        if self.isEnabledFor(logging.ERROR):
+            if with_traceback:
+                import traceback
+                tb = traceback.format_exc()
+                if tb != "NoneType: None\n":  # Check if there's an actual traceback
+                    message = f"{message}\n{tb}"
+            self._log(logging.ERROR, message, args, **kws)
 
 class Rlogger:
     _instance: Optional['Rlogger'] = None
