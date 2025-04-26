@@ -52,7 +52,7 @@ class PlotRegenerator:
                 plot_method(self.pipeline, results)
                 self.logger.info(f"Successfully regenerated plots for {step_name}")
             except Exception as e:
-                self.logger.error(f"Failed to regenerate plots for {step_name}: {str(e)}")
+                self.logger.error(f"Failed to regenerate plots for {step_name}: {str(e)}", with_traceback=True)
                 
     def _load_step_results(self, step_name: str) -> Optional[StepResults]:
         """Load results from previous pipeline run for given step"""
