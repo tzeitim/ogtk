@@ -14,7 +14,6 @@ logger = Rlogger().get_logger()
 
 @call
 
-
 def compute_double_anchor(ifn, sample_n = 50, reps=10, start_anchor = "GAGACTGCATGG", end_anchor="TTTAGTGAGGGT"):
     """
     Returns ``reps`` groups of size ``sample_n`` to assess the number molecules that contain both anchor sequences.
@@ -105,7 +104,7 @@ def compute_saturation_curve(ifn, name=None, max_sample_size=250_000, reps=3, kw
                 max_reads_umi =pl.col('umi_cov').max(),
                 min_reads_umi =pl.col('umi_cov').min(),
             )
-         for i, (offset, size) in enumerate(zip(offsets, sizes))]
+         for _, (offset, size) in enumerate(zip(offsets, sizes))]
         )
         
     df_saturation = (

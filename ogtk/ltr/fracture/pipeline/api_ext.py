@@ -194,6 +194,38 @@ class PlPipeline:
             )
         )
 
+    def assemble_umis(self,
+                    k: int = 15,
+                    min_coverage: int = 20, 
+                    method: str = "shortest_path",
+                    start_anchor: str | None = None,
+                    end_anchor: str | None = None,
+                    min_length: int | None = None,
+                    auto_k: bool = True,
+                    export_graphs: bool = False,
+                    only_largest: bool = True) -> pl.DataFrame:
+        """
+        """
+        return (
+            self._df
+             .with_columns(pl.col('r2_seq').str.replace(f'^.*{start_anchor}', start_anchor))
+             .with_columns(pl.col('r2_seq').str.replace(f'{end_anchor}.*$', end_anchor))
+            .group_by(['umi']).agg(
+                rogtk.assemble_sequences(
+                    expr=pl.col("r2_seq"),
+                    k=k,
+                    min_coverage=min_coverage,
+                    method=method,
+                    start_anchor=start_anchor,
+                    end_anchor=end_anchor,
+                    min_length=min_length,
+                    auto_k=auto_k,
+                    only_largest=only_largest,
+                    export_graphs=export_graphs,
+                ).alias('contig')
+            )
+        )
+
     def sweep_assembly_params(self,
                              target_umi: str,
                              k_start: int = 5,
