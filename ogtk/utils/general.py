@@ -313,6 +313,7 @@ def tabulate_paired_10x_fastqs_rs(
     force = False,
     merged_fn: str|None = None,
     out_dir: str|None = None,
+    limit: Optional[int] = None,
     ):
     ''' Merges umified paired gzipped fastqs (e.g. 10x fastqs) into a single parquet file 
     and then extracts the relevant features. 
@@ -326,6 +327,7 @@ def tabulate_paired_10x_fastqs_rs(
 
     ``do_rev_comp`` reverse-complements read 2
     ``force`` acts only on the first step (fastq->parquet)
+    ``limit`` limits the number of reads to process (None means process all reads)
 
     '''
     if not modality in ['single-cell', 'single-molecule']:
@@ -354,6 +356,7 @@ def tabulate_paired_10x_fastqs_rs(
              in_fn1=file_path,
              in_fn2=file_path.replace('_R1_', '_R2_'),
              out_fn=merged_fn,
+             limit=limit,
              do_rev_comp=do_rev_comp
         )
     else:
