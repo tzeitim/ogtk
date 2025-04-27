@@ -7,7 +7,10 @@ class PlotDB():
     # Pipeline instance = ppi
     def plot_preprocess(self, ppi, results):
         ''' ''' 
+        import os 
+        os.environ['OPENBLAS_NUM_THREADS'] = '4'
         import numpy as np
+
         sns = ppi.sns
         plt = ppi.plt
         xp = ppi.xp
@@ -30,6 +33,12 @@ class PlotDB():
         plt.title(f"Reads per UMI\n{xp.target_sample}")
         plt.ylim(1, 1e5)
         plt.xlim(1, 2e5)
+
+        th_kmeans = qc.find_read_count_threshold(ifn, method='kmeans')
+        th_kneedle = qc.find_read_count_threshold(ifn, method='kneedle')
+
+        plt.axhline(y=th_kmeans, color='r', linestyle='--', label="kmeans")
+        plt.axhline(y=th_kneedle, color='g', linestyle='--', label="kneedle")
 
         fig.savefig(out_path)
         xp.logger.info(f"saved {out_path}")

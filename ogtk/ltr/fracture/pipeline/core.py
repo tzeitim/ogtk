@@ -8,6 +8,7 @@ from ogtk.utils.log import Rlogger, call
 from ogtk.utils import sfind, tabulate_paired_10x_fastqs_rs
 from .plotting import PlotDB
 from .types import FractureXp
+from . import qc
 
 
 class StepResults(NamedTuple):
@@ -446,7 +447,11 @@ class Pipeline:
                 setattr(self.xp, 'fracture', {})
                 self.xp.fracture['start_min_coverage'] = 25
                 self.xp.fracture['start_k'] = 17
-                self.xp.fracture['min_reads'] = 100 
+                self.xp.fracture['min_reads'] = qc.find_read_count_threshold(in_file, method="kmeans")
+            else:
+                self.xp.fracture['min_reads'] = qc.find_read_count_threshold(in_file, 
+                                                                 method=self.xp.fracture['method_th'])
+
 
             if not self.xp.dry:
                 self.logger.info(f'Reading {in_file}')
