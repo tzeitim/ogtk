@@ -387,7 +387,7 @@ class Pipeline:
         try:
             self.logger.step("Parsing reads and collecting molecule stats")
 
-            required_params = ['umi_len', 'anchor_ont']
+            required_params = ['umi_len', 'anchor_ont', 'sbc_len']
 
             for param in required_params:
                 if param not in vars(self.xp):
@@ -395,33 +395,45 @@ class Pipeline:
 
             in_file = f"{self.xp.pro_workdir}/{self.xp.target_sample}/merged_reads.parquet"
             out_file = f"{self.xp.sample_wd}/parsed_reads.parquet" #pyright:ignore
+            out_file_qc = out_file.replace('.parquet', '_qc.parquet')
             self.logger.io(f"reading from {in_file}")
 
             if not self.xp.dry:
-                (
+                ldf = (
                     pl
                     .scan_parquet(in_file)
                     .pp.parse_reads(umi_len=self.xp.umi_len,  
+                                    sbc_len=self.xp.sbc_len,
                                     anchor_ont=self.xp.anchor_ont,
-                                    intbc_5prime=self.xp.intbc_5prime)
+                                    )
                     .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
-                    .sink_parquet(out_file)
                 )
+
+                # save without gc fields
+                ldf.drop('^_.+$').sink_parquet(out_file)
+                # extract QC fields
+                metrics_df = ldf.drop('^[^_].+$').unique().collect()
+                metrics = {i:metrics_df[i][0] for i in metrics_df.columns}
+
+                        
+                metrics['total_reads_ont'] = pl.scan_parquet(out_file).collect().height,
+                metrics['total_umis_ont']=  (
+                                    pl.scan_parquet(out_file)
+                                    .select('umi')
+                                    .unique()
+                                    .collect()
+                                    .height)
+                metrics_df.to_parquet(out_file_qc)
+
                 self.logger.info(f"exported parsed reads to {out_file}")
 
                 return StepResults(
                         results={'xp': self.xp,
                                  'parsed_reads':out_file,
+                                 'preprocess_qc': out_file_qc,
                                  },
-                        metrics={
-                                 'total_reads_ont':pl.scan_parquet(out_file).collect().height,
-                                 'total_umis_ont': (
-                                    pl.scan_parquet(out_file)
-                                    .select('umi')
-                                    .unique()
-                                    .collect()
-                                    .height),
-                             }
+                        metrics=metrics,
+                        
                         )
             pass
         except Exception as e:
@@ -447,10 +459,10 @@ class Pipeline:
                 setattr(self.xp, 'fracture', {})
                 self.xp.fracture['start_min_coverage'] = 25
                 self.xp.fracture['start_k'] = 17
-                self.xp.fracture['min_reads'] = qc.find_read_count_threshold(in_file, method="kmeans")
+                self.xp.fracture['min_reads'] = 10 #qc.find_read_count_threshold(in_file, method="kmeans")
             else:
-                self.xp.fracture['min_reads'] = qc.find_read_count_threshold(in_file, 
-                                                                 method=self.xp.fracture['method_th'])
+                self.xp.fracture['min_reads'] = 10 #qc.find_read_count_threshold(in_file, 
+                                                   #              method=self.xp.fracture['method_th'])
 
 
             if not self.xp.dry:
@@ -728,6 +740,46 @@ class Pipeline:
             elif step == PipelineStep.FRACTURE:
                 step_summary['metrics'] = metrics
         
+        # Add figures information
+        figure_mapping = {
+            PipelineStep.PARQUET: [],
+            PipelineStep.PREPROCESS: [
+                f"{self.xp.target_sample}_coverage.png",
+                f"{self.xp.target_sample}_sat-coverage.png",
+                f"{self.xp.target_sample}_anchors.png",
+                f"{self.xp.target_sample}_feasible.png"
+            ],
+            PipelineStep.FRACTURE: []
+        }
+        
+        if step in figure_mapping and hasattr(self.xp, 'sample_figs'):
+            figure_files = figure_mapping[step]
+            if figure_files:
+                # Check which figures actually exist
+                figures_dir = Path(self.xp.sample_figs)
+                if figures_dir.exists():
+                    existing_figures = []
+                    for figure in figure_files:
+                        figure_path = figures_dir / figure
+                        if figure_path.exists():
+                            existing_figures.append(f"../figures/{figure}")
+                            
+                    if existing_figures:
+                        step_summary['figures'] = existing_figures
+        
+        # Check for output files
+        if results and results.results:
+            output_files = []
+            if step == PipelineStep.PARQUET and 'parsed_fn' in results.results:
+                output_files.append(results.results['parsed_fn'])
+            elif step == PipelineStep.PREPROCESS and 'parsed_reads' in results.results:
+                output_files.append(results.results['parsed_reads'])
+            elif step == PipelineStep.FRACTURE and 'contigs' in results.results:
+                output_files.append(results.results['contigs'])
+                
+            if output_files:
+                step_summary['output_files'] = output_files
+                
         # Update summary
         summary[step.name.lower()] = step_summary
         
@@ -740,10 +792,11 @@ class Pipeline:
     def _generate_markdown_report(self, summary: dict) -> None:
         """
         Generate a markdown report from the summary JSON.
-        Includes a summary table of all metrics across all steps.
+        Includes a summary table of all metrics across all steps and figures generated during the pipeline.
         """
         from pathlib import Path
         import datetime
+        import glob
         
         report_path = Path(f"{self.xp.pro_workdir}/{self.xp.target_sample}/pipeline_summary.md")
         
@@ -814,6 +867,40 @@ class Pipeline:
             
             f.write("\n")
             
+            # Add figures section at the top level
+            f.write("## Generated Figures\n\n")
+            figure_path = Path(f"{self.xp.sample_figs}")
+            
+            if figure_path.exists():
+                figures = list(figure_path.glob(f"{self.xp.target_sample}*.png"))
+                if figures:
+                    # Group figures by category based on filename patterns
+                    figure_categories = {
+                        "Coverage Analysis": ["coverage.png"],
+                        "Saturation Coverage": ["sat-coverage.png"],
+                        "Anchor Analysis": ["anchors.png", "feasible.png"],
+                        "Threshold Detection": ["kmeans", "kneedle"],
+                        "Other": []
+                    }
+                    
+                    for category, patterns in figure_categories.items():
+                        category_figures = []
+                        for fig in figures:
+                            if any(pattern in fig.name for pattern in patterns):
+                                category_figures.append(fig)
+                                
+                        if category_figures:
+                            f.write(f"### {category}\n\n")
+                            for fig in category_figures:
+                                rel_path = Path("../figures") / fig.name
+                                f.write(f"![{fig.stem}]({rel_path})\n\n")
+                            
+                            f.write("\n")
+                else:
+                    f.write("*No figures generated yet*\n\n")
+            else:
+                f.write("*Figures directory not found*\n\n")
+            
             # Detailed section for each step
             f.write("## Step Details\n\n")
             
@@ -827,6 +914,14 @@ class Pipeline:
                 
                 if 'log_file' in step_info:
                     f.write(f"**Log File:** [{step_name}.log]({step_info['log_file']})\n\n")
+                
+                # Show step-specific figures from summary
+                if 'figures' in step_info and step_info['figures']:
+                    f.write("**Figures:**\n\n")
+                    for fig_path in step_info['figures']:
+                        fig_name = Path(fig_path).name
+                        f.write(f"- [{fig_name}]({fig_path})\n")
+                    f.write("\n")
                 
                 # Show output files
                 if 'output_files' in step_info and step_info['output_files']:
