@@ -413,16 +413,8 @@ class Pipeline:
                 ldf.drop('^_.+$').sink_parquet(out_file)
                 # extract QC fields
                 metrics_df = ldf.drop('^[^_].+$').unique().collect()
-                metrics = {i:metrics_df[i][0] for i in metrics_df.columns}
 
-                        
-                metrics['total_reads_ont'] = pl.scan_parquet(out_file).collect().height,
-                metrics['total_umis_ont']=  (
-                                    pl.scan_parquet(out_file)
-                                    .select('umi')
-                                    .unique()
-                                    .collect()
-                                    .height)
+                metrics = {i[1:]:metrics_df[i][0] for i in metrics_df.columns}
                 metrics_df.write_parquet(out_file_qc)
 
                 self.logger.info(f"exported parsed reads to {out_file}")
@@ -433,7 +425,6 @@ class Pipeline:
                                  'preprocess_qc': out_file_qc,
                                  },
                         metrics=metrics,
-                        
                         )
             pass
         except Exception as e:
