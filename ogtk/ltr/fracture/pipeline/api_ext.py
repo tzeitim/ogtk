@@ -296,16 +296,25 @@ class PllPipeline:
     def __init__(self, ldf: pl.LazyFrame) -> None:
         self._ldf = ldf
 
-    def parse_reads(self, umi_len, anchor_ont, intbc_5prime):
+    # [12N][6N]
+    # [  18N  ]
+    def parse_reads(self, umi_len, anchor_ont, sbc_len):
+        ''' sbc_len : sample barcode length'''
+        # _field_name represent QC columns
         return(
                 self._ldf
                     .with_columns(pl.col('r1_seq').str.slice(0, umi_len).alias('umi'))
+                    .with_columns(pl.col('r1_seq').str.slice(umi_len, sbc_len).alias('sbc'))
                     .with_columns(pl.col('r1_seq').str.contains(anchor_ont).alias('ont'))
                     .filter(pl.col('ont'))
+                    #.with_columns(pl.col('umi').str.slice(12, 6).alias('sa'))
+                    .with_columns(pl.col('r1_seq')
+                                  .str.extract(f'(.*?){anchor_ont}.*$',1)
+                                  .str.len_chars().alias('pp')
+                                  )
+                    .with_columns((pl.col('pp')==umi_len+sbc_len).alias('valid_umi'))
+                    .with_columns(_valid_umis=pl.col('valid_umi').mean())
+                    .with_columns(_n_valid_umis=pl.col('valid_umi').sum())
+                    .filter(pl.col('valid_umi'))
                     .with_columns(pl.len().over('umi').alias('reads'))
-                    # strip out the UMI from R1
-                    .with_columns(pl.col('r1_seq').str.replace(f"^.+?{anchor_ont}", anchor_ont))
-                    # strip out the sequences up to intbc_5prime 
-        #            .with_columns(pl.col('r2_seq').str.replace(f'^.+?{intbc_5prime}', intbc_5prime))
                 )    
-
