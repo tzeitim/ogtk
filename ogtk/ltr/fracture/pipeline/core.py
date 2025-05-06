@@ -423,7 +423,7 @@ class Pipeline:
                                     .unique()
                                     .collect()
                                     .height)
-                metrics_df.to_parquet(out_file_qc)
+                metrics_df.write_parquet(out_file_qc)
 
                 self.logger.info(f"exported parsed reads to {out_file}")
 
