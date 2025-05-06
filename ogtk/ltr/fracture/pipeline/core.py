@@ -413,11 +413,17 @@ class Pipeline:
                 ldf.drop('^_.+$').sink_parquet(out_file)
                 # extract QC fields
                 metrics_df = ldf.drop('^[^_].+$').unique().collect()
-
+                
                 metrics = {i[1:]:metrics_df[i][0] for i in metrics_df.columns}
-                metrics_df.write_parquet(out_file_qc)
+
+                (
+                    metrics_df.
+                    rename({i:i[1:] for i in metrics_df.columns})
+                    .write_parquet(out_file_qc)
+                )
 
                 self.logger.info(f"exported parsed reads to {out_file}")
+                self.logger.info(f"exported parsed QC metrics to {out_file_qc}")
 
                 return StepResults(
                         results={'xp': self.xp,
