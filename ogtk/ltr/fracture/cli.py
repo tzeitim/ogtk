@@ -72,6 +72,12 @@ def parse_args():
 		nargs="*",
 		help="Regenerate plots for specified steps (or all if no steps provided)"
 	)
+    
+    parser.add_argument(
+        "--regenerate-summary",
+        action="store_true",
+        help="Regenerate markdown summary from existing JSON data"
+    )
 
     return parser
 
@@ -88,6 +94,7 @@ def lazy_import():
     modules['Pipeline'] = import_module('ogtk.ltr.fracture.pipeline.core').Pipeline
     modules['FractureXp'] = import_module('ogtk.ltr.fracture.pipeline.types').FractureXp
     modules['PlotRegenerator'] = import_module('ogtk.ltr.fracture.pipeline.plot_gen').PlotRegenerator
+    modules['SummaryRegenerator'] = import_module('ogtk.ltr.fracture.pipeline.plot_gen').SummaryRegenerator
     return modules
 
 def main():
@@ -133,6 +140,14 @@ def main():
     Regenerate plots for a specific sample::
 
         $ python pipeline.py --config config.yml --target-sample "sample_id" --regenerate-plots
+        
+    Regenerate markdown summary from existing JSON data::
+    
+        $ python pipeline.py --config config.yml --target-sample "sample_id" --regenerate-summary
+        
+    Regenerate both plots and summary::
+    
+        $ python pipeline.py --config config.yml --target-sample "sample_id" --regenerate-plots --regenerate-summary
 
     Returns
     -------
@@ -165,16 +180,27 @@ def main():
         Pipeline = modules['Pipeline']
         FractureXp = modules['FractureXp']
         PlotRegenerator = modules['PlotRegenerator']
+        SummaryRegenerator = modules['SummaryRegenerator']
         
         # Initialize Xp configuration
         xp = FractureXp(conf_fn=args.config)
 
-        # Skip the pipeline if we are only plotting
-        if args.regenerate_plots is not None:
-            logger.info("Regenerating plots")
+        # Skip the pipeline if we are only regenerating plots or summary
+        if args.regenerate_plots is not None or args.regenerate_summary:
             pipeline = Pipeline(xp)
-            plot_regenerator = PlotRegenerator(pipeline)
-            plot_regenerator.regenerate_plots(steps=args.regenerate_plots)
+            
+            # Handle plot regeneration
+            if args.regenerate_plots is not None:
+                logger.info("Regenerating plots")
+                plot_regenerator = PlotRegenerator(pipeline)
+                plot_regenerator.regenerate_plots(steps=args.regenerate_plots)
+            
+            # Handle summary regeneration
+            if args.regenerate_summary:
+                logger.info("Regenerating markdown summary")
+                summary_regenerator = SummaryRegenerator(pipeline)
+                summary_regenerator.regenerate_summary()
+                
             return 0
 
         # Handle --all-all flag (all samples, all steps)
