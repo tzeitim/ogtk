@@ -14,6 +14,7 @@ class FractureXp(Xp):
     pro_datain: str
     modality: str
     umi_len: int
+    sbc_len: int
     rev_comp: bool
     anchor_ont: str
     samples: List[str]
