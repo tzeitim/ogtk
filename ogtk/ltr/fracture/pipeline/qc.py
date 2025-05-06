@@ -142,7 +142,7 @@ def find_read_count_threshold(df, min_reads=10, method="kneedle"):
     """
     # Get unique UMIs with their read counts and sort
     import os 
-    os.environ['OPENBLAS_NUM_THREADS'] = '8'
+    os.environ['OPENBLAS_NUM_THREADS'] = '4'
 
     ranked_umis = (pl.scan_parquet(df)
                    .filter(pl.col('reads') >= min_reads)
