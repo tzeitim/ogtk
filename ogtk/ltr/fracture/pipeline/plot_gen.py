@@ -2,6 +2,43 @@ from pathlib import Path
 from typing import Optional, List
 from .core import Pipeline, PipelineStep, StepResults
 
+class SummaryRegenerator:
+    """Utility class for regenerating the markdown summary from previous pipeline runs"""
+    
+    def __init__(self, pipeline: Pipeline):
+        self.pipeline = pipeline
+        self.xp = pipeline.xp
+        self.logger = pipeline.logger
+        
+    def regenerate_summary(self) -> None:
+        """Regenerate the markdown summary from existing JSON summary file.
+        
+        This loads the existing JSON summary file and generates a new 
+        markdown report based on its contents.
+        """
+        from pathlib import Path
+        import json
+        
+        # Path to the summary file
+        summary_path = Path(f"{self.xp.pro_workdir}/{self.xp.target_sample}/pipeline_summary.json")
+        
+        if not summary_path.exists():
+            self.logger.warning(f"No pipeline summary found at {summary_path}")
+            return
+            
+        try:
+            # Load the summary JSON
+            with open(summary_path, 'r') as f:
+                summary = json.load(f)
+                
+            # Generate a new markdown report
+            self.logger.step(f"Regenerating markdown summary for {self.xp.target_sample}")
+            self.pipeline._generate_markdown_report(summary)
+            self.logger.info("Successfully regenerated markdown summary")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to regenerate markdown summary: {str(e)}", with_traceback=True)
+
 class PlotRegenerator:
     """Utility class for regenerating plots from previous pipeline runs"""
     
