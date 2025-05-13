@@ -487,16 +487,16 @@ class Pipeline:
                         pl.read_parquet(in_file)
                         .filter(filter_expr)
                         .pp.assemble_umis( #pyright: ignore
-                                          k=self.xp.fracture['start_k'], 
-                                          min_coverage=self.xp.fracture['start_min_coverage'],
-                                          start_anchor=self.xp.start_anchor,
-                                          end_anchor=self.xp.end_anchor,
-                                          min_length=None,
-                                          auto_k=False,
-                                          export_graphs=False,
-                                          only_largest=True,
-                                          method=self.xp.fracture['assembly_method'],
-                                          )
+                          k=self.xp.fracture['start_k'], 
+                          min_coverage=self.xp.fracture['start_min_coverage'],
+                          start_anchor=self.xp.start_anchor,
+                          end_anchor=self.xp.end_anchor,
+                          min_length=None,
+                          auto_k=False,
+                          export_graphs=False,
+                          only_largest=True,
+                          method=self.xp.fracture['assembly_method'],
+                          )
                         .with_columns(pl.col('contig').str.len_chars().alias('length'))
                         .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                         .join(
