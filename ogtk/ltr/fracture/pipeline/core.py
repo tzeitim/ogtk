@@ -1,3 +1,4 @@
+from logging import lastResort
 from pathlib import Path 
 from functools import wraps
 from typing import Any, Callable, NamedTuple, Dict, Optional
@@ -410,7 +411,20 @@ class Pipeline:
                 )
 
                 # save without gc fields
-                ldf.drop('^_.+$').sink_parquet(out_file)
+                if not self.xp.parse_read1:
+                    ldf.drop('^_.+$').sink_parquet(out_file)
+                else:
+                    # if r1 is long and informative: e.g long paired-end
+                    self.logger.warning(f"extracting juice from R1")
+                    (
+                        pl.concat(
+                            [
+                                ldf, 
+                                ldf.pp.parse_read1(anchor_ont=self.xp.anchor_ont)
+                            ]
+                        ).sink_parquet(out_file)
+                     )
+
                 # extract QC fields
                 metrics_df = ldf.drop('^[^_].+$').unique().collect()
                 
@@ -468,6 +482,7 @@ class Pipeline:
                 self.logger.info(f"exporting assembled contigs to {out_file}")
                 
                 filter_expr= pl.col('reads')>=self.xp.fracture['min_reads']
+
                 df_contigs = (
                         pl.read_parquet(in_file)
                         .filter(filter_expr)
@@ -484,8 +499,13 @@ class Pipeline:
                                           )
                         .with_columns(pl.col('contig').str.len_chars().alias('length'))
                         .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
-                        .join(pl.scan_parquet(in_file).select('umi','reads').filter(filter_expr).unique().collect(), 
-                              left_on='umi', right_on='umi', how='left')
+                        .join(
+                            pl.scan_parquet(in_file)
+                              .select('umi','reads')
+                              .filter(filter_expr)
+                              .unique()
+                              .collect(), 
+                           left_on='umi', right_on='umi', how='left')
                         )
 
                 df_contigs.write_parquet(out_file)
@@ -501,7 +521,7 @@ class Pipeline:
                         metrics={'success_rate':success_rate,
                                  'total_assembled':total_assembled,
                                  'mean_contig_length': df_contigs.filter(pl.col('length')>0).get_column('length').mean(),
-                                 'mdian_contig_length': df_contigs.filter(pl.col('length')>0).get_column('length').median(),
+                                 'median_contig_length': df_contigs.filter(pl.col('length')>0).get_column('length').median(),
                                  },
                         )
 
@@ -704,6 +724,9 @@ class Pipeline:
         import datetime
         from pathlib import Path
         
+        # TODO include at the same level of the steps in the JSON file a
+        # summary of the sample, like name, date, input material
+
         # Path to the summary file
         summary_path = Path(f"{self.xp.pro_workdir}/{self.xp.target_sample}/pipeline_summary.json")
         
@@ -722,6 +745,7 @@ class Pipeline:
         
         # Create step summary
         step_summary = {
+            'sample_id': self.xp.target_sample,
             'timestamp': timestamp,
             'params_file': f"logs/{step.name.lower()}_params.log",
             'log_file': f"logs/{step.name.lower()}.log",
@@ -793,7 +817,6 @@ class Pipeline:
         """
         from pathlib import Path
         import datetime
-        import glob
         
         report_path = Path(f"{self.xp.pro_workdir}/{self.xp.target_sample}/pipeline_summary.md")
         

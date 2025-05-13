@@ -203,6 +203,7 @@ class PlPipeline:
                     min_length: int | None = None,
                     auto_k: bool = True,
                     export_graphs: bool = False,
+                    groups = ['umi', 'sbc'],
                     only_largest: bool = True) -> pl.DataFrame:
         """
         """
@@ -210,7 +211,7 @@ class PlPipeline:
             self._df
              .with_columns(pl.col('r2_seq').str.replace(f'^.*{start_anchor}', start_anchor))
              .with_columns(pl.col('r2_seq').str.replace(f'{end_anchor}.*$', end_anchor))
-            .group_by(['umi']).agg(
+            .group_by(groups).agg(
                 rogtk.assemble_sequences(
                     expr=pl.col("r2_seq"),
                     k=k,
@@ -324,3 +325,17 @@ class PllPipeline:
                     .filter(pl.col('valid_umi'))
                     .with_columns(pl.len().over('umi').alias('reads'))
                 )    
+
+    def parse_read1(self, anchor_ont):
+        """ Optional step for parsing also read 1. 
+            This is needed to extract additional information when R1 is long
+            or when fragmentation didn't ocurr and the pipeline is used for error correction
+            TODO: currently it's just a hack that replaces r2_seq keeping the rest of the fields equal
+                e.g. the r2_qual won't match the r2_seq field
+                The output of this function should be concatenated to the original df
+
+        """
+        return (
+                self._ldf
+                    .with_columns(pl.col('r1_seq').str.extract(f'.*?{anchor_ont}(.*)$').alias('r2_seq'))
+                )

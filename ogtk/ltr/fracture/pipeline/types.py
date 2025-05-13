@@ -27,6 +27,7 @@ class FractureXp(Xp):
     force_tab: bool
     allow_wildcards: bool
     intbc_5prime: str
+    parse_read1: bool
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
