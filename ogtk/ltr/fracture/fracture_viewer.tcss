@@ -1,0 +1,125 @@
+Screen {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 2fr;
+    grid-rows: 1fr;
+}
+
+FilteredDirectoryTree {
+    border: solid green;
+    min-width: 30;
+}
+
+#dir-tree {
+    display: none;
+    scrollbar-gutter: stable;
+    overflow: auto;
+    width: auto;
+    height: 100%;
+    dock: left;
+}
+
+FractureExplorer.-show-raw #raw-json-display {
+    display: block;
+    max-width: 80%;
+}
+
+#metrics-container {
+    layout: vertical;
+    height: 100%;
+    overflow-y: auto;
+}
+
+MetricsTable {
+    height: auto;
+    min-height: 10;
+    margin: 1 0;
+}
+
+JSONDisplay {
+    border: solid blue;
+    overflow-y: auto;
+    height: auto;
+    min-height: 15;
+    margin: 1 0;
+}
+
+#raw-json-display {
+    border: solid purple;
+    margin-top: 1;
+    display: none;
+    overflow-y: auto;
+    width: auto;
+    height: auto;
+    dock: right;
+}
+
+#figures-button {
+    width: auto;
+    background: $accent;
+    color: $text;
+    display: none;
+}
+
+#figures-button.has-figures {
+    display: block;
+}
+
+#control-buttons {
+    width: 100%;
+    background: $surface;
+    padding: 1;
+    height: auto;
+    dock: bottom;
+}
+
+#compare-samples-button {
+    background: $accent-darken-1;
+    color: $text;
+    margin-right: 1;
+}
+
+#select-sample-button {
+    background: $success;
+    color: $text;
+    margin-right: 1;
+    display: none;
+}
+
+/* Style for selected samples */
+.selected-sample {
+    background: $success-darken-1;
+    color: $text;
+}
+.selected-sample {
+    background: $primary 20%;
+    color: $primary;
+    border-left: thick $primary;
+}
+
+/* Hover effect for sample nodes */
+DirectoryTree TreeNode:hover {
+    background: $surface-lighten-1;
+}
+
+/* Special styling for the experiment tree */
+#experiment-tree {
+    border: round $primary;
+    height: 100%;
+}
+
+#experiment-tree:focus {
+    border: round $accent;
+}
+
+/* Style for tree nodes with pipeline data */
+#experiment-tree TreeNode {
+    padding: 0 1;
+}
+
+#experiment-tree TreeNode.selected-sample {
+    background: $success 30%;
+    color: $success;
+    border-left: thick $success;
+    text-style: bold;
+}
