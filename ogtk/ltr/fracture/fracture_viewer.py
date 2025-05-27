@@ -17,6 +17,8 @@ from textual.screen import Screen, ModalScreen
 from textual import events
 from textual.reactive import reactive, var
 from textual.binding import Binding
+from textual.message import Message
+
 from rich.json import JSON
 from rich.panel import Panel
 from rich.table import Table
@@ -24,6 +26,52 @@ from rich.text import Text
 
 # Import the comparison functionality
 from fracture_compare import PipelineMetricsCollection, SampleMetrics
+import re
+
+pl.Config.set_float_precision(2)
+pl.Config.set_thousands_separator("_")
+
+def sanitize_id(name: str) -> str:
+    sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', name.lower())
+    if sanitized and sanitized[0].isdigit():
+        sanitized = f"id_{sanitized}"
+    sanitized = re.sub(r'_+', '_', sanitized)
+    sanitized = sanitized.strip('_')
+    return sanitized
+
+def _format_number(value, metric_name) -> str:
+    """Format numeric values with underscore separators for thousands."""
+    if isinstance(value, (int, float)):
+        # For percentages, rates, and similar metrics, format with 2 decimal places
+        if isinstance(value, float):
+            if any(keyword in metric_name.lower() for keyword in ["fraction", "rate", "mean", "median", "percent"]):
+                return f"{value:.2f}"
+            elif abs(value) >= 1000:
+                return f"{value:,.2f}".replace(",", "_")
+            else:
+                return f"{value:.2f}"  
+        
+        # For large integers, add underscore separators
+        if isinstance(value, int) and abs(value) >= 1000:
+            return f"{value:_}".replace(",", "_")
+        
+        # For large floats (non-percentages), add underscore separators
+        if isinstance(value, float) and abs(value) >= 1000:
+            int_part = int(value)
+            decimal_part = value - int_part
+            formatted_int = f"{int_part:_}".replace(",", "_")
+            return f"{formatted_int}{str(decimal_part)[1:]}"
+            
+    # Return as string for non-numeric or small numbers
+    return str(value)
+
+class SampleSelected(Message):
+    """Message sent when a sample is selected."""
+    
+    def __init__(self, sample_path: Path):
+        super().__init__()
+        self.sample_path = sample_path
+
 
 class FilteredDirectoryTree(DirectoryTree):
     def filter_paths(self, paths: Iterable[Path]) -> Iterable[Path]:
@@ -147,7 +195,222 @@ class FigureViewer(ModalScreen):
                     self.show_figure(self.figure_paths[idx])
             except (ValueError, IndexError):
                 self.notify("Invalid figure index", severity="error")
+###
+class SmartExperimentDirectoryTree(DirectoryTree):
+    """Directory tree that adapts to workdir or single experiment structure."""
+    BINDINGS = [
+        ("j", "cursor_down", "Down"),
+        ("k", "cursor_up", "Up"),
+        ("enter", "select_cursor", "Select"),
+        ("space", "select_cursor", "Select"),
+    ]
+    
+    def __init__(self, path: Path, **kwargs):
+        super().__init__(path, **kwargs)
+        self.selected_samples = set()
+        self.structure_type = self._detect_structure()
+        self.sample_nodes = {}  # Track sample nodes for styling
+    
+    def _detect_structure(self) -> str:
+        """Detect if this is 'workdir' or 'experiment' structure."""
+        try:
+            # Check if immediate subdirectories contain pipeline_summary.json
+            direct_samples = any(
+                (subdir / "pipeline_summary.json").exists() 
+                for subdir in self.path.iterdir() 
+                if subdir.is_dir() and not subdir.name.startswith('.')
+            )
+            
+            if direct_samples:
+                return "experiment"  # Direct samples: experiment/sample/pipeline_summary.json
+            else:
+                return "workdir"     # Nested: workdir/experiment/sample/pipeline_summary.json
+        except PermissionError:
+            return "workdir"  # Default fallback
+    
+    def filter_paths(self, paths: Iterable[Path]) -> Iterable[Path]:
+        """Filter based on detected structure."""
+        for path in paths:
+            if not path.is_dir() or path.name.startswith('.'):
+                continue
+                
+            if self.structure_type == "experiment":
+                # Show sample directories with pipeline_summary.json
+                if (path / "pipeline_summary.json").exists():
+                    yield path
+            else:  # workdir structure
+                # Show experiment directories that contain valid samples
+                if self._is_experiment_dir(path):
+                    yield path
+                elif self._is_valid_sample_dir(path):
+                    yield path
 
+    def deselect_all_samples(self) -> None:
+       """Deselect all selected sample directories."""
+       for sample_id in list(self.selected_samples):
+           if sample_id in self.sample_nodes:
+               self._update_node_style(self.sample_nodes[sample_id], selected=False)
+       
+       self.selected_samples.clear()
+       self.sample_nodes.clear()
+
+    def select_all_samples(self) -> int:
+        """Select all visible sample directories."""
+        selected_count = 0
+        
+        def visit_node(node):
+            nonlocal selected_count
+            if hasattr(node, 'data') and hasattr(node.data, 'path'):
+                if self._is_valid_sample_dir(node.data.path):
+                    sample_id = self._get_sample_id(node.data.path)
+                    if sample_id not in self.selected_samples:
+                        self.selected_samples.add(sample_id)
+                        self._update_node_style(node, selected=True)
+                        self.sample_nodes[sample_id] = node
+                        selected_count += 1
+                        # this makes the selection visible by the main app
+                        self.post_message(SampleSelected(node.data.path))
+            
+            for child in node.children:
+                visit_node(child)
+        
+        visit_node(self.root)
+        return selected_count
+
+    def _is_experiment_dir(self, path: Path) -> bool:
+        """Check if this directory contains sample subdirectories."""
+        try:
+            # Look for subdirectories that contain pipeline_summary.json
+            for subdir in path.iterdir():
+                if subdir.is_dir() and (subdir / "pipeline_summary.json").exists():
+                    return True
+        except PermissionError:
+            pass
+        return False
+    
+    def _is_valid_sample_dir(self, path: Path) -> bool:
+        """Check if this is a valid sample directory."""
+        return (path / "pipeline_summary.json").exists()
+
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        """Handle node highlighting for live display updates."""
+        if not hasattr(event.node, 'data') or not hasattr(event.node.data, 'path'):
+            return
+ 
+        selected_path = event.node.data.path
+        # Only process sample directories for live display
+        if self._is_valid_sample_dir(selected_path):
+            # Post message for live display update
+            self.post_message(SampleSelected(selected_path))
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        """Handle node selection - works with Textual's Tree widget."""
+        if not hasattr(event.node, 'data') or not hasattr(event.node.data, 'path'):
+            return
+            
+        selected_path = event.node.data.path
+        
+        # Only process sample directories
+        if self._is_valid_sample_dir(selected_path):
+            sample_id = self._get_sample_id(selected_path)
+            
+            # Toggle selection
+            if sample_id in self.selected_samples:
+                self.selected_samples.remove(sample_id)
+                self._update_node_style(event.node, selected=False)
+                #self.app.notify(f"Sample '{sample_id}' deselected")
+            else:
+                self.selected_samples.add(sample_id)
+                self._update_node_style(event.node, selected=True)
+                #self.app.notify(f"Sample '{sample_id}' selected")
+            
+            # Store node reference for future styling updates
+            self.sample_nodes[sample_id] = event.node
+            
+            # Trigger sample selection event for the main app
+            self.post_message(SampleSelected(selected_path))
+    
+    def _update_node_style(self, node, selected: bool) -> None:
+        """Update the visual style of a node based on selection state."""
+        if selected:
+            #node.add_class("selected-sample")
+            # Update the label to show selection
+            if hasattr(node, '_label'):
+                original_label = str(node._label).replace(" ✓", "")
+                node.set_label(f"{original_label} ✓")
+        else:
+            #node.remove_class("selected-sample")
+            # Remove selection indicator from label
+            if hasattr(node, '_label'):
+                original_label = str(node._label).replace(" ✓", "")
+                node.set_label(original_label)
+    
+    def _get_sample_id(self, sample_path: Path) -> str:
+        """Get the sample ID based on structure type."""
+        if self.structure_type == "experiment":
+            # Just the sample name
+            return sample_path.name
+        else:
+            # experiment/sample format
+            return f"{sample_path.parent.name}/{sample_path.name}"
+    
+    def get_selected_sample_paths(self) -> list[Path]:
+        """Get paths to all selected samples."""
+        selected_paths = []
+        for sample_id in self.selected_samples:
+            if self.structure_type == "experiment":
+                sample_path = self.path / sample_id
+            else:
+                experiment_name, sample_name = sample_id.split('/', 1)
+                sample_path = self.path / experiment_name / sample_name
+            
+            if sample_path.exists():
+                selected_paths.append(sample_path)
+        return selected_paths
+    
+    def get_selected_sample_ids(self) -> set[str]:
+        """Get the selected sample IDs."""
+        return self.selected_samples.copy()
+    
+    def clear_selection(self) -> None:
+        """Clear all selected samples."""
+        for sample_id in list(self.selected_samples):
+            if sample_id in self.sample_nodes:
+                self._update_node_style(self.sample_nodes[sample_id], selected=False)
+        
+        self.selected_samples.clear()
+        self.sample_nodes.clear()
+        self.app.notify("All samples deselected")
+    
+    def select_sample_by_id(self, sample_id: str) -> bool:
+        """Programmatically select a sample by ID. Returns True if successful."""
+        if self.structure_type == "experiment":
+            sample_path = self.path / sample_id
+        else:
+            if '/' not in sample_id:
+                return False
+            experiment_name, sample_name = sample_id.split('/', 1)
+            sample_path = self.path / experiment_name / sample_name
+        
+        if not sample_path.exists() or not self._is_valid_sample_dir(sample_path):
+            return False
+        
+        if sample_id not in self.selected_samples:
+            self.selected_samples.add(sample_id)
+            
+            # Find and update the corresponding node if it exists
+            for node_id, node in self.nodes.items():
+                if (hasattr(node, 'data') and 
+                    hasattr(node.data, 'path') and 
+                    node.data.path == sample_path):
+                    self._update_node_style(node, selected=True)
+                    self.sample_nodes[sample_id] = node
+                    break
+            
+            return True
+        
+        return False
+###
 class ExperimentList(Static):
     """Widget that displays a list of valid experiments"""
     def __init__(
@@ -187,39 +450,23 @@ class MetricsTable(Static):
         self.metrics = metrics or {}
         self.stage = stage
 
-    def update_metrics(self, metrics: Dict[str, Any], stage: str) -> None:
+    def update_metrics(self, metrics: Dict[str, Any], stage: str, path: Path|None = None) -> None:
         """Update the metrics data."""
         self.metrics = metrics
         self.stage = stage
+        self.path = path
         self.update(self._render_metrics())
 
     def _format_number(self, value, metric_name) -> str:
         """Format numeric values with underscore separators for thousands."""
-        if isinstance(value, (int, float)):
-            # For percentages, rates, and similar metrics, format with 2 decimal places
-            if isinstance(value, float) and any([i in metric_name for i in ["fraction", "rate", "mean", "median"]]):
-                return f"{value:.2f}"
-            
-            # For large integers, add underscore separators
-            if isinstance(value, int) and abs(value) >= 1000:
-                return f"{value:_}".replace(",", "_")
-            
-            # For large floats (non-percentages), add underscore separators
-            if isinstance(value, float) and abs(value) >= 1000:
-                int_part = int(value)
-                decimal_part = value - int_part
-                formatted_int = f"{int_part:_}".replace(",", "_")
-                return f"{formatted_int}{str(decimal_part)[1:]}"
-                
-        # Return as string for non-numeric or small numbers
-        return str(value)
+        return _format_number(value, metric_name)
 
     def _render_metrics(self) -> Panel:
         """Render the metrics as a table."""
         if not self.metrics:
             return Panel("No metrics selected")
 
-        table = Table(title=f"{self.stage.capitalize()} Metrics")
+        table = Table(title=self.path.name)
         table.add_column("Metric")
         table.add_column("Value")
 
@@ -227,7 +474,7 @@ class MetricsTable(Static):
             formatted_value = self._format_number(value, key)
             table.add_row(key, formatted_value)
 
-        return Panel(table, title=f"{self.stage.capitalize()} Metrics")
+        return Panel(table, title=f"{self.path.as_posix()} Metrics")
 
 
     def compose(self) -> ComposeResult:
@@ -270,7 +517,14 @@ class ComparisonDataTable(Static):
 
         # Add rows
         for row in self.df.to_dicts():
-            table.add_row(*[str(row[col]) for col in self.df.columns])
+            formatted_row = []
+            for col in self.df.columns:
+                value = row[col]
+                if col == "sample_id":  
+                    formatted_row.append(str(value))
+                else:
+                    formatted_row.append(_format_number(value, col))
+            table.add_row(*formatted_row)
 
         return Panel(table, title=self.title)
 
@@ -287,12 +541,17 @@ class ComparisonScreen(Screen):
     BINDINGS = [
         ("q", "return_to_main", "Return to Main"),
         ("r", "run_comparison", "Run Comparison"),
+        ("tab", "focus_next_button", "Next Button"),
+        ("shift+tab", "focus_previous_button", "Previous Button"),
+        ("up", "focus_previous_checkbox", "Previous Checkbox"),
+        ("down", "focus_next_checkbox", "Next Checkbox"),
     ]
 
     def __init__(self, collection: PipelineMetricsCollection, preselected_samples=None):
         super().__init__()
         self.collection = collection
         self.selected_samples = set(preselected_samples or [])
+        self.selected_samples = set(self._normalize_ids())
 
     def action_return_to_main(self) -> None:
         """Return to main screen."""
@@ -302,51 +561,93 @@ class ComparisonScreen(Screen):
         """Run the comparison with selected samples."""
         self._run_comparison()
 
+    def action_focus_next_button(self) -> None:
+        """Focus the next button, skipping checkboxes."""
+        buttons = list(self.query("Button"))
+        if not buttons:
+            return
+        
+        current_focus = self.focused
+        if current_focus and current_focus in buttons:
+            current_index = buttons.index(current_focus)
+            next_index = (current_index + 1) % len(buttons)
+            buttons[next_index].focus()
+        else:
+            # If not currently on a button, focus the first button
+            buttons[0].focus()
+
+    def action_focus_previous_button(self) -> None:
+        """Focus the previous button, skipping checkboxes."""
+        buttons = list(self.query("Button"))
+        if not buttons:
+            return
+        
+        current_focus = self.focused
+        if current_focus and current_focus in buttons:
+            current_index = buttons.index(current_focus)
+            prev_index = (current_index - 1) % len(buttons)
+            buttons[prev_index].focus()
+        else:
+            # If not currently on a button, focus the last button
+            buttons[-1].focus()
+
+    def action_focus_next_checkbox(self) -> None:
+        """Focus the next checkbox."""
+        checkboxes = list(self.query("Checkbox"))
+        if not checkboxes:
+            return
+        
+        current_focus = self.focused
+        if current_focus and current_focus in checkboxes:
+            current_index = checkboxes.index(current_focus)
+            next_index = (current_index + 1) % len(checkboxes)
+            checkboxes[next_index].focus()
+        else:
+            # If not currently on a checkbox, focus the first checkbox
+            checkboxes[0].focus()
+
+    def action_focus_previous_checkbox(self) -> None:
+        """Focus the previous checkbox."""
+        checkboxes = list(self.query("Checkbox"))
+        if not checkboxes:
+            return
+        
+        current_focus = self.focused
+        if current_focus and current_focus in checkboxes:
+            current_index = checkboxes.index(current_focus)
+            prev_index = (current_index - 1) % len(checkboxes)
+            checkboxes[prev_index].focus()
+        else:
+            # If not currently on a checkbox, focus the last checkbox
+            checkboxes[-1].focus()
+
     def compose(self) -> ComposeResult:
         """Compose the screen layout."""
-        with Container(id="comparison-container"):
-            yield Header(show_clock=True)
+        yield Header(show_clock=True)
 
+        with Vertical(id="left-panel"):
             with Container(id="sample-selection"):
                 yield Label("Pre-selected samples to compare:", id="selection-label")
 
-                pre_selected = [(sample, sample, True) for sample in self.selected_samples]
-                yield SelectionList(*pre_selected, id="pre-selected")
+                with Vertical(id="checkbox-container"):
+
+                    for sample_id in self.selected_samples:
+                        sample_label = sanitize_id(sample_id)
+                        checkbox = Checkbox(sample_id, classes="sample-checkbox", id=f"sample-{sample_label}", value=True)
+                        #checkbox.can_focus = False
+                        yield checkbox
 
                 yield Button("Compare Selected Samples", id="compare-button")
 
-            with Container(id="comparison-metrics"):
-                # Add preset comparison buttons
-                with Horizontal():
-                    yield Button("Compare Valid UMI %", classes="metric-button", id="compare-valid-umi")
-                    yield Button("Compare Read Coverage", classes="metric-button", id="compare-read-coverage")
+            with Vertical(id="metric-buttons"):
+                yield Button("Compare Valid UMI %", classes="metric-button", id="compare-valid-umi")
+                yield Button("Compare Read Coverage", classes="metric-button", id="compare-read-coverage")
 
                 # Results display
-                yield ComparisonDataTable(id="comparison-table")
+        with Vertical(id="right-panel"):
+            yield ComparisonDataTable(id="comparison-table")
 
-            yield Footer()
-
-    def on_mount(self) -> None:
-        """Setup the screen when mounted."""
-        self._update_sample_list()
-
-    def _update_sample_list(self) -> None:
-        """Update the sample selection grid."""
-        samples = self.selected_samples
-
-
-        # Calculate the grid layout - we want roughly a square grid
-        import math
-        cols = max(1, int(math.sqrt(len(samples))))
-
-
-        # Add checkboxes for each sample
-        for sample_id in samples:
-            sample_label = f"{sample_id}"
-            checkbox = Checkbox(sample_label, classes="sample-checkbox", id=f"sample-{sample_id}")
-            checkbox.value = True
-            checkbox.add_class("checkbox-selected")
-
+        yield Footer()
 
     def _run_comparison(self) -> None:
         """Run the selected comparison."""
@@ -357,14 +658,24 @@ class ComparisonScreen(Screen):
         # Default to valid UMI comparison
         df = self.collection.get_valid_umi_stats()
 
-        # Filter to selected samples only
-        df = df.filter(pl.col("sample_id").is_in(list(self.selected_samples)))
+        df = df.filter(pl.col("sample_id").is_in(self.selected_samples))
 
         if df.height == 0:
             self.notify("No valid data for selected samples", severity="warning")
             return
 
         self.query_one("#comparison-table", ComparisonDataTable).update_data(df, "Valid UMI Comparison")
+
+    def _normalize_ids(self) -> List:
+        """Normalizes ids to handle paths at different levels"""
+        normalized_ids = []
+        for sample_id in self.selected_samples:
+            if '/' in sample_id:
+                # Extract just the sample name for workdir structure
+                normalized_ids.append(sample_id.split('/')[-1])
+            else:
+                normalized_ids.append(sample_id)
+        return normalized_ids
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses."""
@@ -405,13 +716,14 @@ class ComparisonScreen(Screen):
         """Handle checkbox selection changes."""
         checkbox_id = event.checkbox.id
         if checkbox_id and checkbox_id.startswith("sample-"):
-            sample_id = checkbox_id[7:]  # Remove "sample-" prefix
-
+            # Get the original sample ID from the checkbox label/text
+            sample_id = str(event.checkbox.label)
+            
             if event.value:
                 self.selected_samples.add(sample_id)
             else:
                 self.selected_samples.discard(sample_id)
-
+                
 
 class FractureExplorer(App):
     """A Textual app to explore Fracture pipeline outputs."""
@@ -452,19 +764,19 @@ class FractureExplorer(App):
     def compose(self) -> ComposeResult:
         """Compose the app layout."""
         yield Header(show_clock=True)
-        #yield FilteredDirectoryTree(self.experiment_dir, id="dir-tree")
-        yield JSONDisplay(id="raw-json-display")
-
+        
         with Vertical(id='experiments'):
-            yield ExperimentList(id="experiment-list", path=self.experiment_dir)
+            yield SmartExperimentDirectoryTree(self.experiment_dir, id="experiment-tree")
 
         with Vertical(id="metrics-container"):
             yield MetricsTable(id="all-metrics", stage="all")
-
+        
             # Add a JSONDisplay to show the full JSON data
-            #yield JSONDisplay(id="raw-json-display")
+            yield JSONDisplay(id="raw-json-display")
 
             with Horizontal(id="control-buttons"):
+                yield Button("Select All", id="select-all-button")
+                yield Button("Clear Selection", id="deselect-all-button")
                 yield Button("Compare Samples", id="compare-samples-button")
                 yield Button("Select Sample", id="select-sample-button")
                 yield Button("View Figures", id="figures-button")
@@ -472,96 +784,74 @@ class FractureExplorer(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one(SelectionList).border_title = "Select samples to compare"
-        #self.query_one(Pretty).border_title = "Selected games"
+        """Setup when the app is mounted."""
+        # Remove the SelectionList references since we're not using it anymore
+        pass
 
-    @on(events.Mount)
-    @on(SelectionList.SelectedChanged)
-    def update_selected_view(self) -> None:
-        selected_set = self.query_one(SelectionList).selected 
-        #self.query_one(Pretty).update(selected_set)
-        self.selected_samples = selected_set
-
-    @on(SelectionList.SelectionHighlighted)
-    def on_experiment_highlighted(self, event:SelectionList.SelectionHighlighted):
-        experiment_list = self.query_one(SelectionList)
-        highlighted_index = event.selection.value
-        #self.query_one(Pretty).update(highlighted_index)
-
-    def on_selection_list_selection_highlighted(self, event: SelectionList.SelectionHighlighted) -> None:
-        """Load and display JSON data when navigating with keyboard in the selection list."""
-        sample_name = event.selection.value
+    def on_sample_selected(self, event: SampleSelected) -> None:
+        """Handle sample selection from the directory tree."""
+        sample_dir = event.sample_path
         
-        # Find the sample directory
-        sample_dir = None
-        for path in self.experiment_dir.iterdir():
-            if path.is_dir() and path.name == sample_name and (path/'pipeline_summary.json').exists():
-                sample_dir = path
-                break
-        
-        if sample_dir:
-            # Load the JSON data
-            try:
-                with open(sample_dir / "pipeline_summary.json", "r") as f:
-                    data = json.load(f)
-                
-                # Update the current sample directory
-                self.current_sample_dir = sample_dir
-                
-                # Reset figures list
-                self.current_figures = []
-                figures_button = self.query_one("#figures-button", Button)
-                figures_button.remove_class("has-figures")
-                
-                # Update selection button
-                sample_id = sample_dir.name
-                select_button = self.query_one("#select-sample-button", Button)
+        try:
+            with open(sample_dir / "pipeline_summary.json", "r") as f:
+                data = json.load(f)
+            
+            # Update the current sample directory
+            self.current_sample_dir = sample_dir
+            
+            # Update select button text
+            tree = self.query_one("#experiment-tree", SmartExperimentDirectoryTree)
+            sample_id = tree._get_sample_id(sample_dir)
+            select_button = self.query_one("#select-sample-button", Button)
+            
+            if sample_id in tree.selected_samples:
+                select_button.label = f"Unselect '{sample_id}'"
+            else:
+                select_button.label = f"Select '{sample_id}'"
+            
+            # Reset figures list
+            self.current_figures = []
+            figures_button = self.query_one("#figures-button", Button)
+            figures_button.remove_class("has-figures")
+            
+            # Update metrics tables
+            is_parquet = "parquet" in data and "metrics" in data["parquet"]
+            is_preprocess = "preprocess" in data and "metrics" in data["preprocess"]
+            is_fracture = "fracture" in data and "metrics" in data["fracture"]
+            is_all = is_parquet and is_preprocess and is_fracture
 
-                if sample_id in self.selected_samples:
-                    select_button.label = f"Unselect '{sample_id}'"
-                else:
-                    select_button.label = f"Select '{sample_id}'"
-                select_button.display = True
-                
-                # Update metrics tables
-                is_parquet = "parquet" in data and "metrics" in data["parquet"]
-                is_preprocess = "preprocess" in data and "metrics" in data["preprocess"]
-                is_fracture = "fracture" in data and "metrics" in data["fracture"]
-                is_all = is_parquet and is_preprocess and is_fracture
+            if is_all:
+                all_metrics = {}
+                all_metrics.update(data["parquet"]["metrics"])
+                all_metrics.update(data["preprocess"]["metrics"])
+                all_metrics.update(data["fracture"]["metrics"])
 
+                if "figures" in data["preprocess"]:
+                    self.current_figures.extend(data["preprocess"]["figures"])
+                    figures_button.add_class("has-figures")
 
-                if is_all:
-                    all_metrics = {}
-                    all_metrics.update(data["parquet"]["metrics"])
-                    all_metrics.update(data["preprocess"]["metrics"])
-                    all_metrics.update(data["fracture"]["metrics"])
+                if "figures" in data["fracture"]:
+                    self.current_figures.extend(data["fracture"]["figures"])
+                    figures_button.add_class("has-figures")
 
-                    if "figures" in data["preprocess"]:
-                        self.current_figures.extend(data["preprocess"]["figures"])
-                        figures_button.add_class("has-figures")
-
-                    if "figures" in data["fracture"]:
-                        self.current_figures.extend(data["fracture"]["figures"])
-                        figures_button.add_class("has-figures")
-
-                    self.query_one("#all-metrics", MetricsTable).update_metrics(
-                        all_metrics, "all"
-                    )
-                
-                # Update JSON display
-                self.query_one("#raw-json-display", JSONDisplay).update_data(data)
-                
-                # Check pipeline files for comparison
-                summary_path = sample_dir / "pipeline_summary.json"
-                if summary_path not in self.pipeline_files:
-                    self.pipeline_files.append(summary_path)
-                
-            except Exception as e:
-                self.notify(f"Error loading JSON: {str(e)}", severity="error")
+                self.query_one("#all-metrics", MetricsTable).update_metrics(
+                    all_metrics, stage="all", path=sample_dir
+                )
+            
+            # Update JSON display
+            self.query_one("#raw-json-display", JSONDisplay).update_data(data)
+            
+            # Check pipeline files for comparison
+            summary_path = sample_dir / "pipeline_summary.json"
+            if summary_path not in self.pipeline_files:
+                self.pipeline_files.append(summary_path)
+            
+        except Exception as e:
+            self.notify(f"Error loading JSON: {str(e)}", severity="error")
 
     def action_refresh(self) -> None:
         """Refresh the directory tree."""
-        tree = self.query_one(FilteredDirectoryTree)
+        tree = self.query_one("#experiment-tree", SmartExperimentDirectoryTree)
         tree.reload()
 
     def action_view_figures(self) -> None:
@@ -571,8 +861,18 @@ class FractureExplorer(App):
         else:
             self.notify("No figures available for the current sample", severity="warning")
 
+    def action_select_all(self) -> None:
+        """Selects all samples"""
+
     def action_compare_samples(self) -> None:
         """Open the sample comparison screen."""
+        tree = self.query_one("#experiment-tree", SmartExperimentDirectoryTree)
+        selected_sample_ids = tree.get_selected_sample_ids()
+        
+        if not selected_sample_ids:
+            self.notify("Please select at least one sample to compare", severity="warning")
+            return
+        
         # Update metrics collection from pipeline files
         if not self.pipeline_files:
             self.notify("No pipeline summary files loaded yet", severity="warning")
@@ -587,7 +887,7 @@ class FractureExplorer(App):
                 self.notify("No sample metrics found", severity="warning")
                 return
 
-            self.push_screen(ComparisonScreen(self.metrics_collection, preselected_samples=self.selected_samples))
+            self.push_screen(ComparisonScreen(self.metrics_collection, preselected_samples=selected_sample_ids))
         except Exception as e:
             self.notify(f"Error loading metrics for comparison: {str(e)}", severity="error")
 
@@ -598,46 +898,41 @@ class FractureExplorer(App):
         if button_id == "figures-button":
             self.action_view_figures()
 
+        elif button_id == "select-all-button":
+            tree = self.query_one("#experiment-tree", SmartExperimentDirectoryTree)
+            selected_n = tree.select_all_samples()
+            self.notify(f"Selected {selected_n} samples")
+
+        elif button_id == "deselect-all-button":
+            tree = self.query_one("#experiment-tree", SmartExperimentDirectoryTree)
+            tree.deselect_all_samples()
+            self.notify(f"Selection Cleared")
+
         elif button_id == "compare-samples-button":
             self.action_compare_samples()
 
         elif button_id == "select-sample-button":
             if self.current_sample_dir:
-                sample_id = self.current_sample_dir.name
+                tree = self.query_one("#experiment-tree", SmartExperimentDirectoryTree)
+                sample_id = tree._get_sample_id(self.current_sample_dir)
                 select_button = self.query_one("#select-sample-button", Button)
 
-                if sample_id in self.selected_samples:
+                if sample_id in tree.selected_samples:
                     # Unselect the sample
-                    self.selected_samples.remove(sample_id)
+                    tree.selected_samples.remove(sample_id)
+                    if sample_id in tree.sample_nodes:
+                        tree._update_node_style(tree.sample_nodes[sample_id], selected=False)
+                        del tree.sample_nodes[sample_id]
+                    
                     self.notify(f"Sample '{sample_id}' removed from selection")
                     select_button.label = f"Select '{sample_id}'"
-
-                    # Update directory tree styling
-                    try:
-                        # Find and update the tree node styling
-                        tree = self.query_one(FilteredDirectoryTree)
-                        for node in tree.nodes.values():
-                            if node.data.path == self.current_sample_dir:
-                                node.remove_class("selected-sample")
-                                break
-                    except Exception:
-                        pass  # Ignore if we can't find the node
                 else:
                     # Select the sample
-                    self.selected_samples.add(sample_id)
-                    self.notify(f"Sample '{sample_id}' added to selection")
-                    select_button.label = f"Unselect '{sample_id}'"
-
-                    # Update directory tree styling
-                    try:
-                        # Find and update the tree node styling
-                        tree = self.query_one(FilteredDirectoryTree)
-                        for node in tree.nodes.values():
-                            if node.data.path == self.current_sample_dir:
-                                node.add_class("selected-sample")
-                                break
-                    except Exception:
-                        pass  # Ignore if we can't find the node
+                    if tree.select_sample_by_id(sample_id):
+                        self.notify(f"Sample '{sample_id}' added to selection")
+                        select_button.label = f"Unselect '{sample_id}'"
+                    else:
+                        self.notify("Failed to select sample", severity="error")
             else:
                 self.notify("No sample currently selected", severity="warning")
 

@@ -123,3 +123,4 @@ DirectoryTree TreeNode:hover {
     border-left: thick $success;
     text-style: bold;
 }
+
