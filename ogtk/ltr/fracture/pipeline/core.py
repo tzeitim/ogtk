@@ -396,6 +396,8 @@ class Pipeline:
 
             in_file = f"{self.xp.pro_workdir}/{self.xp.target_sample}/merged_reads.parquet"
             out_file = f"{self.xp.sample_wd}/parsed_reads.parquet" #pyright:ignore
+            out_file_inv = f"{self.xp.sample_wd}/parsed_reads_invalid.parquet" #pyright:ignore
+
             out_file_qc = out_file.replace('.parquet', '_qc.parquet')
             self.logger.io(f"reading from {in_file}")
 
@@ -412,27 +414,71 @@ class Pipeline:
 
                 # save without gc fields
                 if not self.xp.parse_read1:
-                    ldf.drop('^_.+$').sink_parquet(out_file)
+                    (
+                            ldf
+                            .filter(pl.col('valid_umi'))
+                            .filter(pl.col('ont'))
+                            .sink_parquet(out_file)
+                    )
+                    (
+                            ldf
+                            .filter(~pl.col('valid_umi'))
+                            .filter(pl.col('ont'))
+                            .sink_parquet(out_file_inv)
+                    )
                 else:
+                    # TODO change the logics to an adaptive expression instead of boiler plate
                     # if r1 is long and informative: e.g long paired-end
                     self.logger.warning(f"extracting juice from R1")
                     (
                         pl.concat(
                             [
-                                ldf, 
-                                ldf.pp.parse_read1(anchor_ont=self.xp.anchor_ont)
+                                ldf
+                                .filter(pl.col('valid_umi'))
+                                .filter(pl.col('ont')),
+                                ldf
+                                .filter(pl.col('valid_umi'))
+                                .filter(pl.col('ont'))
+                                .pp.parse_read1(anchor_ont=self.xp.anchor_ont),
                             ]
                         ).sink_parquet(out_file)
                      )
 
-                # extract QC fields
-                metrics_df = ldf.drop('^[^_].+$').unique().collect()
+                    (
+                        pl.concat(
+                            [
+                                ldf
+                                .filter(~pl.col('valid_umi'))
+                                .filter(~pl.col('ont')),
+                                ldf
+                                .filter(~pl.col('valid_umi'))
+                                .filter(~pl.col('ont'))
+                                .pp.parse_read1(anchor_ont=self.xp.anchor_ont),
+                            ]
+                        ).sink_parquet(out_file_inv)
+                     )
+
+                # extract QC fields and compute UMI-level metrics
+                metrics_df = (
+                        ldf
+                        .select('umi', 'valid_umi', '^metric_.*$')
+                        .unique()
+                        .with_columns(metric_fraction_valid_umis = pl.col('valid_umi').mean())
+                        .with_columns(metric_n_valid_umis = pl.col('valid_umi').sum())
+                        .with_columns(metric_n_invalid_umis = pl.col('valid_umi').not_().sum())
+                        .select('^metric_.*$')
+                        .unique()
+                        .collect()
+                )
+
+                metrics_df = metrics_df
                 
-                metrics = {i[1:]:metrics_df[i][0] for i in metrics_df.columns}
+                metrics = {f.replace('metric_', ''):metrics_df[f][0] 
+                           for f in metrics_df.columns}
 
                 (
                     metrics_df.
-                    rename({i:i[1:] for i in metrics_df.columns})
+                    rename({f:f.replace('metric_', '') for f in metrics_df.columns})
                     .write_parquet(out_file_qc)
                 )
 
@@ -441,7 +487,8 @@ class Pipeline:
 
                 return StepResults(
                         results={'xp': self.xp,
-                                 'parsed_reads':out_file,
+                                 'parsed_reads': out_file,
+                                 'parsed_reads_invalid': out_file_inv,
                                  'preprocess_qc': out_file_qc,
                                  },
                         metrics=metrics,
@@ -795,6 +842,7 @@ class Pipeline:
                 output_files.append(results.results['parsed_fn'])
             elif step == PipelineStep.PREPROCESS and 'parsed_reads' in results.results:
                 output_files.append(results.results['parsed_reads'])
+                output_files.append(results.results['parsed_reads_invalid'])
             elif step == PipelineStep.FRACTURE and 'contigs' in results.results:
                 output_files.append(results.results['contigs'])
                 

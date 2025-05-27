@@ -301,17 +301,18 @@ class PllPipeline:
     # [  18N  ]
     def parse_reads(self, umi_len, anchor_ont, sbc_len):
         ''' sbc_len : sample barcode length'''
-        # _field_name represent QC columns
+        # metric_field_name represent QC columns
         return(
                 self._ldf
                     .with_columns(pl.col('r1_seq').str.slice(0, umi_len).alias('umi'))
                     .with_columns(pl.col('r1_seq').str.slice(umi_len, sbc_len).alias('sbc'))
                     .with_columns(pl.col('r1_seq').str.contains(anchor_ont).alias('ont'))
-                    .with_columns(_reads_ont = pl.col('ont').sum())
-                    .with_columns(_reads_offt = pl.col('ont').not_().sum())
-                    .with_columns(_fraction_ont = pl.col('ont').mean())
-                    .with_columns(_fraction_offt = pl.col('ont').not_().mean())
-                    .filter(pl.col('ont'))
+                    # read level metrics
+                    .with_columns(metric_reads_ont = pl.col('ont').sum())
+                    .with_columns(metric_reads_offt = pl.col('ont').not_().sum())
+                    .with_columns(metric_fraction_ont = pl.col('ont').mean())
+                    .with_columns(metric_fraction_offt = pl.col('ont').not_().mean())
+                    #.filter(pl.col('ont'))
                     # UMI validation
                     .with_columns(pl.col('r1_seq')
                                   .str.extract(f'(.*?){anchor_ont}.*$',1)
@@ -319,10 +320,6 @@ class PllPipeline:
                                   .alias('valid_umi')
                                   )
                     .with_columns((pl.col('valid_umi')==umi_len+sbc_len))
-                    .with_columns(_valid_umis = pl.col('valid_umi').mean())
-                    .with_columns(_n_valid_umis = pl.col('valid_umi').sum())
-                    .with_columns(_n_invalid_umis = pl.col('valid_umi').not_().sum())
-                    .filter(pl.col('valid_umi'))
                     .with_columns(pl.len().over('umi').alias('reads'))
                 )    
 
@@ -337,5 +334,8 @@ class PllPipeline:
         """
         return (
                 self._ldf
-                    .with_columns(pl.col('r1_seq').str.extract(f'.*?{anchor_ont}(.*)$').alias('r2_seq'))
+                    .with_columns(pl.col('r1_seq')
+                                  .str.extract(f'.*?{anchor_ont}(.*)$')
+                                  .alias('r2_seq')
+                                  )
                 )
