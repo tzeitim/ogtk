@@ -716,17 +716,30 @@ class ComparisonScreen(Screen):
         """Handle checkbox selection changes."""
         checkbox_id = event.checkbox.id
         if checkbox_id and checkbox_id.startswith("sample-"):
-            # Get the original sample ID from the checkbox label/text
-            sample_id = str(event.checkbox.label)
+            original_sample_id = str(event.checkbox.label)
+            
+            if '/' in original_sample_id:
+                normalized_sample_id = original_sample_id.split('/')[-1]
+            else:
+                normalized_sample_id = original_sample_id
             
             if event.value:
-                self.selected_samples.add(sample_id)
+                self.selected_samples.add(normalized_sample_id)
             else:
-                self.selected_samples.discard(sample_id)
+                self.selected_samples.discard(normalized_sample_id)
                 
 
 class FractureExplorer(App):
     """A Textual app to explore Fracture pipeline outputs."""
+    TITLE = """ ○━━━━━━━━○ """
+    OK = """
+    ███████╗██████╗  █████╗  ██████╗████████╗██╗   ██╗██████╗ ███████╗
+    ██╔════╝██╔══██╗██╔══██╗██╔════╝╚══██╔══╝██║   ██║██╔══██╗██╔════╝
+    █████╗  ██████╔╝███████║██║        ██║   ██║   ██║██████╔╝█████╗  
+    ██╔══╝  ██╔══██╗██╔══██║██║        ██║   ██║   ██║██╔══██╗██╔══╝  
+    ██║     ██║  ██║██║  ██║╚██████╗   ██║   ╚██████╔╝██║  ██║███████╗
+    ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚══════╝
+    """
 
     CSS_PATH = "fracture_viewer.tcss"
 
@@ -736,8 +749,23 @@ class FractureExplorer(App):
         ("f", "view_figures", "View Figures"),
         ("c", "compare_samples", "Compare Samples"),
         ("e", "toggle_files", "Toggle Files"),
+        ("a", "select_all", "Select All Files"),
+        ("d", "deselect_all", "Clear Selection"),
     ]
     show_tree = var(False)
+
+
+    def action_deselect_all(self) -> None:
+        """Select All Files"""
+        tree = self.query_one("#experiment-tree", SmartExperimentDirectoryTree)
+        tree.deselect_all_samples()
+        self.notify(f"Selection Cleared")
+
+    def action_select_all(self) -> None:
+        """Select All Files"""
+        tree = self.query_one("#experiment-tree", SmartExperimentDirectoryTree)
+        selected_n = tree.select_all_samples()
+        self.notify(f"Selected {selected_n} samples")
 
     def action_toggle_files(self) -> None:
         """Called in response to key binding."""
@@ -763,6 +791,8 @@ class FractureExplorer(App):
 
     def compose(self) -> ComposeResult:
         """Compose the app layout."""
+        
+        #yield Static(title_art, id="title-art")
         yield Header(show_clock=True)
         
         with Vertical(id='experiments'):
@@ -786,7 +816,7 @@ class FractureExplorer(App):
     def on_mount(self) -> None:
         """Setup when the app is mounted."""
         # Remove the SelectionList references since we're not using it anymore
-        pass
+        self.theme = "gruvbox"
 
     def on_sample_selected(self, event: SampleSelected) -> None:
         """Handle sample selection from the directory tree."""
@@ -861,9 +891,6 @@ class FractureExplorer(App):
         else:
             self.notify("No figures available for the current sample", severity="warning")
 
-    def action_select_all(self) -> None:
-        """Selects all samples"""
-
     def action_compare_samples(self) -> None:
         """Open the sample comparison screen."""
         tree = self.query_one("#experiment-tree", SmartExperimentDirectoryTree)
@@ -899,14 +926,10 @@ class FractureExplorer(App):
             self.action_view_figures()
 
         elif button_id == "select-all-button":
-            tree = self.query_one("#experiment-tree", SmartExperimentDirectoryTree)
-            selected_n = tree.select_all_samples()
-            self.notify(f"Selected {selected_n} samples")
+            self.action_select_all()
 
         elif button_id == "deselect-all-button":
-            tree = self.query_one("#experiment-tree", SmartExperimentDirectoryTree)
-            tree.deselect_all_samples()
-            self.notify(f"Selection Cleared")
+            self.action_deselect_all()
 
         elif button_id == "compare-samples-button":
             self.action_compare_samples()
