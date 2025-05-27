@@ -25,7 +25,7 @@ from rich.table import Table
 from rich.text import Text
 
 # Import the comparison functionality
-from ..fracture_compare import PipelineMetricsCollection, SampleMetrics
+from post import PipelineMetricsCollection, SampleMetrics
 import re
 
 pl.Config.set_float_precision(2)
@@ -541,10 +541,6 @@ class ComparisonScreen(Screen):
     BINDINGS = [
         ("q", "return_to_main", "Return to Main"),
         ("r", "run_comparison", "Run Comparison"),
-        ("tab", "focus_next_button", "Next Button"),
-        ("shift+tab", "focus_previous_button", "Previous Button"),
-        ("up", "focus_previous_checkbox", "Previous Checkbox"),
-        ("down", "focus_next_checkbox", "Next Checkbox"),
     ]
 
     def __init__(self, collection: PipelineMetricsCollection, preselected_samples=None):
@@ -573,7 +569,6 @@ class ComparisonScreen(Screen):
             next_index = (current_index + 1) % len(buttons)
             buttons[next_index].focus()
         else:
-            # If not currently on a button, focus the first button
             buttons[0].focus()
 
     def action_focus_previous_button(self) -> None:
@@ -591,36 +586,6 @@ class ComparisonScreen(Screen):
             # If not currently on a button, focus the last button
             buttons[-1].focus()
 
-    def action_focus_next_checkbox(self) -> None:
-        """Focus the next checkbox."""
-        checkboxes = list(self.query("Checkbox"))
-        if not checkboxes:
-            return
-        
-        current_focus = self.focused
-        if current_focus and current_focus in checkboxes:
-            current_index = checkboxes.index(current_focus)
-            next_index = (current_index + 1) % len(checkboxes)
-            checkboxes[next_index].focus()
-        else:
-            # If not currently on a checkbox, focus the first checkbox
-            checkboxes[0].focus()
-
-    def action_focus_previous_checkbox(self) -> None:
-        """Focus the previous checkbox."""
-        checkboxes = list(self.query("Checkbox"))
-        if not checkboxes:
-            return
-        
-        current_focus = self.focused
-        if current_focus and current_focus in checkboxes:
-            current_index = checkboxes.index(current_focus)
-            prev_index = (current_index - 1) % len(checkboxes)
-            checkboxes[prev_index].focus()
-        else:
-            # If not currently on a checkbox, focus the last checkbox
-            checkboxes[-1].focus()
-
     def compose(self) -> ComposeResult:
         """Compose the screen layout."""
         yield Header(show_clock=True)
@@ -629,21 +594,21 @@ class ComparisonScreen(Screen):
             with Container(id="sample-selection"):
                 yield Label("Pre-selected samples to compare:", id="selection-label")
 
-                with Vertical(id="checkbox-container"):
-
-                    for sample_id in self.selected_samples:
-                        sample_label = sanitize_id(sample_id)
-                        checkbox = Checkbox(sample_id, classes="sample-checkbox", id=f"sample-{sample_label}", value=True)
-                        #checkbox.can_focus = False
-                        yield checkbox
-
-                yield Button("Compare Selected Samples", id="compare-button")
+                # Create SelectionList with preselected samples
+                selection_options = [(sample_id, sample_id) for sample_id in self.selected_samples]
+                selection_list = SelectionList[str](*selection_options, id="sample-selection-list")
+                
+                # Pre-select all items
+                for sample_id in self.selected_samples:
+                    selection_list.select(sample_id)
+                
+                yield selection_list
 
             with Vertical(id="metric-buttons"):
                 yield Button("Compare Valid UMI %", classes="metric-button", id="compare-valid-umi")
                 yield Button("Compare Read Coverage", classes="metric-button", id="compare-read-coverage")
 
-                # Results display
+            # Results display
         with Vertical(id="right-panel"):
             yield ComparisonDataTable(id="comparison-table")
 
@@ -651,14 +616,21 @@ class ComparisonScreen(Screen):
 
     def _run_comparison(self) -> None:
         """Run the selected comparison."""
-        if not self.selected_samples:
+        # Get currently selected samples from SelectionList
+        selection_list = self.query_one("#sample-selection-list", SelectionList)
+        selected_indices = selection_list.selected
+        
+        if not selected_indices:
             self.notify("Please select at least one sample to compare", severity="warning")
             return
 
+        # Get the sample IDs for selected indices
+        all_samples = list(self.selected_samples)
+        current_selected = {all_samples[i] for i in selected_indices}
+
         # Default to valid UMI comparison
         df = self.collection.get_valid_umi_stats()
-
-        df = df.filter(pl.col("sample_id").is_in(self.selected_samples))
+        df = df.filter(pl.col("sample_id").is_in(list(current_selected)))
 
         if df.height == 0:
             self.notify("No valid data for selected samples", severity="warning")
@@ -671,11 +643,15 @@ class ComparisonScreen(Screen):
         normalized_ids = []
         for sample_id in self.selected_samples:
             if '/' in sample_id:
-                # Extract just the sample name for workdir structure
                 normalized_ids.append(sample_id.split('/')[-1])
             else:
                 normalized_ids.append(sample_id)
         return normalized_ids
+
+    def _get_selected_sample_ids(self) -> Set[str]:
+        """Get currently selected sample IDs from SelectionList."""
+        selection_list = self.query_one("#sample-selection-list", SelectionList)
+        return set(selection_list.selected)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses."""
@@ -685,12 +661,14 @@ class ComparisonScreen(Screen):
             self._run_comparison()
 
         elif button_id == "compare-valid-umi":
-            if not self.selected_samples:
+            current_selected = self._get_selected_sample_ids()
+
+            if not current_selected:
                 self.notify("Please select at least one sample to compare", severity="warning")
                 return
 
             df = self.collection.get_valid_umi_stats()
-            df = df.filter(pl.col("sample_id").is_in(list(self.selected_samples)))
+            df = df.filter(pl.col("sample_id").is_in(list(current_selected)))
 
             if df.height == 0:
                 self.notify("No valid UMI data for selected samples", severity="warning")
@@ -699,12 +677,14 @@ class ComparisonScreen(Screen):
             self.query_one("#comparison-table", ComparisonDataTable).update_data(df, "Valid UMI Comparison")
 
         elif button_id == "compare-read-coverage":
-            if not self.selected_samples:
+            current_selected = self._get_selected_sample_ids()
+
+            if not current_selected:
                 self.notify("Please select at least one sample to compare", severity="warning")
                 return
 
             df = self.collection.calculate_read_coverage()
-            df = df.filter(pl.col("sample_id").is_in(list(self.selected_samples)))
+            df = df.filter(pl.col("sample_id").is_in(list(current_selected)))
 
             if df.height == 0:
                 self.notify("No read coverage data for selected samples", severity="warning")
@@ -712,21 +692,6 @@ class ComparisonScreen(Screen):
 
             self.query_one("#comparison-table", ComparisonDataTable).update_data(df, "Read Coverage Comparison")
 
-    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
-        """Handle checkbox selection changes."""
-        checkbox_id = event.checkbox.id
-        if checkbox_id and checkbox_id.startswith("sample-"):
-            original_sample_id = str(event.checkbox.label)
-            
-            if '/' in original_sample_id:
-                normalized_sample_id = original_sample_id.split('/')[-1]
-            else:
-                normalized_sample_id = original_sample_id
-            
-            if event.value:
-                self.selected_samples.add(normalized_sample_id)
-            else:
-                self.selected_samples.discard(normalized_sample_id)
                 
 
 class FractureExplorer(App):
@@ -759,7 +724,6 @@ class FractureExplorer(App):
         """Select All Files"""
         tree = self.query_one("#experiment-tree", SmartExperimentDirectoryTree)
         tree.deselect_all_samples()
-        self.notify(f"Selection Cleared")
 
     def action_select_all(self) -> None:
         """Select All Files"""
