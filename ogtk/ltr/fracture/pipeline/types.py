@@ -34,6 +34,8 @@ class FractureXp(Xp):
         self.steps = getattr(self, 'steps', None)
         self.dry = getattr(self, 'dry', False)
         self.make_test = getattr(self, 'make_test', False)
+        self.parse_read1 = getattr(self, 'parse_read1', False)
+        self.sbc_len = getattr(self, 'sbc_len', 6)
 
 
     @call
