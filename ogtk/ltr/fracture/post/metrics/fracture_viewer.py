@@ -1,29 +1,24 @@
-#!/usr/bin/env python
 import os
 import json
 import sys
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Union, Set, Iterable
+from typing import Dict, List, Optional, Any, Set, Iterable
 import polars as pl
 
-from textual import on
 from textual.app import App, ComposeResult
-from textual.widgets import DirectoryTree, Tree, Footer, Header, Static, DataTable, Button, Markdown, Checkbox, Label, SelectionList, Pretty
-from textual.containers import Horizontal, Vertical, Container, Grid
+from textual.widgets import DirectoryTree, Tree, Footer, Header, Static, Button, Label, SelectionList
+from textual.containers import Horizontal, Vertical, Container
 from textual.screen import Screen, ModalScreen
-from textual import events
-from textual.reactive import reactive, var
+from textual.reactive import var
 from textual.binding import Binding
 from textual.message import Message
 
 from rich.json import JSON
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 
-#sys.path.insert(0, str(Path(__file__).parent.parent))
-from .summary import PipelineMetricsCollection, SampleMetrics
+from ogtk.ltr.fracture.post import PipelineMetricsCollection
 import re
 
 pl.Config.set_float_precision(2)

@@ -1,0 +1,448 @@
+# Fracture Post Module Restructuring Plan
+
+## Problem Analysis
+
+The current `post` module imports heavy dependencies through the ogtk chain, making it unsuitable for lightweight applications like the Textual interface. This creates performance bottlenecks and import overhead.
+
+## Restructuring Steps
+
+### Step 1: Create New Directory Structure
+
+```
+ogtk/ltr/fracture/post/
+├── __init__.py           # Minimal exports with lazy loading
+├── core/                 # Lightweight core data structures
+│   ├── __init__.py      
+│   ├── metrics.py       # Pure data classes (no heavy deps)
+│   └── collection.py    # Collection logic (minimal deps)
+├── io/                  # I/O operations
+│   ├── __init__.py
+│   ├── readers.py       # JSON readers (only stdlib)
+│   └── writers.py       # Export functionality  
+├── analysis/            # Heavy analysis (optional import)
+│   ├── __init__.py
+│   └── advanced.py      # Heavy computations, polars analysis
+└── viewer/              # UI components (separate from core)
+    ├── __init__.py
+    └── app.py           # Textual app
+```
+
+### Step 2: Implement Lightweight Core Metrics
+
+**File: `post/core/metrics.py`**
+
+```python
+"""Lightweight data structures with no heavy dependencies."""
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any
+from datetime import datetime
+import json
+
+@dataclass
+class StepMetrics:
+    """Lightweight step metrics - no external deps."""
+    step_name: str
+    timestamp: datetime
+    metrics: Dict[str, Any]
+    
+    def __post_init__(self):
+        if isinstance(self.timestamp, str):
+            self.timestamp = datetime.fromisoformat(self.timestamp.replace(' ', 'T'))
+    
+    @classmethod
+    def from_dict(cls, step_name: str, data: dict) -> 'StepMetrics':
+        return cls(
+            step_name=step_name,
+            timestamp=data.get('timestamp', '2000-01-01T00:00:00'),
+            metrics=data.get('metrics', {})
+        )
+    
+    def get_metric(self, name: str, default: Any = None) -> Any:
+        """Get a specific metric value."""
+        return self.metrics.get(name, default)
+
+@dataclass  
+class SampleMetrics:
+    """Lightweight sample metrics - stdlib only."""
+    sample_id: str
+    steps: Dict[str, StepMetrics] = field(default_factory=dict)
+    
+    def add_step(self, step_name: str, timestamp: str, metrics: Dict[str, Any]) -> None:
+        """Add metrics for a pipeline step."""
+        self.steps[step_name] = StepMetrics(step_name, timestamp, metrics)
+    
+    def get_step(self, step_name: str) -> Optional[StepMetrics]:
+        """Get metrics for a specific step."""
+        return self.steps.get(step_name)
+    
+    def get_metric(self, step: str, metric: str, default: Any = None) -> Any:
+        """Get a specific metric from a specific step."""
+        step_obj = self.steps.get(step)
+        return step_obj.get_metric(metric, default) if step_obj else default
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to flat dictionary with all metrics."""
+        result = {"sample_id": self.sample_id}
+        for step in self.steps.values():
+            for metric_name, value in step.metrics.items():
+                result[f"{step.step_name}_{metric_name}"] = value
+        return result
+```
+
+### Step 3: Implement Lightweight Collection
+
+**File: `post/core/collection.py`**
+
+```python
+"""Collection class with minimal dependencies."""
+from pathlib import Path
+from typing import Dict, List, Optional, Union, Any
+import json
+from .metrics import SampleMetrics, StepMetrics
+
+class PipelineMetricsCollection:
+    """Lightweight collection - only depends on stdlib + core metrics."""
+    
+    def __init__(self):
+        self.samples: Dict[str, SampleMetrics] = {}
+        self.source_info: Dict[str, Any] = {}
+    
+    @classmethod
+    def from_json_files(cls, file_paths: List[Path]) -> 'PipelineMetricsCollection':
+        """Load from JSON files - no heavy dependencies."""
+        collection = cls()
+        
+        for file_path in file_paths:
+            try:
+                with open(file_path) as f:
+                    data = json.load(f)
+                
+                sample_id = cls._extract_sample_id(file_path)
+                sample_metrics = SampleMetrics(sample_id)
+                
+                for step_name, step_data in data.items():
+                    if isinstance(step_data, dict) and 'metrics' in step_data:
+                        step_metrics = StepMetrics.from_dict(step_name, step_data)
+                        sample_metrics.steps[step_name] = step_metrics
+                
+                collection.samples[sample_id] = sample_metrics
+                
+            except Exception as e:
+                print(f"Error loading {file_path}: {e}")
+        
+        return collection
+    
+    @staticmethod
+    def _extract_sample_id(file_path: Path) -> str:
+        """Extract sample ID from file path."""
+        sample_dir = file_path.parent.name
+        experiment_dir = file_path.parent.parent.name
+        return f"{experiment_dir}/{sample_dir}"
+    
+    def get_sample(self, sample_id: str) -> Optional[SampleMetrics]:
+        """Get metrics for a specific sample."""
+        return self.samples.get(sample_id)
+    
+    def to_simple_dict(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """Export to simple dict structure for lightweight processing."""
+        result = {}
+        for sample_id, sample in self.samples.items():
+            result[sample_id] = {}
+            for step_name, step in sample.steps.items():
+                result[sample_id][step_name] = step.metrics
+        return result
+    
+    def get_basic_comparison(self, step: str, metric: str) -> Dict[str, Any]:
+        """Basic comparison without heavy dependencies."""
+        result = {"sample_id": [], f"{step}_{metric}": []}
+        
+        for sample_id, sample in self.samples.items():
+            value = sample.get_metric(step, metric)
+            if value is not None:
+                result["sample_id"].append(sample_id)
+                result[f"{step}_{metric}"].append(value)
+        
+        return result
+    
+    def __repr__(self) -> str:
+        n_samples = len(self.samples)
+        if n_samples == 0:
+            return "PipelineMetricsCollection(empty)"
+        
+        sample_ids = list(self.samples.keys())[:3]
+        steps = set()
+        for sample in self.samples.values():
+            steps.update(sample.steps.keys())
+        
+        sample_preview = ", ".join(sample_ids)
+        if n_samples > 3:
+            sample_preview += f", ... (+{n_samples-3} more)"
+        
+        return f"PipelineMetricsCollection({n_samples} samples: {sample_preview}; steps: {sorted(steps)})"
+```
+
+### Step 4: Implement Advanced Analysis (Heavy Operations)
+
+**File: `post/analysis/advanced.py`**
+
+```python
+"""Heavy analysis operations - only imported when needed."""
+from typing import TYPE_CHECKING, Optional, Dict, Any
+
+if TYPE_CHECKING:
+    import polars as pl
+
+def lazy_import_polars():
+    """Import polars only when needed."""
+    try:
+        import polars as pl
+        return pl
+    except ImportError:
+        raise ImportError("polars required for advanced analysis. Install with: pip install polars")
+
+class AdvancedAnalysis:
+    """Heavy analysis operations using polars."""
+    
+    def __init__(self, collection):
+        self.collection = collection
+        self._pl: Optional['pl'] = None
+    
+    @property
+    def pl(self):
+        """Lazy polars import."""
+        if self._pl is None:
+            self._pl = lazy_import_polars()
+        return self._pl
+    
+    def to_long_dataframe(self):
+        """Convert to long format DataFrame (multiple rows per sample)."""
+        rows = []
+        
+        for sample_id, sample in self.collection.samples.items():
+            for step_name, step in sample.steps.items():
+                for metric_name, value in step.metrics.items():
+                    rows.append({
+                        "sample_id": sample_id,
+                        "step": step_name,
+                        "metric": metric_name,
+                        "value": value,
+                        "timestamp": step.timestamp
+                    })
+        
+        if not rows:
+            return self.pl.DataFrame(schema={
+                "sample_id": self.pl.Utf8,
+                "step": self.pl.Utf8,
+                "metric": self.pl.Utf8,
+                "value": self.pl.Object,
+                "timestamp": self.pl.Datetime
+            })
+        
+        return self.pl.DataFrame(rows)
+    
+    def to_wide_dataframe(self):
+        """Convert to wide format DataFrame (one row per sample)."""
+        if not self.collection.samples:
+            return self.pl.DataFrame(schema={"sample_id": self.pl.Utf8})
+        
+        rows = [sample.to_dict() for sample in self.collection.samples.values()]
+        return self.pl.DataFrame(rows)
+    
+    def calculate_read_coverage(self):
+        """Calculate reads per UMI for all samples."""
+        data = []
+        
+        for sample_id, sample in self.collection.samples.items():
+            total_reads = sample.get_metric("parquet", "total_reads")
+            total_umis = sample.get_metric("parquet", "total_umis")
+            
+            if total_reads and total_umis:
+                data.append({
+                    "sample_id": sample_id,
+                    "total_reads": total_reads,
+                    "total_umis": total_umis,
+                    "reads_per_umi": total_reads / total_umis
+                })
+        
+        return self.pl.DataFrame(data)
+    
+    def get_valid_umi_stats(self):
+        """Calculate valid UMI percentages."""
+        data = []
+        
+        for sample_id, sample in self.collection.samples.items():
+            valid_umis = sample.get_metric("preprocess", "n_valid_umis")
+            invalid_umis = sample.get_metric("preprocess", "n_invalid_umis")
+            
+            if valid_umis is not None and invalid_umis is not None:
+                total = valid_umis + invalid_umis
+                percentage = (valid_umis / total * 100) if total > 0 else 0
+                
+                data.append({
+                    "sample_id": sample_id,
+                    "valid_umis": valid_umis,
+                    "invalid_umis": invalid_umis,
+                    "total_umis": total,
+                    "valid_percentage": percentage
+                })
+        
+        return self.pl.DataFrame(data).sort("valid_percentage", descending=True)
+```
+
+### Step 5: Create Lazy Loading Package Interface
+
+**File: `post/__init__.py`**
+
+```python
+"""Lightweight post-processing with optional heavy features."""
+
+# Always available (lightweight - stdlib only)
+from .core.metrics import StepMetrics, SampleMetrics
+from .core.collection import PipelineMetricsCollection
+
+# Lazy imports for heavy features
+def get_advanced_analysis():
+    """Get advanced analysis with polars - imported on demand."""
+    from .analysis.advanced import AdvancedAnalysis
+    return AdvancedAnalysis
+
+def get_viewer_app():
+    """Get Textual viewer app - imported on demand.""" 
+    from .viewer.app import FractureExplorer
+    return FractureExplorer
+
+# Legacy compatibility (will import heavy deps)
+def get_legacy_collection():
+    """Get the old heavy collection for backward compatibility."""
+    import warnings
+    warnings.warn(
+        "Legacy collection imports heavy dependencies. "
+        "Consider using the new lightweight PipelineMetricsCollection.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    from ..post.metrics.summary import PipelineMetricsCollection as LegacyCollection
+    return LegacyCollection
+
+__all__ = [
+    'StepMetrics',
+    'SampleMetrics', 
+    'PipelineMetricsCollection',
+    'get_advanced_analysis',
+    'get_viewer_app',
+    'get_legacy_collection'
+]
+```
+
+### Step 6: Update Core Package Imports
+
+**File: `post/core/__init__.py`**
+
+```python
+"""Core lightweight data structures."""
+from .metrics import StepMetrics, SampleMetrics
+from .collection import PipelineMetricsCollection
+
+__all__ = ['StepMetrics', 'SampleMetrics', 'PipelineMetricsCollection']
+```
+
+**File: `post/analysis/__init__.py`**
+
+```python
+"""Heavy analysis operations."""
+from .advanced import AdvancedAnalysis
+
+__all__ = ['AdvancedAnalysis']
+```
+
+### Step 7: Update Main Fracture Package
+
+**File: `ogtk/ltr/fracture/__init__.py`**
+
+```python
+'''
+fracture lineage tracing
+'''
+
+from .pipeline.core import Pipeline, PipelineStep
+from .pipeline.types import FractureXp
+from .cli import main
+
+# Lightweight post-processing (fast import)
+from .post import PipelineMetricsCollection, SampleMetrics
+
+__all__ = [
+    'main',
+    'Pipeline',
+    'PipelineStep', 
+    'FractureXp',
+    'PipelineMetricsCollection',
+    'SampleMetrics'
+]
+```
+
+## Usage Examples
+
+### Lightweight Usage (Fast Import)
+
+```python
+from ogtk.ltr.fracture.post import PipelineMetricsCollection
+
+# Fast - no heavy imports
+collection = PipelineMetricsCollection.from_json_files(json_files)
+sample = collection.samples['sample1']
+reads = sample.get_metric('parquet', 'total_reads')
+
+# Basic comparison without polars
+comparison = collection.get_basic_comparison('preprocess', 'n_valid_umis')
+```
+
+### Heavy Analysis (On-Demand)
+
+```python
+from ogtk.ltr.fracture.post import PipelineMetricsCollection, get_advanced_analysis
+
+collection = PipelineMetricsCollection.from_json_files(json_files)
+
+# Only import polars when needed
+AdvancedAnalysis = get_advanced_analysis()
+analyzer = AdvancedAnalysis(collection)
+df = analyzer.to_long_dataframe()  # Uses polars
+coverage_df = analyzer.calculate_read_coverage()
+```
+
+### Viewer App
+
+```python
+from ogtk.ltr.fracture.post import PipelineMetricsCollection, get_viewer_app
+
+collection = PipelineMetricsCollection.from_json_files(json_files)
+
+# Only import textual when needed
+FractureExplorer = get_viewer_app()
+app = FractureExplorer(collection)
+app.run()
+```
+
+## Migration Steps
+
+1. **Create new directory structure** as outlined above
+2. **Move existing heavy code** to `post/analysis/advanced.py`
+3. **Implement lightweight core** in `post/core/`
+4. **Update imports** in main package
+5. **Test import performance** - should be ~10x faster
+6. **Update viewer app** to use new lightweight collection
+7. **Add deprecation warnings** for old heavy imports
+8. **Update documentation** with new usage patterns
+
+## Benefits
+
+- **🚀 Fast Imports**: Core functionality loads instantly (stdlib only)
+- **⚡ Optional Heavy Dependencies**: Polars/textual only loaded when needed  
+- **🔧 Clear Separation**: Data structures separate from processing logic
+- **🔄 Backward Compatibility**: Can still access old functionality
+- **🧪 Testable**: Lightweight components easy to unit test
+- **📱 Scalable**: Supports both lightweight scripts and heavy analysis
+
+This restructuring allows your Textual app to start quickly while keeping all heavy analysis capabilities available on-demand.

@@ -1,4 +1,4 @@
 
-from .fracture_viewer import FractureExplorer
+from .app import FractureExplorer
 
 __all__ = ['FractureExplorer']
