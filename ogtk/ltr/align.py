@@ -1,12 +1,22 @@
-import polars as pl
 import pyseq_align
 from pyseq_align import NeedlemanWunsch, SmithWaterman
 from functools import lru_cache
-import ngs_tools
 
 from typing import *
 from ogtk.utils.log import Rlogger
 logger = Rlogger().get_logger()
+
+# Lazy import for heavy dependencies
+def __getattr__(name):
+    if name == 'ngs_tools':
+        import ngs_tools
+        globals()[name] = ngs_tools
+        return ngs_tools
+    elif name == 'pl':
+        import polars as pl
+        globals()[name] = pl
+        return pl
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 @lru_cache
 def lambda_needlemanw(seq, foc_ref, aligner):
@@ -46,13 +56,13 @@ def default_aligner():
         )
 
 def return_aligned_alleles(
-        df:pl.DataFrame,
+        df,
         ref_str:str,
         seq_trim_field:str,
         aligner:Union["pyseq_align.NeedlemanWunsch", "pyseq_align.SmithWaterman"], #pyright: ignore
         intbc_field:str='intbc',
         min_group_size:int=100,
-        )->pl.DataFrame:
+        ):
     '''
     Requires a data frame that:
     - belongs to a single integration 
@@ -157,7 +167,7 @@ def return_aligned_alleles(
     alignment = alignment.select(list(merged_schema.keys()))
     return alignment
 
-def compute_coverage(df, ref_str, seq_field='r2_seq', max_range:int|None=None)-> pl.DataFrame:
+def compute_coverage(df, ref_str, seq_field='r2_seq', max_range:int|None=None):
     dfa = return_aligned_alleles(df, ref_str=ref_str, seq_trim_field=seq_field, aligner=SmithWaterman())
 
     result = (dfa

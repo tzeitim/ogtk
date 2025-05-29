@@ -1,6 +1,4 @@
-import polars as pl
 import shutil
-import numpy as np
 import time
 import os
 import subprocess
@@ -11,7 +9,21 @@ import ogtk.utils.log as log
 from typing import Optional, Sequence
 
 from ogtk.utils.log import Rlogger
-logger = Rlogger().get_logger()
+
+# Create a logger proxy that initializes on first access
+class LazyLogger:
+    def __init__(self):
+        self._logger = None
+    
+    def _get_logger(self):
+        if self._logger is None:
+            self._logger = Rlogger().get_logger()
+        return self._logger
+    
+    def __getattr__(self, name):
+        return getattr(self._get_logger(), name)
+
+logger = LazyLogger()
 
 #https://docs.python.org/3/library/itertools.html#itertools.zip_longest
 def grouper(iterable, n, fillvalue=None):
@@ -245,6 +257,7 @@ def tabulate_single_umified_fastq(r1, cbc_len =16 , umi_len = 10, end = None, si
 
     # round end to closest order of magnitude in powers of ten
     if end is not None:
+        import numpy as np
         end = int(10**int(np.log10(end)))
 
     if comparable and end is not None:
@@ -369,6 +382,8 @@ def tabulate_paired_10x_fastqs_rs(
     
     logger.info(f"scanning {merged_fn}")
 
+    import polars as pl
+    
     lazy_df = (
         pl.scan_parquet(merged_fn)
         .with_columns(
@@ -436,6 +451,7 @@ def tabulate_paired_umified_fastqs(r1, cbc_len =16 , umi_len = 10, end = None, s
 
     # round end to closest order of magnitude in powers of ten
     if end is not None:
+        import numpy as np
         end = int(10**int(np.log10(end)))
 
     if comparable and end is not None:
@@ -533,6 +549,7 @@ def tabulate_umified_fastqs(r1, cbc_len =16, umi_len = 10, end = None, single_mo
 
     # round end to closest order of magnitude in powers of ten
     if end is not None:
+        import numpy as np
         end = int(10**int(np.log10(end)))
 
     if comparable and end is not None:
@@ -790,11 +807,12 @@ def rev_comp(seq):
 def export_tabix_parquet(tbxifn, parfn, columns)->None:
     ''' Small helper function that opens a tabix (gzipped) file and exports it back as parquet
     '''
-    import polars as pl
     import subprocess
 
     print(subprocess.getoutput('date'))
 
+    import polars as pl
+    
     df = pl.read_csv(tbxifn, separator='\t', has_header=False)
     df.columns=columns
     df.write_parquet(parfn)
@@ -809,12 +827,13 @@ def cut(
     break_point_label: str = "break_point",
     category_label: str = "category",
     maintain_order: bool = False,
-) -> pl.DataFrame:
+):
 
-    import polars as pl
     if maintain_order:
+        import polars as pl
         _arg_sort = pl.Series(name="_arg_sort", values=s.argsort())
 
+    import polars as pl
     result = pl.cut(s, bins, labels, break_point_label, category_label)
 
     if maintain_order:
@@ -850,9 +869,10 @@ def rotate_labs(fg, ylim=None):
 
 def import_mols(h5_ifn):
     import h5py
-    import polars as pl
     #h5_ifn = '/local/users/polivar/src/artnilet/workdir/20230114_p2_tnxivtx20c/scrna/p2_tnxivtx20c/outs/molecule_info.h5'
     mols = h5py.File(h5_ifn)
+    
+    import polars as pl
     
     mm = pl.DataFrame(
         {

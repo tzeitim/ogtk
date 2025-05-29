@@ -1,12 +1,20 @@
-from rich.logging import RichHandler
-from rich.console import Console
 from functools import wraps
 import logging
 import inspect
-import polars as pl
-import pandas as pd
 from typing import Any, Optional
 from pathlib import Path
+
+# Lazy imports for heavy dependencies
+def __getattr__(name):
+    if name == 'pl':
+        import polars as pl
+        globals()[name] = pl
+        return pl
+    elif name == 'pd':
+        import pandas as pd
+        globals()[name] = pd
+        return pd
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 # Define custom log levels
 IO_LEVEL_NUM = 19
@@ -74,7 +82,9 @@ class Rlogger:
         self.logger = logging.getLogger("rich_logger")  # type: ignore
         self.logger.setLevel(logging.INFO)
         
-        # Console handler setup
+        # Console handler setup (lazy import rich dependencies)
+        from rich.logging import RichHandler
+        from rich.console import Console
         console_handler = RichHandler(console=Console(width=250))
         console_formatter = logging.Formatter("%(message)s", datefmt="[%X]")
         console_handler.setFormatter(console_formatter)
