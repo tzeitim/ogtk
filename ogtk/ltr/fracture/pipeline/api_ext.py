@@ -317,9 +317,10 @@ class PllPipeline:
                     .with_columns(pl.col('r1_seq')
                                   .str.extract(f'(.*?){anchor_ont}.*$',1)
                                   .str.len_chars()
+                                  .fill_null(0)
                                   .alias('valid_umi')
                                   )
-                    .with_columns((pl.col('valid_umi')==umi_len+sbc_len))
+                    .with_columns((pl.col('valid_umi')==umi_len+sbc_len).alias('valid_umi'))
                     .with_columns(pl.len().over('umi').alias('reads'))
                 )    
 

@@ -5,7 +5,7 @@ fracture lineage tracing
 from .pipeline.core import Pipeline, PipelineStep
 from .pipeline.types import FractureXp
 from .cli import main
-from .viewer.post import PipelineMetricsCollection, SampleMetrics
+from .post.metrics import PipelineMetricsCollection, SampleMetrics
 
 __all__ = [
     'main',

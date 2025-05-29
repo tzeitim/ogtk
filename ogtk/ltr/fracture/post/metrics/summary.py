@@ -26,8 +26,9 @@ class PipelineMetricsCollection:
         collection = cls()
         
         for file_path in file_paths:
-            # Extract sample ID from path
-            sample_id = file_path.parent.name
+            sample_dir = file_path.parent.name
+            experiment_dir = file_path.parent.parent.name
+            sample_id = f"{experiment_dir}/{sample_dir}"
             
             try:
                 # Read JSON file
@@ -49,8 +50,21 @@ class PipelineMetricsCollection:
         
         return collection
 
-    def __str__(self) -> str:
-        return "pepinillo"
+    def __repr__(self) -> str:
+        n_samples = len(self.samples)
+        if n_samples == 0:
+            return "PipelineMetricsCollection(empty)"
+        
+        sample_ids = list(self.samples.keys())[:3]
+        steps = set()
+        for sample in self.samples.values():
+            steps.update(sample.steps.keys())
+        
+        sample_preview = ", ".join(sample_ids)
+        if n_samples > 3:
+            sample_preview += f", ... (+{n_samples-3} more)"
+        
+        return f"PipelineMetricsCollection({n_samples} samples: {sample_preview}; steps: {sorted(steps)})"
 
     
     def get_sample(self, sample_id: str) -> Optional[SampleMetrics]:

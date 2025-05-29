@@ -2,11 +2,11 @@ import polars as pl
 import numpy as np
 import random
 from typing import Dict, Any, Optional, Tuple, List, Union
-import matplotlib.pyplot as plt
-import seaborn as sns
+#import matplotlib.pyplot as plt
+#import seaborn as sns
 from pathlib import Path
 import logging
-from scipy.optimize import curve_fit
+#from scipy.optimize import curve_fit
 
 from ogtk.utils.log import Rlogger, call
 

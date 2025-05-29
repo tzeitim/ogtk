@@ -6,10 +6,9 @@ from enum import Enum
 import polars as pl
 
 from ogtk.utils.log import Rlogger, call
-from ogtk.utils import sfind, tabulate_paired_10x_fastqs_rs
+from ogtk.utils.general import sfind, tabulate_paired_10x_fastqs_rs
 from .plotting import PlotDB
 from .types import FractureXp
-from . import qc
 
 
 class StepResults(NamedTuple):
@@ -422,8 +421,7 @@ class Pipeline:
                     )
                     (
                             ldf
-                            .filter(~pl.col('valid_umi'))
-                            .filter(pl.col('ont'))
+                            .filter((~pl.col('valid_umi')) | (~pl.col('ont')))
                             .sink_parquet(out_file_inv)
                     )
                 else:
@@ -448,11 +446,9 @@ class Pipeline:
                         pl.concat(
                             [
                                 ldf
-                                .filter(~pl.col('valid_umi'))
-                                .filter(~pl.col('ont')),
+                                .filter((~pl.col('valid_umi')) | (~pl.col('ont'))),
                                 ldf
-                                .filter(~pl.col('valid_umi'))
-                                .filter(~pl.col('ont'))
+                                .filter((~pl.col('valid_umi')) | (~pl.col('ont')))
                                 .pp.parse_read1(anchor_ont=self.xp.anchor_ont),
                             ]
                         ).sink_parquet(out_file_inv)

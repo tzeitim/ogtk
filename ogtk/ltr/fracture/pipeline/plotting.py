@@ -4,7 +4,6 @@ os.environ['OPENBLAS_NUM_THREADS'] = '4'
 
 import polars as pl
 from ogtk.utils.log import call
-from . import qc
 
 class PlotDB():
     @call
@@ -79,6 +78,7 @@ class PlotDB():
         # anchor analysis
 
         out_path = f'{xp.sample_figs}/{xp.target_sample}_anchors.png'
+        from . import qc
         anchor_stats_df = (
                 pl.concat(qc.compute_anchor_stats(ifn, sample_n=100, reps=16))
                     .with_columns(ifn=pl.lit(xp.target_sample))
@@ -94,6 +94,7 @@ class PlotDB():
 
         out_path = f'{xp.sample_figs}/{xp.target_sample}_feasible.png'
 
+        from . import qc
         fig = sns.catplot([
          qc.compute_double_anchor(ifn, 10, 30),
          qc.compute_double_anchor(ifn, 50,  30),
