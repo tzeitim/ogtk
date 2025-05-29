@@ -2,12 +2,10 @@
 import os
 import json
 import sys
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union, Set, Iterable
 import polars as pl
-from datetime import datetime
 
 from textual import on
 from textual.app import App, ComposeResult
@@ -24,8 +22,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-# Import the comparison functionality
-from post import PipelineMetricsCollection, SampleMetrics
+#sys.path.insert(0, str(Path(__file__).parent.parent))
+from .summary import PipelineMetricsCollection, SampleMetrics
 import re
 
 pl.Config.set_float_precision(2)
