@@ -12,7 +12,7 @@ class PipelineMetricsCollection:
         self.source_info: Dict[str, Any] = {}
     
     @classmethod
-    def from_json_files(cls, file_paths: List[Path]) -> 'PipelineMetricsCollection':
+    def from_summary_files(cls, file_paths: List[Path]) -> 'PipelineMetricsCollection':
         """Load from JSON files - no heavy dependencies."""
         collection = cls()
         
