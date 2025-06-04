@@ -82,4 +82,4 @@ class PipelineMetricsCollection:
         if n_samples > 3:
             sample_preview += f", ... (+{n_samples-3} more)"
         
-        return f"PipelineMetricsCollection({n_samples} samples: {sample_preview}; steps: {sorted(steps)})"
+        return f"PipelineMetricsCollection({n_samples} samples: {sample_preview})"

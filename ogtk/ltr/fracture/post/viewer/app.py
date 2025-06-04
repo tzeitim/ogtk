@@ -202,54 +202,21 @@ class SmartExperimentDirectoryTree(DirectoryTree):
     def __init__(self, path: Path, **kwargs):
         super().__init__(path, **kwargs)
         self.selected_samples = set()
-        self.structure_type = self._detect_structure()
         self.sample_nodes = {}  # Track sample nodes for styling
 
-    def _detect_structure(self) -> str:
-        try:
-            with os.scandir(self.path) as entries:
-                for entry in entries:
-                    if entry.name.startswith('.') or not entry.is_dir():
-                        continue
-                    if os.path.exists(os.path.join(entry.path, "pipeline_summary.json")):
-                        return "experiment"
-            return "workdir"
-        except PermissionError:
-            return "workdir"
-
-    def __detect_structure(self) -> str:
-        """Detect if this is 'workdir' or 'experiment' structure."""
-        try:
-            # Check if immediate subdirectories contain pipeline_summary.json
-            direct_samples = any(
-                (subdir / "pipeline_summary.json").exists() 
-                for subdir in self.path.iterdir() 
-                if subdir.is_dir() and not subdir.name.startswith('.')
-            )
-            
-            if direct_samples:
-                return "experiment"  # Direct samples: experiment/sample/pipeline_summary.json
-            else:
-                return "workdir"     # Nested: workdir/experiment/sample/pipeline_summary.json
-        except PermissionError:
-            return "workdir"  # Default fallback
     
     def filter_paths(self, paths: Iterable[Path]) -> Iterable[Path]:
-        """Filter based on detected structure."""
+        """Filter to show experiment directories and sample directories."""
         for path in paths:
             if not path.is_dir() or path.name.startswith('.'):
                 continue
                 
-            if self.structure_type == "experiment":
-                # Show sample directories with pipeline_summary.json
-                if (path / "pipeline_summary.json").exists():
-                    yield path
-            else:  # workdir structure
-                # Show experiment directories that contain valid samples
-                if self._is_experiment_dir(path):
-                    yield path
-                elif self._is_valid_sample_dir(path):
-                    yield path
+            # Show sample directories with pipeline_summary.json
+            if self._is_valid_sample_dir(path):
+                yield path
+            # Show experiment directories that contain valid samples
+            elif self._is_experiment_dir(path):
+                yield path
 
     def deselect_all_samples(self) -> None:
        """Deselect all selected sample directories."""
@@ -353,22 +320,15 @@ class SmartExperimentDirectoryTree(DirectoryTree):
     
     def _get_sample_id(self, sample_path: Path) -> str:
         """Get the sample ID based on structure type."""
-        if self.structure_type == "experiment":
-            # Just the sample name
-            return sample_path.name
-        else:
-            # experiment/sample format
-            return f"{sample_path.parent.name}/{sample_path.name}"
+        return f"{sample_path.parent.name}/{sample_path.name}"
     
     def get_selected_sample_paths(self) -> list[Path]:
         """Get paths to all selected samples."""
         selected_paths = []
         for sample_id in self.selected_samples:
-            if self.structure_type == "experiment":
-                sample_path = self.path / sample_id
-            else:
-                experiment_name, sample_name = sample_id.split('/', 1)
-                sample_path = self.path / experiment_name / sample_name
+            # Sample ID is always in experiment/sample format
+            experiment_name, sample_name = sample_id.split('/', 1)
+            sample_path = self.path / experiment_name / sample_name
             
             if sample_path.exists():
                 selected_paths.append(sample_path)
@@ -390,13 +350,12 @@ class SmartExperimentDirectoryTree(DirectoryTree):
     
     def select_sample_by_id(self, sample_id: str) -> bool:
         """Programmatically select a sample by ID. Returns True if successful."""
-        if self.structure_type == "experiment":
-            sample_path = self.path / sample_id
-        else:
-            if '/' not in sample_id:
-                return False
-            experiment_name, sample_name = sample_id.split('/', 1)
-            sample_path = self.path / experiment_name / sample_name
+        if '/' not in sample_id:
+            return False
+        
+        # Sample ID is always in experiment/sample format
+        experiment_name, sample_name = sample_id.split('/', 1)
+        sample_path = self.path / experiment_name / sample_name
         
         if not sample_path.exists() or not self._is_valid_sample_dir(sample_path):
             return False
@@ -553,7 +512,6 @@ class ComparisonScreen(Screen):
         super().__init__()
         self.collection = collection
         self.selected_samples = set(preselected_samples or [])
-        self.selected_samples = set(self._normalize_ids())
 
     def action_return_to_main(self) -> None:
         """Return to main screen."""
@@ -644,15 +602,6 @@ class ComparisonScreen(Screen):
 
         self.query_one("#comparison-table", ComparisonDataTable).update_data(df, "Valid UMI Comparison")
 
-    def _normalize_ids(self) -> List:
-        """Normalizes ids to handle paths at different levels"""
-        normalized_ids = []
-        for sample_id in self.selected_samples:
-            if '/' in sample_id:
-                normalized_ids.append(sample_id.split('/')[-1])
-            else:
-                normalized_ids.append(sample_id)
-        return normalized_ids
 
     def _get_selected_sample_ids(self) -> Set[str]:
         """Get currently selected sample IDs from SelectionList."""
@@ -879,7 +828,6 @@ class FractureExplorer(App):
             self.metrics_collection = PipelineMetricsCollection.from_summary_files(
                 file_paths=self.pipeline_files
             )
-
             if not self.metrics_collection.samples:
                 self.notify("No sample metrics found", severity="warning")
                 return
