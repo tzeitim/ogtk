@@ -18,7 +18,8 @@ from rich.json import JSON
 from rich.panel import Panel
 from rich.table import Table
 
-from ogtk.ltr.fracture.post import PipelineMetricsCollection
+from ogtk.ltr.fracture.post.metrics.summary import PipelineMetricsCollection
+
 import re
 
 pl.Config.set_float_precision(2)
@@ -203,8 +204,20 @@ class SmartExperimentDirectoryTree(DirectoryTree):
         self.selected_samples = set()
         self.structure_type = self._detect_structure()
         self.sample_nodes = {}  # Track sample nodes for styling
-    
+
     def _detect_structure(self) -> str:
+        try:
+            with os.scandir(self.path) as entries:
+                for entry in entries:
+                    if entry.name.startswith('.') or not entry.is_dir():
+                        continue
+                    if os.path.exists(os.path.join(entry.path, "pipeline_summary.json")):
+                        return "experiment"
+            return "workdir"
+        except PermissionError:
+            return "workdir"
+
+    def __detect_structure(self) -> str:
         """Detect if this is 'workdir' or 'experiment' structure."""
         try:
             # Check if immediate subdirectories contain pipeline_summary.json

@@ -1,34 +1,36 @@
+"""Lightweight data structures with no heavy dependencies."""
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Any
 from datetime import datetime
+import json
 
 @dataclass
 class StepMetrics:
-    """Class representing metrics for a single pipeline step."""
+    """Lightweight step metrics - no external deps."""
     step_name: str
     timestamp: datetime
     metrics: Dict[str, Any]
     
     def __post_init__(self):
-        # Convert timestamp string to datetime if needed
         if isinstance(self.timestamp, str):
-            self.timestamp = datetime.strptime(self.timestamp, "%Y-%m-%d %H:%M:%S")
+            self.timestamp = datetime.fromisoformat(self.timestamp.replace(' ', 'T'))
+    
+    @classmethod
+    def from_dict(cls, step_name: str, data: dict) -> 'StepMetrics':
+        return cls(
+            step_name=step_name,
+            timestamp=data.get('timestamp', '2000-01-01T00:00:00'),
+            metrics=data.get('metrics', {})
+        )
     
     def get_metric(self, name: str, default: Any = None) -> Any:
         """Get a specific metric value."""
         return self.metrics.get(name, default)
-    
-    def as_dict(self) -> Dict[str, Any]:
-        """Convert to a flat dictionary with prefixed keys."""
-        result = {}
-        for k, v in self.metrics.items():
-            result[f"{self.step_name}_{k}"] = v
-        return result
 
-@dataclass
+@dataclass  
 class SampleMetrics:
-    """Class representing all metrics for a sample across pipeline steps."""
+    """Lightweight sample metrics - stdlib only."""
     sample_id: str
     steps: Dict[str, StepMetrics] = field(default_factory=dict)
     
@@ -40,22 +42,16 @@ class SampleMetrics:
         """Get metrics for a specific step."""
         return self.steps.get(step_name)
     
-    def get_metric(self, step_name: str, metric_name: str, default: Any = None) -> Any:
+    def get_metric(self, step: str, metric: str, default: Any = None) -> Any:
         """Get a specific metric from a specific step."""
-        step = self.get_step(step_name)
-        if step:
-            return step.get_metric(metric_name, default)
-        return default
+        step_obj = self.steps.get(step)
+        return step_obj.get_metric(metric, default) if step_obj else default
     
-    def as_dict(self) -> Dict[str, Any]:
-        """Convert to a flat dictionary with all metrics."""
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to flat dictionary with all metrics."""
         result = {"sample_id": self.sample_id}
         for step in self.steps.values():
-            result.update(step.as_dict())
+            for metric_name, value in step.metrics.items():
+                result[f"{step.step_name}_{metric_name}"] = value
         return result
-    
-    def as_df(self):
-        """Convert to a DataFrame with one row."""
-        import polars as pl
-        return pl.DataFrame([self.as_dict()])
 

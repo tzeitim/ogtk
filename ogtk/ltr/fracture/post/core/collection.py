@@ -2,7 +2,7 @@
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Any
 import json
-from .metrics import SampleMetrics, StepMetrics
+from ..metrics.base import SampleMetrics, StepMetrics
 
 class PipelineMetricsCollection:
     """Lightweight collection - only depends on stdlib + core metrics."""

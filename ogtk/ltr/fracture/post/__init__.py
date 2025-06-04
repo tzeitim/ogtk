@@ -15,18 +15,11 @@ def get_viewer_app():
     from .viewer.app import FractureExplorer
     return FractureExplorer
 
-# Legacy compatibility (will import heavy deps)
-def get_legacy_collection():
-    """Get the old heavy collection for backward compatibility."""
-    import warnings
-    warnings.warn(
-        "Legacy collection imports heavy dependencies. "
-        "Consider using the new lightweight PipelineMetricsCollection.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    from ..post.metrics.summary import PipelineMetricsCollection as LegacyCollection
-    return LegacyCollection
+# Heavy collection with advanced features
+def get_extended_collection():
+    """Get extended collection with polars-based analysis capabilities."""
+    from .metrics.summary import PipelineMetricsCollection as ExtendedCollection
+    return ExtendedCollection
 
 __all__ = [
     'StepMetrics',
@@ -34,5 +27,5 @@ __all__ = [
     'PipelineMetricsCollection',
     'get_advanced_analysis',
     'get_viewer_app',
-    'get_legacy_collection'
+    'get_extended_collection'
 ]
