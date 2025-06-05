@@ -115,6 +115,7 @@ class FigureViewer(ModalScreen):
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
+        Binding("q", "close", "Close"),
     ]
 
     CSS = """
@@ -172,6 +173,7 @@ class FigureViewer(ModalScreen):
 
     def compose(self) -> ComposeResult:
         """Compose the screen layout."""
+        yield Header(show_clock=True)
         with Container(id="figure-container"):
             with Vertical():
                 with Horizontal():
@@ -193,10 +195,10 @@ class FigureViewer(ModalScreen):
 class SmartExperimentDirectoryTree(DirectoryTree):
     """Directory tree that adapts to workdir or single experiment structure."""
     BINDINGS = [
-        ("j", "cursor_down", "Down"),
-        ("k", "cursor_up", "Up"),
-        ("enter", "select_cursor", "Select"),
-        ("space", "select_cursor", "Select"),
+        Binding("j", "cursor_down", "Down"),
+        Binding("k", "cursor_up", "Up"),
+        Binding("enter", "select_cursor", "Select"),
+        Binding("space", "select_cursor", "Select"),
     ]
     
     def __init__(self, path: Path, **kwargs):
@@ -504,8 +506,8 @@ class ComparisonScreen(Screen):
     CSS_PATH = "comparison_screen.tcss"
 
     BINDINGS = [
-        ("q", "return_to_main", "Return to Main"),
-        ("r", "run_comparison", "Run Comparison"),
+        Binding("q", "return_to_main", "Return to Main"),
+        Binding("r", "run_comparison", "Run Comparison"),
     ]
 
     def __init__(self, collection: PipelineMetricsCollection, preselected_samples=None):
@@ -664,13 +666,13 @@ class FractureExplorer(App):
     CSS_PATH = "fracture_viewer.tcss"
 
     BINDINGS = [
-        ("q", "quit", "Quit"),
-        ("r", "refresh", "Refresh"),
-        ("f", "view_figures", "View Figures"),
-        ("c", "compare_samples", "Compare Samples"),
-        ("e", "toggle_files", "Toggle Files"),
-        ("a", "select_all", "Select All Files"),
-        ("d", "deselect_all", "Clear Selection"),
+        Binding("q", "quit", "Quit"),
+        Binding("r", "refresh", "Refresh"),
+        Binding("f", "view_figures", "View Figures"),
+        Binding("c", "compare_samples", "Compare Samples"),
+        Binding("e", "toggle_files", "Toggle Files"),
+        Binding("a", "select_all", "Select All Files"),
+        Binding("d", "deselect_all", "Clear Selection"),
     ]
     show_tree = var(False)
 
