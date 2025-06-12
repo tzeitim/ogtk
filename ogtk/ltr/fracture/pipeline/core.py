@@ -398,19 +398,32 @@ class Pipeline:
             out_file_inv = f"{self.xp.sample_wd}/parsed_reads_invalid.parquet" #pyright:ignore
 
             out_file_qc = out_file.replace('.parquet', '_qc.parquet')
-            self.logger.io(f"reading from {in_file}")
+            total_reads = self.get_metric_from_summary("parquet", 'total_reads') 
 
+            self.logger.step(f"reading from {in_file} with {total_reads/1e6:0.2f} M reads")
+
+             
             if not self.xp.dry:
                 ldf = (
                     pl
                     .scan_parquet(in_file)
+                    
+                )
+
+                self.logger.step(f"ldf")
+
+                (
+                        ldf
                     .pp.parse_reads(umi_len=self.xp.umi_len,  
                                     sbc_len=self.xp.sbc_len,
                                     anchor_ont=self.xp.anchor_ont,
                                     )
                     .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
-                )
+                 )
 
+                self.logger.io(f"lazy parsed {ldf}")
+                ldf.sink_parquet(out_file)
+                self.logger.io(f"lazy parsed {ldf}")
                 # save without gc fields
                 if not self.xp.parse_read1:
                     (
@@ -760,6 +773,20 @@ class Pipeline:
         self.preprocess()
         self.fracture()
         #self.run_qcs()
+
+    def get_metric_from_summary(self, step: str, metric: str):
+        import json
+        summary_path = Path(f"{self.xp.pro_workdir}/{self.xp.target_sample}/pipeline_summary.json")
+        if summary_path.exists():
+            try:
+                with open(summary_path, 'r') as f:
+                    summary = json.load(f)
+            except json.JSONDecodeError:
+                summary = {}
+        else:
+            summary = {}
+        return summary[step]['metrics'][metric]
+
 
     def update_pipeline_summary(self, step: PipelineStep, results: StepResults) -> None:
         """Update the pipeline summary with results from a specific step."""

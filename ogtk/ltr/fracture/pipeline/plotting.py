@@ -22,7 +22,8 @@ class PlotDB():
         out_path = f'{xp.sample_figs}/{xp.target_sample}_coverage.png'
         fig = sns.displot(data=
             pl.scan_parquet(ifn)
-                .select('umi', 'reads').unique()
+                .group_by('umi')
+                          .len().rename({'len':'reads'})
                 .collect(),
                 y='reads', 
                 log_scale=(10, 10), 
@@ -32,8 +33,8 @@ class PlotDB():
 
         plt.grid()
         plt.title(f"Reads per UMI\n{xp.target_sample}")
-        plt.ylim(1, 1e5)
-        plt.xlim(1, 2e5)
+        plt.xlim((1,2e6))
+        plt.ylim((1,1e5))
 
         #th_kmeans = qc.find_read_count_threshold(ifn, method='kmeans')
         #th_kneedle = qc.find_read_count_threshold(ifn, method='kneedle')
@@ -54,22 +55,24 @@ class PlotDB():
             sns.ecdfplot(pl.scan_parquet(ifn)
                             .head(int(i))
                             .group_by('umi')
-                            .len()
+                            .len().rename({'len':'reads'})
                             .collect(), 
-                         y='len', 
+                         y='reads', 
                          complementary=True, 
-                         stat='count'
+                         stat='count',
+                         linestyle='dotted',
                          )
             #for i in np.logspace(np.log10(1e3), np.log10(total_reads), num=5, base=10)
             for i in np.linspace(0, total_reads, num=5)
         ]
+
         #plt.title(f'{pl.scan_parquet(mfn_pcr).collect().height/1e6:.2f}')
         plt.title(f'{xp.target_sample} {total_reads/1e6:.2f}M reads')
 
         plt.xscale('log')
         plt.yscale('log')
         #plt.xlim((1,2e3))
-        plt.xlim((1,1e6))
+        plt.xlim((1,2e6))
         plt.ylim((1,1e5))
         plt.grid(True, which='both', ls='--', alpha=0.3)
 

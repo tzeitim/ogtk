@@ -81,6 +81,22 @@ class PlDNA:
         )
 
 
+@pl.api.register_lazyframe_namespace("dna")
+class PllDNA:
+    def __init__(self, ldf: pl.LazyFrame) -> None:
+        self._ldf = ldf
+
+    def kmers_explode(self, seq_column:str ,k: int = 10, max_str_len=500):
+        return(
+                self._ldf
+                .with_columns(
+                    pl.concat_list(
+                        [pl.col(seq_column).str.slice(s, k) for s in range(0, max_str_len)]
+                        )
+                    )
+            .explode('seq').filter(pl.col('seq').is_unique())
+            )
+
 @pl.api.register_dataframe_namespace("pp")
 class PlPipeline:
     """Provides sequence assembly and optimization methods for Polars DataFrames.

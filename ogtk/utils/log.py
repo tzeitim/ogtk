@@ -3,18 +3,8 @@ import logging
 import inspect
 from typing import Any, Optional
 from pathlib import Path
-
-# Lazy imports for heavy dependencies
-def __getattr__(name):
-    if name == 'pl':
-        import polars as pl
-        globals()[name] = pl
-        return pl
-    elif name == 'pd':
-        import pandas as pd
-        globals()[name] = pd
-        return pd
-    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+import pandas as pd
+import polars as pl
 
 # Define custom log levels
 IO_LEVEL_NUM = 19
