@@ -1,25 +1,35 @@
 import polars as pl
 from pathlib import Path
-from typing import Set,Dict
+from typing import Set,Dict, Optional, Type
 from enum import Enum
 from .base import PostProcessorExtension
 from .registry import extension_registry
+from .config import ExtensionConfig
 from ..pipeline.types import StepResults,FractureXp
-from functools import wraps
+from dataclasses import dataclass
 
-def parse_contigs(df, int_anchor1: str, int_anchor2: str, sbc_dict: Dict|None, annotation: str = 'sbc'):
-    """ Extracts integration barcodes (intBC) and if sample barcodes (sbc). """
-    # 1 extract/use sbcs
+def parse_contigs(df, **config):
+    """Extracts integration barcodes (intBC) and sample barcodes (sbc)."""
+    int_anchor1 = config['int_anchor1']
+    int_anchor2 = config['int_anchor2'] 
+    sbc_dict = config.get('sbc_dict')
+    annotation = config.get('annotation', 'sbc')
+    
+    # 1. Extract/use sbcs
     if sbc_dict is not None:
         df = df.with_columns(pl.col('sbc').replace(sbc_dict).alias(annotation))
-    # 2 extract intBC
+    
+    # 2. Extract intBC
     df = (
-            df   
-            .with_columns(
-                pl.col('contig').str
-                .extract(f'{int_anchor1}(.+?){int_anchor2}', 1).alias('intBC')
-                )
+        df   
+        .with_columns(
+            pl.col('contig').str
+            .extract(f'{int_anchor1}(.+?){int_anchor2}', 1).alias('intBC')
         )
+    )
+    
+    return df
+
 
 def _generate_refs_from_fasta(refs_fasta_path: str|Path, anchor1: str, anchor2: str) -> pl.DataFrame:
     """ Given a FASTA file with references it generates a trimmed version of the cassettes for aligment"""
@@ -41,6 +51,26 @@ def _generate_refs_from_fasta(refs_fasta_path: str|Path, anchor1: str, anchor2: 
 
     return refs
 
+@dataclass
+class CassiopeiaConfig(ExtensionConfig):
+    # Required fields
+    int_anchor1: str
+    int_anchor2: str
+    
+    # Optional fields with defaults
+    sbc_dict: Optional[Dict] = None
+    annotation: str = 'sbc'
+    refs_fasta_path: Optional[str] = None
+    anchor1: Optional[str] = None
+    anchor2: Optional[str] = None
+    
+    # Function-specific parameter mapping
+    _FUNCTION_PARAMS = {
+        'parse_contigs': {'int_anchor1', 'int_anchor2', 'sbc_dict', 'annotation'},
+        'generate_refs_from_fasta': {'refs_fasta_path', 'anchor1', 'anchor2'},
+        'classify_cassettes': {'int_anchor1', 'refs_fasta_path'},
+    }
+
 class CassiopeiaStep(Enum):
     """Steps within the Cassiopeia lineage extension"""
     PARSE_CONTIGS = 'parse_contigs'
@@ -51,18 +81,21 @@ class CassiopeiaStep(Enum):
 
 class CassiopeiaLineageExtension(PostProcessorExtension):
     xp: FractureXp
+    config: ExtensionConfig
     def __init__(self, xp: FractureXp):
         super().__init__(xp)
         self.temp_data = {}
-        self.config = self.xp.extension_config['cassiopeia_lineage']
+    
+    def get_config_class(self) -> Type[ExtensionConfig]:
+        return CassiopeiaConfig
+
+    @property
+    def required_params(self) -> Set[str]:
+        return self.config.get_required_fields()
     
     @property
     def name(self) -> str:
         return "cassiopeia_lineage"
-    
-    @property
-    def required_params(self) -> Set[str]:
-        return {"intbc_5prime", "sbc_len"}
     
     def process(self, contigs_path: Path) -> StepResults:
         """Main entry point - orchestrates all sub-steps"""
@@ -72,9 +105,12 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         config = self.config
         self.df = pl.read_parquet(contigs_path)
 
-        if 'refs_fasta_path' in config:
-            refs = _generate_refs_from_fasta(config['refs_fasta_path'], anchor1 = config['anchor1'], anchor2 = config['anchor2'])
-            self.xp.logger.info(f"found {refs.height} references")
+        if self.config.refs_fasta_path is not None:
+            refs = _generate_refs_from_fasta(
+                self.config.refs_fasta_path, 
+                anchor1=self.config.anchor1, 
+                anchor2=self.config.anchor2
+            )
 
         #self.temp_data['xp'] = xp
         #self.temp_data['outputs_dir'] = contigs_path.parent / "cassiopeia_outputs"
@@ -125,20 +161,8 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
             metrics={"":[]},
         )
 
-    @wraps(parse_contigs)
-    def _parse_contigs(self, ) -> StepResults:
-        """ """
-        parse_contigs(df = self.df, 
-                      int_anchor1=self.config['int_anchor1'], 
-                      int_anchor2=self.config['int_anchor2'], 
-                      sbc_dict=None, 
-                      annotation=None, 
-                      )
-#def parse_contigs(df, int_anchor1: str, int_anchor2: str, sbc_dict: Dict|None, annotation: str = 'sbc'):
-        return StepResults(
-            results={"":[]},
-            metrics={"":[]},
-        )
+    def _parse_contigs(self) -> StepResults:
+        return parse_contigs(df=self.df, **self.config.get_function_config('parse_contigs'))
 
     def _convert_to_allele_table(self) -> StepResults:
         """ """

@@ -1,6 +1,6 @@
 from pathlib import Path 
 from functools import wraps
-from typing import Any, Callable, NamedTuple, Dict, Optional
+from typing import Any, Callable, Dict
 from enum import Enum
 import polars as pl
 
