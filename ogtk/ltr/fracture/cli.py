@@ -78,6 +78,18 @@ def parse_args():
         action="store_true",
         help="Regenerate markdown summary from existing JSON data"
     )
+    
+    parser.add_argument(
+        "--extensions",
+        nargs="+", 
+        help="Extensions to run"
+    )
+    
+    parser.add_argument(
+        "--extension-steps",
+        nargs="+",
+        help="Extension steps in format extension:step1,step2"
+    )
 
     return parser
 
@@ -149,6 +161,16 @@ def main():
     
         $ python pipeline.py --config config.yml --target-sample "sample_id" --regenerate-plots --regenerate-summary
 
+    Run specific main steps + specific extension steps
+        $ python pipeline.py --config config.yml --steps fracture --extension-steps cassiopeia_lineage:extract_barcodes,generate_matrix
+
+    Run only extensions (skip main pipeline)
+        $ python pipeline.py --config config.yml --steps --extensions cassiopeia_lineage --extension-steps cassiopeia_lineage:generate_matrix
+
+    Multiple extensions with different steps
+        $ python pipeline.py --extension-steps cassiopeia_lineage:extract_barcodes transcript_genotyping:all
+
+
     Returns
     -------
     int
@@ -164,6 +186,7 @@ def main():
     # Parse arguments
     parser = parse_args()
     args = parser.parse_args()
+
 
     try:
         # Only import modules when we're actually running the pipeline
@@ -184,6 +207,23 @@ def main():
         
         # Initialize Xp configuration
         xp = FractureXp(conf_fn=args.config)
+
+        # handle extensions
+        if args.extensions:
+            xp.extensions = args.extensions
+
+        if args.extension_steps:
+            extension_steps = {}
+            for ext_spec in args.extension_steps:
+                if ':' in ext_spec:
+                    ext_name, steps_str = ext_spec.split(':', 1)
+                    steps = [s.strip() for s in steps_str.split(',')]
+                    extension_steps[ext_name] = steps
+                else:
+                    # If no colon, assume all steps for this extension
+                    extension_steps[ext_spec] = None
+            
+            xp.extension_steps = extension_steps
 
         # Skip the pipeline if we are only regenerating plots or summary
         if args.regenerate_plots is not None or args.regenerate_summary:

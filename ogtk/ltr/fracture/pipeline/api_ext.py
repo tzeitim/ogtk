@@ -5,8 +5,38 @@ from ogtk.utils.log import Rlogger, call
 
 __all__ = [
         'PlDNA',
-        'PlPipeline'
+        'PlPipeline',
+        'LazyKmer',
+        'EagerKmer',
 ]
+
+@pl.api.register_lazyframe_namespace("kmer")
+class LazyKmer:
+    """ """
+    def __init__(self, ldf: pl.LazyFrame) -> None:
+        self._ldf = ldf
+
+    def explode_kmers(self, seq_field: str, k = 15, only_unique = True, max_str_len: int = 500):
+        """Returns lazy dataframe with the field ``kmer``"""
+        return (
+            self._ldf
+            .with_columns(
+                kmer= pl.concat_list([pl.col(seq_field).str.slice(s, k) for s in range(0, max_str_len)]))
+            .explode('kmer')
+            .filter(pl.col('kmer').str.len_chars()==k)
+            .filter(~pl.lit(only_unique) | pl.col('kmer').is_unique())
+        )
+
+@pl.api.register_dataframe_namespace("kmer")
+class EagerKmer:
+    """ """
+    def __init__(self, df: pl.DataFrame) -> None:
+        self._df = df
+
+    def explode_kmers(self, seq_field: str, k = 15, only_unique = True, max_str_len: int= 500):
+        """Returns dataframe with the field ``kmer``"""
+        return self._df.lazy().kmer.explode_kmers(seq_field, k, only_unique, max_str_len).collect() #pyright: ignore
+
 
 @pl.api.register_dataframe_namespace("dna")
 class PlDNA:
@@ -356,3 +386,270 @@ class PllPipeline:
                                   .alias('r2_seq')
                                   )
                 )
+
+import polars as pl
+from ogtk.utils.log import Rlogger, call
+
+# TODO
+# ppp is the temporary expansion of the routines in a chunked manner with split logics
+# under development
+@pl.api.register_dataframe_namespace("ppp")
+class Chunked:
+    """Provides chunked processing methods for large datasets that don't fit in memory.
+    
+    Methods are registered under the 'ppp' namespace and can be accessed via df.ppp.*
+    This is designed for DataFrames that are already in memory but need chunked operations.
+    """
+    def __init__(self, df: pl.DataFrame) -> None:
+        self._df = df
+        self.logger = Rlogger().get_logger()
+    
+    def parse_reads_chunked(self, umi_len: int, anchor_ont: str, sbc_len: int, 
+                           chunk_size: int = 100_000_000) -> pl.DataFrame:
+        """Parse reads in chunks to avoid memory issues.
+        
+        Args:
+            umi_len (int): Length of UMI sequence
+            anchor_ont (str): Anchor sequence to search for
+            sbc_len (int): Sample barcode length  
+            chunk_size (int): Maximum rows per chunk (default 100M)
+            
+        Returns:
+            pl.DataFrame: Processed dataframe with all parse_reads columns
+        """
+        total_rows = self._df.height
+        
+        if total_rows <= chunk_size:
+            self.logger.debug(f"Dataset has {total_rows:,} rows, processing without chunking")
+            return self._parse_reads_single_chunk(self._df, umi_len, anchor_ont, sbc_len)
+        
+        self.logger.info(f"Processing {total_rows:,} rows in chunks of {chunk_size:,}")
+        
+        chunks = []
+        for start_idx in range(0, total_rows, chunk_size):
+            end_idx = min(start_idx + chunk_size, total_rows)
+            chunk_rows = end_idx - start_idx
+            
+            self.logger.debug(f"Processing chunk {start_idx:,} to {end_idx:,} ({chunk_rows:,} rows)")
+            
+            chunk_df = self._df.slice(start_idx, chunk_rows)
+            processed_chunk = self._parse_reads_without_globals(chunk_df, umi_len, anchor_ont, sbc_len)
+            chunks.append(processed_chunk)
+        
+        # Concatenate all chunks
+        self.logger.debug("Concatenating chunks and computing global metrics")
+        full_df = pl.concat(chunks)
+        
+        # Add global metrics and window functions
+        return self._add_global_metrics_and_windows(full_df)
+    
+    def _parse_reads_single_chunk(self, df: pl.DataFrame, umi_len: int, anchor_ont: str, sbc_len: int) -> pl.DataFrame:
+        """Process a single chunk that fits in memory using the original logic."""
+        return (
+            df
+            .with_columns(pl.col('r1_seq').str.slice(0, umi_len).alias('umi'))
+            .with_columns(pl.col('r1_seq').str.slice(umi_len, sbc_len).alias('sbc'))
+            .with_columns(pl.col('r1_seq').str.contains(anchor_ont).alias('ont'))
+            # read level metrics
+            .with_columns(metric_reads_ont = pl.col('ont').sum())
+            .with_columns(metric_reads_offt = pl.col('ont').not_().sum())
+            .with_columns(metric_fraction_ont = pl.col('ont').mean())
+            .with_columns(metric_fraction_offt = pl.col('ont').not_().mean())
+            # UMI validation
+            .with_columns(pl.col('r1_seq')
+                          .str.extract(f'(.*?){anchor_ont}.*$',1)
+                          .str.len_chars()
+                          .fill_null(0)
+                          .alias('valid_umi')
+                          )
+            .with_columns((pl.col('valid_umi')==umi_len+sbc_len).alias('valid_umi'))
+            .with_columns(pl.len().over('umi').alias('reads'))
+        )
+    
+    def _parse_reads_without_globals(self, df: pl.DataFrame, umi_len: int, anchor_ont: str, sbc_len: int) -> pl.DataFrame:
+        """Process reads without global aggregations or window functions."""
+        return (
+            df
+            .with_columns(pl.col('r1_seq').str.slice(0, umi_len).alias('umi'))
+            .with_columns(pl.col('r1_seq').str.slice(umi_len, sbc_len).alias('sbc'))
+            .with_columns(pl.col('r1_seq').str.contains(anchor_ont).alias('ont'))
+            # UMI validation
+            .with_columns(pl.col('r1_seq')
+                          .str.extract(f'(.*?){anchor_ont}.*$',1)
+                          .str.len_chars()
+                          .fill_null(0)
+                          .alias('valid_umi')
+                          )
+            .with_columns((pl.col('valid_umi')==umi_len+sbc_len).alias('valid_umi'))
+        )
+    
+    def _add_global_metrics_and_windows(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Add global metrics and window functions to the concatenated dataframe."""
+        return (
+            df
+            # Global read-level metrics
+            .with_columns(metric_reads_ont = pl.col('ont').sum())
+            .with_columns(metric_reads_offt = pl.col('ont').not_().sum())
+            .with_columns(metric_fraction_ont = pl.col('ont').mean())
+            .with_columns(metric_fraction_offt = pl.col('ont').not_().mean())
+            # Window function for reads per UMI
+            .with_columns(pl.len().over('umi').alias('reads'))
+        )
+
+
+@pl.api.register_lazyframe_namespace("ppp")
+class LazyChunked:
+    """Provides chunked processing methods for LazyFrames to handle large parquet files.
+    
+    Methods are registered under the 'ppp' namespace and can be accessed via ldf.ppp.*
+    This processes data in chunks directly from parquet files without loading everything into memory.
+    """
+    def __init__(self, ldf: pl.LazyFrame) -> None:
+        self._ldf = ldf
+        self.logger = Rlogger().get_logger()
+    
+    def parse_reads_chunked(self, umi_len: int, anchor_ont: str, sbc_len: int, 
+                           chunk_size: int = 100_000_000, 
+                           total_rows: int = None) -> pl.LazyFrame:
+        """Parse reads in chunks from a LazyFrame (typically from parquet scan).
+        
+        Args:
+            umi_len (int): Length of UMI sequence
+            anchor_ont (str): Anchor sequence to search for
+            sbc_len (int): Sample barcode length
+            chunk_size (int): Maximum rows per chunk (default 100M)
+            total_rows (int): Total number of rows (if known, avoids counting)
+            
+        Returns:
+            pl.LazyFrame: Processed lazy dataframe ready for sinking
+        """
+        # Get total row count if not provided
+        if total_rows is None:
+            self.logger.debug("Counting total rows in dataset")
+            total_rows = self._ldf.select(pl.len()).collect().item()
+        
+        if total_rows <= chunk_size:
+            self.logger.debug(f"Dataset has {total_rows:,} rows, processing without chunking")
+            return self._parse_reads_single_lazy(self._ldf, umi_len, anchor_ont, sbc_len)
+        
+        self.logger.info(f"Processing {total_rows:,} rows in chunks of {chunk_size:,}")
+        
+        # Process chunks and collect them
+        chunk_dfs = []
+        for start_idx in range(0, total_rows, chunk_size):
+            end_idx = min(start_idx + chunk_size, total_rows)
+            chunk_rows = end_idx - start_idx
+            
+            self.logger.debug(f"Processing chunk {start_idx:,} to {end_idx:,} ({chunk_rows:,} rows)")
+            
+            # Slice the lazy frame and process the chunk
+            chunk_ldf = self._ldf.slice(start_idx, chunk_rows)
+            processed_chunk = self._parse_reads_without_globals_lazy(chunk_ldf, umi_len, anchor_ont, sbc_len)
+            
+            # Collect this chunk to avoid memory issues with many lazy frames
+            chunk_df = processed_chunk.collect()
+            chunk_dfs.append(chunk_df)
+        
+        # Concatenate all chunks and create a new lazy frame
+        self.logger.debug("Concatenating chunks and preparing final lazy frame")
+        full_df = pl.concat(chunk_dfs)
+        
+        # Convert back to lazy frame and add global metrics and window functions
+        return self._add_global_metrics_and_windows_lazy(pl.LazyFrame(full_df))
+    
+    def _parse_reads_single_lazy(self, ldf: pl.LazyFrame, umi_len: int, anchor_ont: str, sbc_len: int) -> pl.LazyFrame:
+        """Process a single lazy frame that should fit in memory."""
+        return (
+            ldf
+            .with_columns(pl.col('r1_seq').str.slice(0, umi_len).alias('umi'))
+            .with_columns(pl.col('r1_seq').str.slice(umi_len, sbc_len).alias('sbc'))
+            .with_columns(pl.col('r1_seq').str.contains(anchor_ont).alias('ont'))
+            # read level metrics
+            .with_columns(metric_reads_ont = pl.col('ont').sum())
+            .with_columns(metric_reads_offt = pl.col('ont').not_().sum())
+            .with_columns(metric_fraction_ont = pl.col('ont').mean())
+            .with_columns(metric_fraction_offt = pl.col('ont').not_().mean())
+            # UMI validation
+            .with_columns(pl.col('r1_seq')
+                          .str.extract(f'(.*?){anchor_ont}.*$',1)
+                          .str.len_chars()
+                          .fill_null(0)
+                          .alias('valid_umi')
+                          )
+            .with_columns((pl.col('valid_umi')==umi_len+sbc_len).alias('valid_umi'))
+            .with_columns(pl.len().over('umi').alias('reads'))
+        )
+    
+    def _parse_reads_without_globals_lazy(self, ldf: pl.LazyFrame, umi_len: int, anchor_ont: str, sbc_len: int) -> pl.LazyFrame:
+        """Process reads without global aggregations or window functions."""
+        return (
+            ldf
+            .with_columns(pl.col('r1_seq').str.slice(0, umi_len).alias('umi'))
+            .with_columns(pl.col('r1_seq').str.slice(umi_len, sbc_len).alias('sbc'))
+            .with_columns(pl.col('r1_seq').str.contains(anchor_ont).alias('ont'))
+            # UMI validation
+            .with_columns(pl.col('r1_seq')
+                          .str.extract(f'(.*?){anchor_ont}.*$',1)
+                          .str.len_chars()
+                          .fill_null(0)
+                          .alias('valid_umi')
+                          )
+            .with_columns((pl.col('valid_umi')==umi_len+sbc_len).alias('valid_umi'))
+        )
+    
+    def _add_global_metrics_and_windows_lazy(self, ldf: pl.LazyFrame) -> pl.LazyFrame:
+        """Add global metrics and window functions to the lazy dataframe."""
+        return (
+            ldf
+            # Global read-level metrics  
+            .with_columns(metric_reads_ont = pl.col('ont').sum())
+            .with_columns(metric_reads_offt = pl.col('ont').not_().sum())
+            .with_columns(metric_fraction_ont = pl.col('ont').mean())
+            .with_columns(metric_fraction_offt = pl.col('ont').not_().mean())
+            # Window function for reads per UMI
+            .with_columns(pl.len().over('umi').alias('reads'))
+        )
+    
+    def sink_parquet_chunked(self, path: str, chunk_size: int = 100_000_000) -> None:
+        """Sink a large LazyFrame to parquet in chunks to avoid memory issues.
+        
+        This is useful when even sinking fails due to memory constraints.
+        
+        Args:
+            path (str): Output parquet file path
+            chunk_size (int): Maximum rows per chunk when sinking
+        """
+        self.logger.info(f"Sinking LazyFrame to {path} in chunks of {chunk_size:,}")
+        
+        # Get total row count
+        total_rows = self._ldf.select(pl.len()).collect().item()
+        
+        if total_rows <= chunk_size:
+            self.logger.debug("Dataset fits in single chunk, using regular sink")
+            self._ldf.sink_parquet(path)
+            return
+        
+        # Process and write chunks
+        first_chunk = True
+        for start_idx in range(0, total_rows, chunk_size):
+            end_idx = min(start_idx + chunk_size, total_rows)
+            chunk_rows = end_idx - start_idx
+            
+            self.logger.debug(f"Sinking chunk {start_idx:,} to {end_idx:,} ({chunk_rows:,} rows)")
+            
+            chunk_ldf = self._ldf.slice(start_idx, chunk_rows)
+            
+            if first_chunk:
+                # First chunk creates the file
+                chunk_ldf.sink_parquet(path)
+                first_chunk = False
+            else:
+                # Subsequent chunks append (this requires collecting and re-writing)
+                # Note: Polars doesn't support true append mode for parquet
+                # So we need to collect previous data and append
+                existing_df = pl.scan_parquet(path).collect()
+                chunk_df = chunk_ldf.collect()
+                combined_df = pl.concat([existing_df, chunk_df])
+                combined_df.write_parquet(path)
+        
+        self.logger.info(f"Successfully wrote {total_rows:,} rows to {path}")

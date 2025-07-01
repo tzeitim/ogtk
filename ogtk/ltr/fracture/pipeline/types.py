@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any, List
 from ogtk.utils.log import CustomLogger, Rlogger, call
 from .plotting import PlotDB
-
+from typing import NamedTuple,Dict
 
 class FractureXp(Xp):
     """Extended Xp class with pipeline-specific functionality"""
@@ -28,6 +28,9 @@ class FractureXp(Xp):
     allow_wildcards: bool
     intbc_5prime: str
     parse_read1: bool
+    extensions: List[str]
+    extension_steps: Dict[str, List[str]]
+    extension_config: Dict[str, Dict[str, Any]]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -36,6 +39,11 @@ class FractureXp(Xp):
         self.make_test = getattr(self, 'make_test', False)
         self.parse_read1 = getattr(self, 'parse_read1', False)
         self.sbc_len = getattr(self, 'sbc_len', 6)
+
+        # extensions
+        self.extensions = getattr(self, 'extensions', [])
+        self.extension_steps = getattr(self, 'extension_steps', {})
+        self.extension_config = getattr(self, 'extension_config', {})
 
 
     @call
@@ -60,3 +68,15 @@ class FractureXp(Xp):
             
         return sample_files
 
+class StepResults(NamedTuple):
+    #TODO is it necessary so many levels? (results, metrics)
+    """Container for data to be passed to plotting or QCs
+        - results: is meant to contain elements or objects related to the pipeline progression
+        - metrics: keeps track of values that are used to generate the final summary and compute stats 
+    """
+    results: dict  
+    metrics: dict = {}
+
+    def has_metrics(self):
+        """Check if a step returned any metrics """
+        return len(self.metrics)>0

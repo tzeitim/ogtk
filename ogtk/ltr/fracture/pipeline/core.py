@@ -1,4 +1,3 @@
-from logging import lastResort
 from pathlib import Path 
 from functools import wraps
 from typing import Any, Callable, NamedTuple, Dict, Optional
@@ -8,21 +7,9 @@ import polars as pl
 from ogtk.utils.log import Rlogger, call
 from ogtk.utils.general import sfind, tabulate_paired_10x_fastqs_rs
 from .plotting import PlotDB
-from .types import FractureXp
+from .types import FractureXp,StepResults
 
 
-class StepResults(NamedTuple):
-    #TODO is it necessary so many levels? (results, metrics)
-    """Container for data to be passed to plotting or QCs
-        - results: is meant to contain elements or objects related to the pipeline progression
-        - metrics: keeps track of values that are used to generate the final summary and compute stats 
-    """
-    results: dict  
-    metrics: dict = {}
-
-    def has_metrics(self):
-        """Check if a step returned any metrics """
-        return len(self.metrics)>0
 
     
 class PipelineStep(Enum):
@@ -41,7 +28,7 @@ class PipelineStep(Enum):
         'required_params': {'umi_len', 'anchor_ont'},
         'description': "Assemble short reads into contigs"
     }
-    
+
     TEST = {
         'required_params': {'target_sample'},
         'description': "Makes a downsampled fastq file for testing purposes"
@@ -259,13 +246,75 @@ class Pipeline:
                 self.logger.error(f"Failed to import plotting dependencies: {str(e)}", with_traceback=True)
                 self.xp.do_plot = False 
 
+        self.enabled_extensions = getattr(self.xp, 'extensions', [])
+
+
 
     def should_run_step(self, step: PipelineStep) -> bool:
         """Check if a step should be run based on configuration"""
         if hasattr(self.xp, 'steps'):
             return step.name.lower() in [s.lower() for s in self.xp.steps] 
         return True  # Run all steps if not specified
+
+#### TODO - verify
+    def run_extensions(self) -> bool:
+        """Run enabled post-processing extensions"""
+        # Check if extensions are configured
+        if not hasattr(self.xp, 'extensions') or not self.xp.extensions:
+            self.logger.debug("No extensions configured")
+            return True
         
+        try:
+            # Import here to avoid circular dependency
+            from ..extensions import extension_registry
+        except ImportError:
+            self.logger.warning("Extensions module not available")
+            return True
+        
+        # Look for contigs file
+        contigs_path = Path(f"{self.xp.sample_wd}/contigs_pl_direct.parquet")
+        if not contigs_path.exists():
+            self.logger.error("No contigs found for post-processing. Run fracture step first.")
+            return False
+        
+        self.logger.info(f"Running {len(self.xp.extensions)} extensions")
+        
+        for ext_name in self.xp.extensions:
+            extension = extension_registry.create_extension(ext_name, self.xp)
+            if not extension:
+                self.logger.error(f"Extension '{ext_name}' not found")
+                self.logger.info(f"Available extensions: {extension_registry.get_available()}")
+                continue
+                
+            # Validate required parameters
+            missing_params = [
+                param for param in extension.required_params
+                if not hasattr(self.xp, param)
+            ]
+            if missing_params:
+                self.logger.error(f"Extension {ext_name} missing required parameters: {missing_params}")
+                continue
+                
+            try:
+                self.logger.info(f"Running extension: {ext_name}")
+                results = extension.process(contigs_path)
+                
+                # Create a synthetic step for the extension summary
+                class ExtStep:
+                    def __init__(self, name):
+                        self.name = f"EXT_{name.upper()}"
+                        self.value = {'required_params': extension.required_params}
+                
+                self.update_pipeline_summary(ExtStep(ext_name), results)
+                self.logger.info(f"Extension {ext_name} completed successfully")
+                
+            except Exception as e:
+                self.logger.error(f"Extension {ext_name} failed: {e}", with_traceback=True)
+                return False
+        
+        self.logger.info("Extensions completed successfully!")
+        return True        
+
     @call
     @pipeline_step(PipelineStep.PARQUET)
     def to_parquet(self) -> StepResults|None:
@@ -400,20 +449,19 @@ class Pipeline:
             out_file_qc = out_file.replace('.parquet', '_qc.parquet')
             total_reads = self.get_metric_from_summary("parquet", 'total_reads') 
 
-            self.logger.step(f"reading from {in_file} with {total_reads/1e6:0.2f} M reads")
+            self.logger.info(f"reading from {in_file} with {total_reads/1e6:0.2f} M reads")
 
              
             if not self.xp.dry:
                 ldf = (
                     pl
                     .scan_parquet(in_file)
-                    
                 )
 
                 self.logger.step(f"ldf")
 
-                (
-                        ldf
+                ldf = (
+                    ldf
                     .pp.parse_reads(umi_len=self.xp.umi_len,  
                                     sbc_len=self.xp.sbc_len,
                                     anchor_ont=self.xp.anchor_ont,
@@ -421,9 +469,10 @@ class Pipeline:
                     .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                  )
 
-                self.logger.io(f"lazy parsed {ldf}")
-                ldf.sink_parquet(out_file)
-                self.logger.io(f"lazy parsed {ldf}")
+                self.logger.info(f"Mr. Columns {out_file}")
+                ###self.logger.io(f"lazy parsed {ldf}")
+                #ldf.sink_parquet(out_file)
+                ###self.logger.io(f"lazy parsed {ldf}")
                 # save without gc fields
                 if not self.xp.parse_read1:
                     (
@@ -733,9 +782,14 @@ class Pipeline:
         except Exception as e:
             self.logger.error(f"Failed to clean pipeline outputs: {str(e)}", with_traceback=True)
             raise
+    def should_run_step(self, step: PipelineStep) -> bool:
+        """Check if a step should be run based on configuration"""
+        if hasattr(self.xp, 'steps') and self.xp.steps is not None:
+            return step.name.lower() in [s.lower() for s in self.xp.steps] 
+        return True  # Run all steps if not specified
 
     def run(self) -> bool:
-        """Run the complete pipeline"""
+        """Run the complete pipeline and/or extensions"""
         if self.xp.make_test:
             try:
                 self.logger.info("=== TEST MODE ===")
@@ -756,9 +810,19 @@ class Pipeline:
                 return False
 
         try:
-            self.run_all()
+            has_main_steps = (hasattr(self.xp, 'steps') and 
+                 self.xp.steps is not None and 
+                 len(self.xp.steps) > 0)
+
+            if has_main_steps:
+                self.run_all()
+            else:
+                self.logger.info("No main pipeline steps specified, skipping to extensions")
             
             self.logger.info("Pipeline completed successfully")
+
+            self.run_extensions()
+            
             return True
             
         except Exception as e:
