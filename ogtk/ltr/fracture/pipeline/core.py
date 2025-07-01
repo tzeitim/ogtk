@@ -173,7 +173,7 @@ def pipeline_step(step: PipelineStep):
                     mode='w'  # Start fresh log for each step run
                 )
                 
-                # Validate parameters
+                # Validate pipeline parameters
                 missing_params = [
                     param for param in step.value['required_params']
                     if not hasattr(ppi.xp, param)
@@ -284,15 +284,6 @@ class Pipeline:
             if not extension:
                 self.logger.error(f"Extension '{ext_name}' not found")
                 self.logger.info(f"Available extensions: {extension_registry.get_available()}")
-                continue
-                
-            # Validate required parameters
-            missing_params = [
-                param for param in extension.required_params
-                if not hasattr(self.xp, param)
-            ]
-            if missing_params:
-                self.logger.error(f"Extension {ext_name} missing required parameters: {missing_params}")
                 continue
                 
             try:
