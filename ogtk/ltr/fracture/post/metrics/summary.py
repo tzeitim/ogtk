@@ -1,6 +1,5 @@
 """Extended collection with heavy analysis capabilities."""
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Any
 import json
 from .base import SampleMetrics, StepMetrics
 from ..core.collection import PipelineMetricsCollection as CoreCollection
