@@ -7,12 +7,13 @@ from .registry import extension_registry
 from .config import ExtensionConfig
 from ..pipeline.types import StepResults,FractureXp
 from dataclasses import dataclass
+from ogtk.utils.log import CustomLogger
 
 def plug_cassiopeia(
         ldf: pl.LazyFrame,
         ann_intbc_mod= pl.DataFrame,
         workdir: Path|str ='.',
-        logger: None=  None,
+        logger: None|CustomLogger=  None,
         barcode_interval: List|Tuple = (0, 7),
         cutsite_locations: List =  [40, 67, 94, 121, 148, 175, 202, 229, 256, 283],
         cutsite_width: int = 12,
@@ -337,66 +338,11 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
 
         config = self.config.get_function_config(plug_cassiopeia)
 
-        cass_ldf = (
-                self.ldf.with_columns(
-                readName=pl.col('umi'),
-                cellBC=pl.col('umi'), 
-                UMI=pl.col('umi'),
-                readCount=pl.col('reads'),
-                seq=pl.col('intBC')+pl.col('contig'),
-                )
-                .select('readName', 'cellBC', 'UMI', 'readCount', 'seq', 'intBC', 'sbc')
-                #TODO: change `how`?
-                .join(ann_intbc_mod.lazy(), left_on='intBC', right_on='intBC', how='inner')
-        )
-
-        res = []
-        umi_tables = []
-        nones = 0
-
-        config_params = {
-            'barcode_interval': config.get('barcode_interval', (0, 7)),
-            'cutsite_locations': config.get('cutsite_locations', [40, 67, 94, 121, 148, 175, 202, 229, 256, 283]),
-            'cutsite_width': config.get('cutsite_width', 12),
-            'context': config.get('context', True),
-            'context_size': config.get('context_size', 50),
-        }
-
-        for (intBC, mod, sbc), queries in cass_ldf.collect().partition_by('intBC', 'mod', 'sbc', as_dict=True).items():
-            if mod is None:
-                nones+=1
-            else:
-                self.xp.logger.debug(f"{mod=} {intBC=} {queries.shape=}")
-
-                umi_table = cas.pp.align_sequences(
-                     queries=queries.to_pandas(),
-                     ref_filepath=f'{self.workdir}/{mod}.fasta',
-                     n_threads=1,
-                     method='global'
-                 )
-        
-                allele_table =  cas.pp.call_alleles(
-                                umi_table,
-                                ref_filepath = f'{self.workdir}/{mod}.fasta',
-                                **config_params,
-                            )
-
-                #replace intBC for real intBC since Cassiopeia does something I don't understand yet
-                # include colums dropped by cass?
-                allele_table['intBC'] = intBC
-                allele_table['mod'] = mod
-                allele_table['sbc'] = sbc
-
-                umi_tables.append(umi_table.copy())
-                #self.xp.logger.info(f"found {umi_table['intBC'].n_unique()} integrations for {mod}")
-
-                res.append(
-                    pl.DataFrame(allele_table).with_columns(mod=pl.lit(mod), mols=allele_table.shape[0])
-                    )
-
-        return StepResults(
-                results={"alleles_pl" : pl.concat(res), "alleles_pd" : umi_tables}
-        )
+        return plug_cassiopeia(ldf=self.ldf, 
+                               ann_intbc_mod=self.ann_intbc_mod,
+                               workdir=self.workdir,
+                               logger=self.xp.logger,
+                               **config)
     
     def _pycea_explore(self):
         
