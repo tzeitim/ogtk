@@ -183,6 +183,12 @@ class CassiopeiaConfig(ExtensionConfig):
     refs_fasta_path: Optional[str] = None
     anchor1: Optional[str] = None
     anchor2: Optional[str] = None
+
+    barcode_interval: Tuple[int, int] = (0, 7)
+    cutsite_locations: List[int] = field(default_factory=lambda: [40, 67, 94, 121, 148, 175, 202, 229, 256, 283])
+    cutsite_width: int = 12
+    context: bool = True
+    context_size: int = 50
     
 
 class CassiopeiaStep(Enum):
