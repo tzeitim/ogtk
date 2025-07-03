@@ -60,7 +60,7 @@ def parse_contigs(ldf, **config):
         )
     )
     
-    return StepResults(results={'ldf':ldf}, metrics={'n_parsed_contigs':df.height})
+    return StepResults(results={'ldf':ldf}, metrics={'n_parsed_contigs':ldf.height})
 
 
 def generate_refs_from_fasta(refs_fasta_path: str|Path, anchor1: str, anchor2: str) -> pl.DataFrame:
@@ -254,6 +254,8 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         import cassiopeia as cas
         ann_intbc_mod = self.ann_intbc_mod
 
+        config = self.config.get_function_config('plug_cassiopeia')
+
         cass_ldf = (
                 self.ldf.with_columns(
                 readName=pl.col('umi'),
@@ -271,7 +273,15 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         umi_tables = []
         nones = 0
 
-        for (intBC, mod), queries in cass_ldf.collect().partition_by('intBC', 'mod', as_dict=True).items():
+        config_params = {
+            'barcode_interval': config.get('barcode_interval', (0, 7)),
+            'cutsite_locations': config.get('cutsite_locations', [40, 67, 94, 121, 148, 175, 202, 229, 256, 283]),
+            'cutsite_width': config.get('cutsite_width', 12),
+            'context': config.get('context', True),
+            'context_size': config.get('context_size', 50),
+        }
+
+        for (intBC, mod, sbc), queries in cass_ldf.collect().partition_by('intBC', 'mod', 'sbc', as_dict=True).items():
             if mod is None:
                 nones+=1
             else:
@@ -283,20 +293,18 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
                      n_threads=1,
                      method='global'
                  )
-
+        
                 allele_table =  cas.pp.call_alleles(
                                 umi_table,
-                                ref_filepath=f'{self.workdir}/{mod}.fasta',
-                                barcode_interval=(0, 7),
-                                cutsite_locations=[40, 67, 94, 121, 148, 175, 202, 229, 256, 283],
-                                cutsite_width=12,
-                                context=True,
-                                context_size=5,
+                                ref_filepath = f'{self.workdir}/{mod}.fasta',
+                                **config_params,
                             )
 
                 #replace intBC for real intBC since Cassiopeia does something I don't understand yet
+                # include colums dropped by cass?
                 allele_table['intBC'] = intBC
                 allele_table['mod'] = mod
+                allele_table['sbc'] = sbc
 
                 umi_tables.append(umi_table.copy())
                 #self.xp.logger.info(f"found {umi_table['intBC'].n_unique()} integrations for {mod}")
@@ -308,7 +316,88 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         return StepResults(
                 results={"alleles_pl" : pl.concat(res), "alleles_pd" : umi_tables}
         )
+    
+    def _pycea_explore(self):
+        
+       """ """ 
+       solvers = ['vanilla', 'mcgs', 'nj']
+       solvers = ['vanilla']
+       #for index, n_cells in [(i, ii.shape) for i,ii in enumerate(umi_tables) if ii.shape[0]>200]:
+       for (index, intbc, mod, n_ori, well), allele_table in alg_df.partition_by('xid', 'intBC', 'mod', 'n_ori', 'well', as_dict=True).items():
+           allele_table = allele_table.to_pandas()
+           tdata = None
+           character_matrix, priors, state_2_indel = cas.pp.convert_alleletable_to_character_matrix(
+               allele_table,
+               allele_rep_thresh = 1.0)
+           
+           cas_tree = cas.data.CassiopeiaTree(character_matrix=character_matrix)
+           
+           print(f"{index = } {intbc=}\tnumber of cells {cas_tree.n_cell}, number of characters {cas_tree.n_character} ")
+           meta = '-'.join(pl.DataFrame(allele_table).select('xid', 'well', 'mod', 'intBC', 'n_ori').unique()[0].to_dummies(separator="_").columns)
+           collapse = False
+           collapse = True
+           
+           allele_colors_hex = dict(map(lambda x: (x, ColorHash(x).hex), pl.DataFrame(allele_table).unpivot(on=rcols, value_name="allele").get_column('allele').unique()))
+           
+           allele_matrix = pl.DataFrame(allele_table).select('UMI', '^r\d+$').to_pandas().set_index('UMI')
+           allele_matrix
+           for solver in solvers :
+               match solver:
+                   case "shared":
+                       solve = cas.solver.SharedMutationJoiningSolver()
+                   case "vanilla":
+                       solve = cas.solver.VanillaGreedySolver()
+                   case "UPGMA":
+                       solve = cas.solver.SharedMutationJoiningSolver()
+                   case "mcgs":
+                       solve = cas.solver.MaxCutGreedySolver()
+                   case "mc": # this one is very slow
+                       solve = cas.solver.MaxCutSolver()
+                   case "nj":
+                       solve = cas.solver.NeighborJoiningSolver(add_root=True)
 
+               print(solver)
+               solve.solve(cas_tree, collapse_mutationless_edges=collapse)
+               if tdata is None:
+                   tdata = td.TreeData(
+                       X=None,  
+                       allow_overlap=True,
+                       obs=allele_matrix.loc[cas_tree.leaves], 
+                      # obsm={"alleles": character_matrix.loc[cas_tree.leaves].values}, # can't use this since must be encoded, e.g. character_matrix
+                       obst={solver: cas_tree.get_tree_topology()}
+                   )
+               
+               name = f'pctree_{cas_tree.n_cell}_{meta}_{solver}_{collapse}'
+
+               tdata.obst[solver] = cas_tree.get_tree_topology()
+               pycea.pp.add_depth(tdata, tree=solver)
+
+               if True:
+                   fig, ax = plt.subplots(1,1, figsize=(10, 100))
+                   pc.pl.tree(tdata, 
+                          tree=solver,
+                     keys=rcols,
+                     polar=False, 
+                     extend_branches=True,
+                     palette=allele_colors_hex,
+                              branch_linewidth=0.15,
+                     ax=ax)
+                   fig.savefig(f'{name}.png')
+                   
+                   if False:
+                       fig, ax = plt.subplots(1,1, figsize=(10, 10), dpi=1200, subplot_kw={"projection": "polar"})
+                       pc.pl.tree(tdata, 
+                              tree=solver,
+                         keys=rcols,
+                         polar=True, 
+                         extend_branches=True,
+                                  branch_linewidth=0.15,
+                         palette=allele_colors_hex,
+                         ax=ax)
+                       fig.savefig(f'{name}_circ.png')
+
+                   plt.close('all')
+                
     def _extract_barcodes(self) -> StepResults:
         """Extract integration and sample barcodes"""
         xp = self.temp_data['xp']
