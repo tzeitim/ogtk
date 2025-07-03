@@ -1,12 +1,96 @@
 import polars as pl
 from pathlib import Path
-from typing import Set,Dict, Optional, Type
+from typing import Set,Dict, Optional, Type, List, Tuple
 from enum import Enum
 from .base import PostProcessorExtension
 from .registry import extension_registry
 from .config import ExtensionConfig
 from ..pipeline.types import StepResults,FractureXp
 from dataclasses import dataclass
+
+def plug_cassiopeia(
+        ldf: pl.LazyFrame,
+        ann_intbc_mod= pl.DataFrame,
+        workdir: Path|str ='.',
+        logger: None=  None,
+        barcode_interval: List|Tuple = (0, 7),
+        cutsite_locations: List =  [40, 67, 94, 121, 148, 175, 202, 229, 256, 283],
+        cutsite_width: int = 12,
+        context: bool = True,
+        context_size: int = 50,
+        ) -> StepResults:
+    """ 
+    readName - A unique identifier for each row/sequence
+    cellBC - The cell barcode
+    UMI - The UMI (Unique Molecular Identifier)
+    readCount - The number of reads for this sequence
+    seq - The actual sequence to be aligned
+
+    """
+    import cassiopeia as cas
+
+    allele_params = {
+        'barcode_interval': barcode_interval,
+        'cutsite_locations': cutsite_locations,
+        'cutsite_width': cutsite_width, 
+        'context': context,
+        'context_size': context_size,
+    }
+
+    cass_ldf = (
+            ldf.with_columns(
+            readName=pl.col('umi'),
+            cellBC=pl.col('umi'), 
+            UMI=pl.col('umi'),
+            readCount=pl.col('reads'),
+            seq=pl.col('intBC')+pl.col('contig'),
+            )
+            .select('readName', 'cellBC', 'UMI', 'readCount', 'seq', 'intBC', 'sbc')
+            #TODO: change `how`?
+            .join(ann_intbc_mod.lazy(), left_on='intBC', right_on='intBC', how='inner')
+    )
+
+    res = []
+    umi_tables = []
+    nones = 0
+
+
+    for (intBC, mod, sbc), queries in cass_ldf.collect().partition_by('intBC', 'mod', 'sbc', as_dict=True).items():
+        if mod is None:
+            nones+=1
+        else:
+            if logger:
+                logger.debug(f"{mod=} {intBC=} {queries.shape=}")
+
+            umi_table = cas.pp.align_sequences(
+                 queries=queries.to_pandas(),
+                 ref_filepath=f'{workdir}/{mod}.fasta',
+                 n_threads=1,
+                 method='global'
+             )
+    
+            allele_table =  cas.pp.call_alleles(
+                            umi_table,
+                            ref_filepath = f'{workdir}/{mod}.fasta',
+                            **allele_params,
+                        )
+
+            #replace intBC for real intBC since Cassiopeia does something I don't understand yet
+            # include colums dropped by cass?
+            allele_table['intBC'] = intBC
+            allele_table['mod'] = mod
+            allele_table['sbc'] = sbc
+
+            umi_tables.append(umi_table.copy())
+            #self.xp.logger.info(f"found {umi_table['intBC'].n_unique()} integrations for {mod}")
+
+            res.append(
+                pl.DataFrame(allele_table).with_columns(mod=pl.lit(mod), mols=allele_table.shape[0])
+                )
+
+    return StepResults(
+            results={"alleles_pl" : pl.concat(res), "alleles_pd" : umi_tables}
+    )
 
 def save_ref_to_fasta(refs, out_dir='.', field='mod') -> None : 
     """ write fastas in current dir"""
@@ -16,9 +100,8 @@ def save_ref_to_fasta(refs, out_dir='.', field='mod') -> None :
             refs.filter(pl.col(field)==i).dna.to_fasta(read_id_col=field, read_col='seq').get_column('seq_fasta')[0]
             )
 
-def kmer_classify_cassettes(ldf, refs, **config) -> StepResults:
+def kmer_classify_cassettes(ldf, refs: pl.DataFrame, K: int = 25) -> StepResults:
     """ Annotates contigs based on the top occurring mod based on kmer matches """
-    K = config.get('K', 25)
 
     k_ref = refs.kmer.explode_kmers(k=K, seq_field='seq')
 
@@ -38,14 +121,17 @@ def kmer_classify_cassettes(ldf, refs, **config) -> StepResults:
         )
     # TODO return how many intBCs didn't get a mod
     # TODO return the number of ties 
-    return StepResults(results={'ann_intbc_mod':cont_k}, metrics={'n_ann_intbc':cont_k.height})
+    return StepResults(results={'ann_intbc_mod':cont_k},
+                       metrics={'n_ann_intbc':cont_k.height})
 
-def parse_contigs(ldf, **config):
+def parse_contigs(
+        ldf: pl.LazyFrame,
+        int_anchor1: str,
+        int_anchor2 : str,
+        sbc_dict: Optional[Dict] = None,
+        annotation:str = 'sbc',
+        ) ->StepResults:
     """Extracts integration barcodes (intBC) and sample barcodes (sbc)."""
-    int_anchor1 = config['int_anchor1']
-    int_anchor2 = config['int_anchor2'] 
-    sbc_dict = config.get('sbc_dict')
-    annotation = config.get('annotation', 'sbc')
     
     # 1. Extract/use sbcs
     if sbc_dict is not None:
@@ -60,7 +146,8 @@ def parse_contigs(ldf, **config):
         )
     )
     
-    return StepResults(results={'ldf':ldf}, metrics={'n_parsed_contigs':ldf.height})
+    return StepResults(results={'ldf':ldf},
+                       metrics={'n_parsed_contigs':ldf.height})
 
 
 def generate_refs_from_fasta(refs_fasta_path: str|Path, anchor1: str, anchor2: str) -> pl.DataFrame:
@@ -96,13 +183,6 @@ class CassiopeiaConfig(ExtensionConfig):
     anchor1: Optional[str] = None
     anchor2: Optional[str] = None
     
-    # Function-specific parameter mapping
-    _FUNCTION_PARAMS = {
-        'parse_contigs': {'int_anchor1', 'int_anchor2', 'sbc_dict', 'annotation'},
-        'generate_refs_from_fasta': {'refs_fasta_path', 'anchor1', 'anchor2'},
-        'classify_cassettes': {'int_anchor1', 'refs_fasta_path', 'annotation_path'},
-        'plug_cassiopeia': {},
-    }
 
 class CassiopeiaStep(Enum):
     """Steps within the Cassiopeia lineage extension"""
@@ -151,9 +231,7 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
 
         if self.config.refs_fasta_path is not None:
             self.refs = generate_refs_from_fasta(
-                self.config.refs_fasta_path, 
-                anchor1=self.config.anchor1, 
-                anchor2=self.config.anchor2
+                    **self.config.get_function_config(generate_refs_from_fasta)
             )
             self.refs.write_parquet(refs_path)
             save_ref_to_fasta(self.refs, out_dir=self.workdir, field='mod')
@@ -226,13 +304,16 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         )
 
     def _parse_contigs(self) -> StepResults:
-        return parse_contigs(df=self.ldf, **self.config.get_function_config('parse_contigs'))
+        return parse_contigs(ldf=self.ldf, 
+                             **self.config.get_function_config(parse_contigs))
     
     def _kmer_classify_cassettes(self) -> StepResults:
         """ Guesses what reference a given intBC corresponds to based on kmer composition analysis"""
-        return kmer_classify_cassettes(ldf=self.ldf, 
-                                       refs=self.refs, 
-                                       **self.config.get_function_config('classify_cassettes'))
+        return kmer_classify_cassettes(
+                ldf=self.ldf, 
+                refs=self.refs, 
+                **self.config.get_function_config(kmer_classify_cassettes)
+                )
 
 
     def _convert_to_allele_table(self) -> StepResults:
@@ -254,7 +335,7 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         import cassiopeia as cas
         ann_intbc_mod = self.ann_intbc_mod
 
-        config = self.config.get_function_config('plug_cassiopeia')
+        config = self.config.get_function_config(plug_cassiopeia)
 
         cass_ldf = (
                 self.ldf.with_columns(

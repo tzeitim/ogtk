@@ -1,6 +1,7 @@
 from abc import ABC
 from dataclasses import dataclass, fields, MISSING
 from typing import Dict, Any, Set
+import inspect
 
 class ExtensionConfig(ABC):
     """Base class for extension configurations"""
@@ -40,14 +41,51 @@ class ExtensionConfig(ABC):
             return set()
         return cls._FUNCTION_PARAMS.get(func_name, set())
     
-    def get_function_config(self, func_name: str) -> Dict[str, Any]:
-        """Get config subset for specific function"""
-        needed_params = self.get_function_params(func_name)
-        if not needed_params:
-            # If no specific params defined, return all config
-            return self.to_dict()
+   
+    def get_function_config(self, func_or_name) -> Dict[str, Any]:
+        """Extract config automatically based on function signature"""
+        
+        # Get the function object
+        if isinstance(func_or_name, str):
+            # Try to get function from calling module's globals
+            import sys
+            frame = sys._getframe(1)
+            caller_globals = frame.f_globals
+            func = caller_globals.get(func_or_name)
+            if not func:
+                raise ValueError(f"Function {func_or_name} not found in calling module")
+        else:
+            func = func_or_name
             
-        return {k: getattr(self, k) for k in needed_params if hasattr(self, k)}
+        # Get function signature
+        sig = inspect.signature(func)
+        config_dict = self.to_dict()
+        
+        # Extract parameters, respecting defaults
+        func_params = {}
+        data_params = {'ldf', 'df', 'refs', 'self'}  # Skip these common params
+        
+        for param_name, param in sig.parameters.items():
+            # Skip data/context parameters
+            if param_name in data_params:
+                continue
+                
+            # Check if we have this parameter in config
+            if param_name in config_dict:
+                config_value = config_dict[param_name]
+                
+                # Only include if config value is not None or if param has no default
+                if config_value is not None or param.default == inspect.Parameter.empty:
+                    func_params[param_name] = config_value
+                    
+            elif param.default == inspect.Parameter.empty:
+                # Required parameter missing from config
+                raise ValueError(
+                    f"Required parameter '{param_name}' missing from config for function {func.__name__}"
+                )
+            # If param has default and not in config, let function default handle it
+                
+        return func_params
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary"""
