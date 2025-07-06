@@ -6,12 +6,12 @@ from .base import PostProcessorExtension
 from .registry import extension_registry
 from .config import ExtensionConfig
 from ..pipeline.types import StepResults,FractureXp
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from ogtk.utils.log import CustomLogger
 
 def plug_cassiopeia(
         ldf: pl.LazyFrame,
-        ann_intbc_mod= pl.DataFrame,
+        ann_intbc_mod: pl.DataFrame,
         workdir: Path|str ='.',
         logger: None|CustomLogger=  None,
         barcode_interval: List|Tuple = (0, 7),
@@ -339,9 +339,6 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         seq - The actual sequence to be aligned
 
         """
-        import cassiopeia as cas
-        ann_intbc_mod = self.ann_intbc_mod
-
         config = self.config.get_function_config(plug_cassiopeia)
 
         return plug_cassiopeia(ldf=self.ldf, 
