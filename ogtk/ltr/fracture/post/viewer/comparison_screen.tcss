@@ -1,7 +1,7 @@
 ComparisonScreen {
     layout: grid;
     grid-size: 2;
-    grid-columns: 1fr 2fr;
+    grid-columns: 1fr 4fr;
     grid-rows: 1fr;
 }
 

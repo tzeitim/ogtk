@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Any, Set, Iterable
 import polars as pl
 
 from textual.app import App, ComposeResult
-from textual.widgets import DirectoryTree, Tree, Footer, Header, Static, Button, Label, SelectionList
+from textual.widgets import DirectoryTree, Tree, Footer, Header, Static, Button, Label, SelectionList, Log
 from textual.containers import Horizontal, Vertical, Container
 from textual.screen import Screen, ModalScreen
 from textual.reactive import var
@@ -18,9 +18,13 @@ from rich.json import JSON
 from rich.panel import Panel
 from rich.table import Table
 
+
 from ogtk.ltr.fracture.post.metrics.summary import PipelineMetricsCollection
 
 import re
+from datetime import datetime
+import logging
+
 
 pl.Config.set_float_precision(2)
 pl.Config.set_thousands_separator("_")
@@ -560,7 +564,6 @@ class ComparisonScreen(Screen):
             with Container(id="sample-selection"):
                 yield Label("Pre-selected samples to compare:", id="selection-label")
 
-                # Create SelectionList with preselected samples
                 selection_options = [(sample_id, sample_id) for sample_id in self.selected_samples]
                 selection_list = SelectionList[str](*selection_options, id="sample-selection-list")
                 
@@ -574,11 +577,14 @@ class ComparisonScreen(Screen):
                 yield Button("Compare Valid UMI %", classes="metric-button", id="compare-valid-umi")
                 yield Button("Compare Read Coverage", classes="metric-button", id="compare-read-coverage")
 
-            # Results display
         with Vertical(id="right-panel"):
             yield ComparisonDataTable(id="comparison-table")
 
         yield Footer()
+
+    def on_mount(self) -> None:
+        """ """
+        self.call_after_refresh(self._run_comparison) 
 
     def _run_comparison(self) -> None:
         """Run the selected comparison."""
@@ -591,11 +597,11 @@ class ComparisonScreen(Screen):
             return
 
         # Get the sample IDs for selected indices
-        all_samples = list(self.selected_samples)
-        current_selected = {all_samples[i] for i in selected_indices}
+        current_selected = list(self.selected_samples)
+        #current_selected = {all_samples[i] for i in selected_indices}
 
-        # Default to valid UMI comparison
-        df = self.collection.get_valid_umi_stats()
+        # Default to compare all fields 
+        df = self.collection.as_wide_df(strip_step_names=True)
         df = df.filter(pl.col("sample_id").is_in(list(current_selected)))
 
         if df.height == 0:
@@ -672,9 +678,11 @@ class FractureExplorer(App):
         Binding("c", "compare_samples", "Compare Samples"),
         Binding("e", "toggle_files", "Toggle Files"),
         Binding("a", "select_all", "Select All Files"),
+        Binding("l", "toggle_log", "Toggle Log"),  
         Binding("d", "deselect_all", "Clear Selection"),
     ]
     show_tree = var(False)
+    show_log = var(False)
 
 
     def action_deselect_all(self) -> None:
@@ -688,6 +696,14 @@ class FractureExplorer(App):
         selected_n = tree.select_all_samples()
         self.notify(f"Selected {selected_n} samples")
 
+    def action_toggle_log(self) -> None:
+        """Called in response to log toggle key binding."""
+        self.show_log = not self.show_log
+
+    def watch_show_log(self, show_log: bool) -> None:
+        """Called when show_log is modified."""
+        self.set_class(show_log, "-show-log")
+
     def action_toggle_files(self) -> None:
         """Called in response to key binding."""
         self.show_tree = not self.show_tree
@@ -696,12 +712,32 @@ class FractureExplorer(App):
         """Called when show_tree is modified."""
         self.set_class(show_tree, "-show-raw")
 
+    def log_message(self, message: str, level: str = "INFO") -> None:
+        """Write a message to the log widget."""
+        log = self.query_one("#log-display", Log)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log.write_line(f"[{timestamp}] {level}: {message}")
+
     def __init__(self, experiment_dir: str):
         """Initialize the app with the experiment directory."""
         super().__init__()
+        # Initialize log buffer for early messages
+        self.log_buffer = []
+        self.log_widget_ready = False
+
+        # Log the very first message
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        first_msg = f"[{timestamp}] INFO: App initialization started"
+        self.log_buffer.append(first_msg)
+        print(first_msg)  # Also print to terminal immediately
+        
+        # Setup early logging to buffer
+        self._setup_early_logging()
+        
         self.experiment_dir = Path(experiment_dir).resolve()
         if not self.experiment_dir.exists() or not self.experiment_dir.is_dir():
             raise ValueError(f"Experiment directory {experiment_dir} does not exist.")
+
         self.current_figures = []
         self.current_sample_dir = None
 
@@ -710,13 +746,56 @@ class FractureExplorer(App):
         self.metrics_collection = PipelineMetricsCollection()
         self.pipeline_files = []
 
+    def _setup_early_logging(self):
+        """Setup logging to buffer early messages."""
+        # Configure logging to go to both buffer and stdout
+        class BufferHandler(logging.Handler):
+            def __init__(self, app):
+                super().__init__()
+                self.app = app
+                
+            def emit(self, record):
+                msg = self.format(record)
+                self.app.log_buffer.append(msg)
+        
+        # Setup dual logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s [%(levelname)s] %(message)s',
+            handlers=[
+                logging.StreamHandler(sys.stdout),
+                BufferHandler(self)
+            ]
+        )
+    def hybrid_log(self, message: str, level: str = "INFO") -> None:
+        """Log to buffer early, then to widget once available."""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        formatted_msg = f"[{timestamp}] {level}: {message}"
+        
+        if self.log_widget_ready:
+            # Widget is ready, log directly
+            try:
+                log = self.query_one("#log-display", Log)
+                log.write_line(formatted_msg)
+            except:
+                # Fallback to buffer if widget query fails
+                self.log_buffer.append(formatted_msg)
+        else:
+            # Buffer the message
+            self.log_buffer.append(formatted_msg)
+            # Also log to terminal
+            #logging.info(message)
+
     def compose(self) -> ComposeResult:
         """Compose the app layout."""
+        self.hybrid_log("Starting UI composition", "INFO")
+
         
         #yield Static(title_art, id="title-art")
         yield Header(show_clock=True)
         
         with Vertical(id='experiments'):
+            self.hybrid_log("Initializing directory tree scanner...", "INFO")
             yield SmartExperimentDirectoryTree(self.experiment_dir, id="experiment-tree")
 
         with Vertical(id="metrics-container"):
@@ -724,6 +803,7 @@ class FractureExplorer(App):
         
             # Add a JSONDisplay to show the full JSON data
             yield JSONDisplay(id="raw-json-display")
+            yield Log(id="log-display")
 
             with Horizontal(id="control-buttons"):
                 yield Button("Select All", id="select-all-button")
@@ -736,8 +816,37 @@ class FractureExplorer(App):
 
     def on_mount(self) -> None:
         """Setup when the app is mounted."""
-        # Remove the SelectionList references since we're not using it anymore
         self.theme = "gruvbox"
+        
+        self._initialize_log_widget()
+
+        # Log when tree has finished loading
+        tree = self.query_one("#experiment-tree", SmartExperimentDirectoryTree)
+        sample_count = len(list(tree.path.rglob("pipeline_summary.json")))
+        self.hybrid_log(f"Directory tree loaded - found {sample_count} samples", "SUCCESS")
+
+    def _initialize_log_widget(self) -> None:
+        """Initialize log widget and replay buffered messages."""
+        try:
+            log = self.query_one("#log-display", Log)
+            
+            # Replay all buffered messages
+            self.hybrid_log("=== LOG WIDGET INITIALIZED ===", "INFO")
+            self.hybrid_log("Replaying buffered messages:", "INFO")
+            
+            for msg in self.log_buffer:
+                log.write_line(msg)
+            
+            # Mark widget as ready
+            self.log_widget_ready = True
+            
+            # Clear the buffer to save memory
+            self.log_buffer.clear()
+            
+            self.hybrid_log("Log widget ready - future messages will appear here", "SUCCESS")
+            
+        except Exception as e:
+            logging.error(f"Failed to initialize log widget: {e}")
 
     def on_sample_selected(self, event: SampleSelected) -> None:
         """Handle sample selection from the directory tree."""
@@ -785,6 +894,7 @@ class FractureExplorer(App):
                     self.current_figures.extend(data["fracture"]["figures"])
                     figures_button.add_class("has-figures")
 
+                # this renders the JSON as table
                 self.query_one("#all-metrics", MetricsTable).update_metrics(
                     all_metrics, stage="all", path=sample_dir
                 )
