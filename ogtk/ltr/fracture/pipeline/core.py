@@ -9,11 +9,9 @@ from ogtk.utils.general import sfind, tabulate_paired_10x_fastqs_rs
 from .plotting import PlotDB
 from .types import FractureXp,StepResults
 
-
-
-    
 class PipelineStep(Enum):
     """Enum defining available pipeline steps"""
+
     PARQUET = {
         'required_params': {'umi_len', 'rev_comp', 'modality'},
         'description': "Convert fastq reads to parquet format"
@@ -193,22 +191,28 @@ def pipeline_step(step: PipelineStep):
                 # Execute the step function
                 results = func(ppi, *args, **kwargs)
                 
-                if getattr(ppi.xp, 'do_plot', False):
-                    try:
-                        ppi.logger.step(f'Plotting {step.name.lower()} results')
-                        plot_method = getattr(ppi.plotdb, f"plot_{step.name.lower()}", None)
-                        
-                        if plot_method:
-                            ppi.logger.debug(f"Generating plots for {step.name.lower()}")
-                            plot_method(ppi, results)
-                    except Exception as e:
-                        ppi.logger.error(f"Plot generation failed: {str(e)}", with_traceback=True)
+                if isinstance(results, StepResults):
+                    results = [results]
+
+                for result in results:
+                    if getattr(ppi.xp, 'do_plot', False):
+                        try:
+                            ppi.logger.step(f'Plotting {step.name.lower()} results')
+                            plot_method = getattr(ppi.plotdb, f"plot_{step.name.lower()}", None)
+                            
+                            if plot_method:
+                                ppi.logger.debug(f"Generating plots for {step.name.lower()}")
+                                plot_method(ppi, result)
+                        except Exception as e:
+                            ppi.logger.error(f"Plot generation failed: {str(e)}", with_traceback=True)
+
 
                 # run QCs relevant for the step
                 ppi.logger.step(f'Running QCS {step.name}')
                 
                 ppi.logger.info(f"Completed {step.name} step")
-                ppi.update_pipeline_summary(step, results)
+                for result in results:
+                    ppi.update_pipeline_summary(step, result)
                 logger.disable_file_logging()
                 
                 return results
@@ -248,67 +252,203 @@ class Pipeline:
 
         self.enabled_extensions = getattr(self.xp, 'extensions', [])
 
+    def _par_detect_parquet_input_format(self):
+        """Detect input format and return (format, files)"""
+        fastq_files = sfind(f"{self.xp.pro_datain}", f"{self.xp.target_sample}*R1*.fastq.gz")
+        bam_files = sfind(f"{self.xp.pro_datain}", f"{self.xp.target_sample}*.bam")
+        
+        if bam_files and fastq_files:
+            self.logger.warning("Found both BAM and FASTQ files, prioritizing BAM")
+            return 'bam', bam_files
+        elif bam_files:
+            return 'bam', bam_files  
+        elif fastq_files:
+            return 'fastq', fastq_files
+        else:
+            raise ValueError("No FASTQ or BAM files found")
+        
+    def _par_validate_format_params(self, input_format: str) -> None:
+        """Validate required parameters for specific input format"""
+        format_requirements = {
+            'fastq': ['rev_comp'],
+            'bam': ['anchor_ont', 'sbc_len']
+        }
+        
+        if input_format not in format_requirements:
+            return  # No additional requirements
+            
+        required_params = format_requirements[input_format]
+        missing_params = [param for param in required_params if not hasattr(self.xp, param)]
+        
+        if missing_params:
+            param_list = ', '.join(missing_params)
+            raise ValueError(f"Missing required parameter(s) for {input_format.upper()}: {param_list}")
 
+    def _par_process_input_files(self, files, sample_dir, out_fn, merged_fn, input_format):
+        """Converts FASTQ or BAM files into parquet"""
+        
+        force_tab = getattr(self.xp, "force_tab", False)
+        limit = getattr(self.xp, "limit", None)
+        
+        if limit is not None:
+            self.logger.warning(f"Only loading {limit} reads")
 
-    def should_run_step(self, step: PipelineStep) -> bool:
-        """Check if a step should be run based on configuration"""
-        if hasattr(self.xp, 'steps'):
-            return step.name.lower() in [s.lower() for s in self.xp.steps] 
-        return True  # Run all steps if not specified
+        max_files = getattr(self.xp, 'allow_wildcards', 1)
+        
+        if len(files) > 1 and max_files > 1:
+            self.logger.info(f"Processing {len(files)} {input_format.upper()} files for sample {self.xp.target_sample}")
+            temp_parsed_files = []
+            temp_merged_files = []
+            
+            for i, file in enumerate(files):
+                temp_out_fn = f'{sample_dir}/temp_parsed_reads_{i}.parquet'
+                temp_merged_fn = f'{sample_dir}/temp_merged_reads_{i}.parquet'
+                
+                self.logger.info(f"Processing {input_format.upper()} file {i+1}/{len(files)}: {file}")
+                
+                self._par_process_single_file(file, temp_out_fn, temp_merged_fn, sample_dir, input_format, force_tab, limit)
+                
+                temp_parsed_files.append(temp_out_fn)
+                temp_merged_files.append(temp_merged_fn)
+            
+            # Combine multiple parquet files (same for both formats)
+            self.logger.info(f"Combining {len(temp_parsed_files)} {input_format.upper()}-derived parquet files")
+            
+            self._par_combine_parquet_files(temp_parsed_files, out_fn)
+            self._par_combine_parquet_files(temp_merged_files, merged_fn)
+                    
+        else:
+            # Single file processing
+            file = files[0]
+            self.logger.info(f"Processing single {input_format.upper()} file: {file}")
+            
+            # Format-specific processing
+            self._par_process_single_file(file, out_fn, merged_fn, sample_dir, input_format, force_tab, limit)
 
-#### TODO - verify
-    def run_extensions(self) -> bool:
-        """Run enabled post-processing extensions"""
-        # Check if extensions are configured
-        if not hasattr(self.xp, 'extensions') or not self.xp.extensions:
-            self.logger.debug("No extensions configured")
-            return True
+    def _par_process_single_file(self, file, out_fn, merged_fn, sample_dir, input_format, force_tab, limit):
+        """Process a single input file - format-specific logic"""
         
-        try:
-            # Import here to avoid circular dependency
-            from ..extensions import extension_registry
-        except ImportError:
-            self.logger.warning("Extensions module not available")
-            return True
-        
-        # Look for contigs file
-        contigs_path = Path(f"{self.xp.sample_wd}/contigs_pl_direct.parquet")
-        if not contigs_path.exists():
-            self.logger.error("No contigs found for post-processing. Run fracture step first.")
-            return False
-        
-        self.logger.info(f"Running {len(self.xp.extensions)} extensions")
-        
-        for ext_name in self.xp.extensions:
-            extension = extension_registry.create_extension(ext_name, self.xp)
-            if not extension:
-                self.logger.error(f"Extension '{ext_name}' not found")
-                self.logger.info(f"Available extensions: {extension_registry.get_available()}")
-                continue
-                
-            try:
-                self.logger.info(f"Running extension: {ext_name}")
-                results = extension.process(contigs_path)
-                
-                # Create a synthetic step for the extension summary
-                class ExtStep:
-                    def __init__(self, name):
-                        self.name = f"EXT_{name.upper()}"
-                        self.value = {'required_params': extension.required_params}
-                
-                self.update_pipeline_summary(ExtStep(ext_name), results)
-                self.logger.info(f"Extension {ext_name} completed successfully")
-                
-            except Exception as e:
-                self.logger.error(f"Extension {ext_name} failed: {e}", with_traceback=True)
-                return False
-        
-        self.logger.info("Extensions completed successfully!")
-        return True        
+        if input_format == 'fastq':
+            tabulate_paired_10x_fastqs_rs(
+                file_path=file, 
+                out_fn=out_fn,
+                merged_fn=merged_fn,
+                out_dir=sample_dir,
+                modality=self.xp.modality,
+                umi_len=self.xp.umi_len,
+                do_rev_comp=self.xp.rev_comp,
+                force=force_tab,
+                limit=limit
+            )
+            
+        elif input_format == 'bam':
+            raw_bam_fn = f'{sample_dir}/temp_raw_bam_{Path(file).stem}.parquet'
+            
+            import rogtk
 
-    @call
+            rogtk.bam_to_parquet(
+                bam_path=file,
+                parquet_path=raw_bam_fn,
+                include_sequence=True,
+                include_quality=True,
+                compression='snappy',
+                limit=limit
+            )
+            
+            (
+                pl.scan_parquet(raw_bam_fn)
+                .pp.ont_to_paired_format(
+                    umi_len=self.xp.umi_len,
+                    sbc_len=self.xp.sbc_len,
+                    anchor=self.xp.anchor_ont
+                )
+                .sink_parquet(merged_fn)
+            )
+            
+            # For BAM, parsed = merged (no additional processing)
+            import shutil
+            shutil.copy2(merged_fn, out_fn)
+            
+            # Clean up intermediate file
+            Path(raw_bam_fn).unlink(missing_ok=True)
+
+    def _par_combine_parquet_files(self, file_list, output_file):
+        """Combine multiple parquet files into one"""
+        if file_list:
+            combined = pl.concat([pl.read_parquet(f) for f in file_list])
+            combined.write_parquet(output_file)
+            
+            # Clean up temporary files
+            for temp_file in file_list:
+                Path(temp_file).unlink(missing_ok=True)
+
+    def _par_calculate_parquet_metrics(self, out_fn):
+        """Calculate metrics from the processed parquet file"""
+        limit = getattr(self.xp, "limit", None)
+        
+        return {
+            'total_reads': (
+                pl.scan_parquet(out_fn)
+                .collect()
+                .height
+            ),
+            'total_umis': (
+                pl.scan_parquet(out_fn)
+                .select('umi')
+                .unique()
+                .collect()
+                .height
+            ),
+            'downsampled': limit
+        }
+
+    @call  
     @pipeline_step(PipelineStep.PARQUET)
     def to_parquet(self) -> StepResults|None:
+        """Convert input reads to parquet format (auto-detects FASTQ vs BAM)"""
+        try:
+            self.logger.info(f"Converting reads to parquet from {self.xp.pro_datain}")
+            
+            required_params = ['umi_len', 'modality']
+            for param in required_params:
+                if param not in vars(self.xp):
+                    raise ValueError(f"Missing required parameter: {param}")
+            
+            input_format, input_files = self._par_detect_parquet_input_format()
+            self.logger.info(f"Detected input format: {input_format}")
+            
+            self._par_validate_format_params(input_format)
+            
+            sample_to_file = self.xp.organize_files_by_sample(
+                input_files, 
+                [{'id': self.xp.target_sample}], 
+                max_files=getattr(self.xp, 'allow_wildcards', 1)
+            )
+            
+            # Process each sample
+            if not self.xp.dry:
+                for sample_id, files in sample_to_file.items():
+                    sample_dir = f'{self.xp.pro_workdir}/{sample_id}'
+                    Path(sample_dir).mkdir(parents=True, exist_ok=True)
+                    
+                    out_fn = f'{sample_dir}/parsed_reads.parquet'
+                    merged_fn = f'{sample_dir}/merged_reads.parquet'
+                    
+                    # ** main invocation ** #
+                    self._par_process_input_files(files, sample_dir, out_fn, merged_fn, input_format)
+                    
+                    metrics = self._par_calculate_parquet_metrics(out_fn)
+                    
+            return StepResults(
+                results={'parsed_fn': out_fn}, 
+                metrics=metrics
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to convert to parquet: {str(e)}", with_traceback=True)
+            raise
+
+    def tto_parquet(self) -> StepResults|None:
         """Convert fastq reads to parquet format"""
         try:
             self.logger.info(f"Conversion to parquet:\nloading data from {self.xp.pro_datain}")
@@ -453,17 +593,13 @@ class Pipeline:
 
                 ldf = (
                     ldf
-                    .pp.parse_reads(umi_len=self.xp.umi_len,  
+                    .pp.parse_reads(umi_len=self.xp.umi_len,  #pyright:ignore
                                     sbc_len=self.xp.sbc_len,
                                     anchor_ont=self.xp.anchor_ont,
                                     )
                     .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                  )
 
-                self.logger.info(f"Mr. Columns {out_file}")
-                ###self.logger.io(f"lazy parsed {ldf}")
-                #ldf.sink_parquet(out_file)
-                ###self.logger.io(f"lazy parsed {ldf}")
                 # save without gc fields
                 if not self.xp.parse_read1:
                     (
@@ -560,7 +696,6 @@ class Pipeline:
             for param in required_params:
                 if param not in vars(self.xp):
                     raise ValueError(f"Missing required parameter: {param}")
-            in_file = f"{self.xp.sample_wd}/parsed_reads.parquet" #pyright:ignore
 
             if not hasattr(self.xp, 'fracture'):
                 setattr(self.xp, 'fracture', {})
@@ -572,60 +707,114 @@ class Pipeline:
                                                    #              method=self.xp.fracture['method_th'])
 
 
-            if not self.xp.dry:
-                self.logger.info(f'Reading {in_file}')
-                out_file = f"{self.xp.sample_wd}/contigs_pl_direct.parquet" #pyright:ignore
-                self.logger.info(f"exporting assembled contigs to {out_file}")
-                
-                filter_expr= pl.col('reads')>=self.xp.fracture['min_reads']
+            in_files = {
+                    'valid': f"{self.xp.sample_wd}/parsed_reads.parquet", #pyright:ignore
+                    'invalid':f"{self.xp.sample_wd}/parsed_reads_invalid.parquet", #pyright:ignore
+                    }
+            for key,in_file in in_files.items():
+                if not self.xp.dry:
+                    self.logger.info(f'Reading {in_file}')
+                    out_file = f"{self.xp.sample_wd}/contigs_pl_direct{key}.parquet" #pyright:ignore
+                    self.logger.info(f"exporting assembled contigs to {out_file}")
+                    
+                    filter_expr= pl.col('reads')>=self.xp.fracture['min_reads']
 
-                df_contigs = (
-                        pl.read_parquet(in_file)
-                        .filter(filter_expr)
-                        .pp.assemble_umis( #pyright: ignore
-                          k=self.xp.fracture['start_k'], 
-                          min_coverage=self.xp.fracture['start_min_coverage'],
-                          start_anchor=self.xp.start_anchor,
-                          end_anchor=self.xp.end_anchor,
-                          min_length=None,
-                          auto_k=False,
-                          export_graphs=False,
-                          only_largest=True,
-                          method=self.xp.fracture['assembly_method'],
-                          )
-                        .with_columns(pl.col('contig').str.len_chars().alias('length'))
-                        .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
-                        .join(
-                            pl.scan_parquet(in_file)
-                              .select('umi','reads')
-                              .filter(filter_expr)
-                              .unique()
-                              .collect(), 
-                           left_on='umi', right_on='umi', how='left')
-                        )
+                    df_contigs = (
+                            pl.read_parquet(in_file)
+                            .filter(filter_expr)
+                            .pp.assemble_umis( #pyright: ignore
+                              k=self.xp.fracture['start_k'], 
+                              min_coverage=self.xp.fracture['start_min_coverage'],
+                              start_anchor=self.xp.start_anchor,
+                              end_anchor=self.xp.end_anchor,
+                              min_length=None,
+                              auto_k=False,
+                              export_graphs=False,
+                              only_largest=True,
+                              method=self.xp.fracture['assembly_method'],
+                              )
+                            .with_columns(pl.col('contig').str.len_chars().alias('length'))
+                            .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
+                            .join(
+                                pl.scan_parquet(in_file)
+                                  .select('umi','reads')
+                                  .filter(filter_expr)
+                                  .unique()
+                                  .collect(), 
+                               left_on='umi', right_on='umi', how='left')
+                            )
 
-                df_contigs.write_parquet(out_file)
+                    df_contigs.write_parquet(out_file)
 
-                success_rate = (df_contigs.get_column('length')>0).mean()
-                total_assembled = (df_contigs.get_column('length')>0).sum()
-               
-                self.logger.critical(f"{total_assembled} assembled ({success_rate:.2%} success)")
-                
-                return StepResults(
-                        results={'xp': self.xp, 
-                                 'contigs':out_file},
-                        metrics={'success_rate':success_rate,
-                                 'total_assembled':total_assembled,
-                                 'mean_contig_length': df_contigs.filter(pl.col('length')>0).get_column('length').mean(),
-                                 'median_contig_length': df_contigs.filter(pl.col('length')>0).get_column('length').median(),
-                                 },
-                        )
+                    success_rate = (df_contigs.get_column('length')>0).mean()
+                    total_assembled = (df_contigs.get_column('length')>0).sum()
+                   
+                    self.logger.critical(f"from {in_file} {total_assembled} assembled ({success_rate:.2%} success) {key}")
+                    
+                    return StepResults(
+                            results={'xp': self.xp, 
+                                     'contigs':out_file},
+                            metrics={'success_rate':success_rate,
+                                     'total_assembled':total_assembled,
+                                     'mean_contig_length': df_contigs.filter(pl.col('length')>0).get_column('length').mean(),
+                                     'median_contig_length': df_contigs.filter(pl.col('length')>0).get_column('length').median(),
+                                     },
+                            )
 
-            pass
+                pass
         except Exception as e:
             self.logger.error(f"Failed to preprocess data: {str(e)}", with_traceback=True)
             raise
-            
+    @call
+    def run_extensions(self) -> bool:
+        """Run enabled post-processing extensions"""
+        # Check if extensions are configured
+        if not hasattr(self.xp, 'extensions') or not self.xp.extensions:
+            self.logger.debug("No extensions configured")
+            return True
+        
+        try:
+            # Import here to avoid circular dependency
+            from ..extensions import extension_registry
+        except ImportError:
+            self.logger.warning("Extensions module not available")
+            return True
+        
+        # Look for contigs file
+        contigs_path = Path(f"{self.xp.sample_wd}/contigs_pl_direct.parquet")
+        if not contigs_path.exists():
+            self.logger.error("No contigs found for post-processing. Run fracture step first.")
+            return False
+        
+        self.logger.info(f"Running {len(self.xp.extensions)} extensions")
+        
+        for ext_name in self.xp.extensions:
+            extension = extension_registry.create_extension(ext_name, self.xp)
+            if not extension:
+                self.logger.error(f"Extension '{ext_name}' not found")
+                self.logger.info(f"Available extensions: {extension_registry.get_available()}")
+                continue
+                
+            try:
+                self.logger.info(f"Running extension: {ext_name}")
+                results = extension.process(contigs_path)
+                
+                # Create a synthetic step for the extension summary
+                class ExtStep:
+                    def __init__(self, name):
+                        self.name = f"EXT_{name.upper()}"
+                        self.value = {'required_params': extension.required_params}
+                
+                self.update_pipeline_summary(ExtStep(ext_name), results)
+                self.logger.info(f"Extension {ext_name} completed successfully")
+                
+            except Exception as e:
+                self.logger.error(f"Extension {ext_name} failed: {e}", with_traceback=True)
+                return False
+        
+        self.logger.info("Extensions completed successfully!")
+        return True        
+
     @call  
     @pipeline_step(PipelineStep.TEST)
     def test(self) -> StepResults|None:
@@ -785,7 +974,7 @@ class Pipeline:
             try:
                 self.logger.info("=== TEST MODE ===")
                 self.xp.target_sample = f'TEST_{self.xp.target_sample}'
-                self.xp.samples.append({'id':self.xp.target_sample})
+                self.xp.samples.append({'id' : self.xp.target_sample})
                 self.xp.consolidate_conf(update=True)
                 self.xp.init_workdir()
 
@@ -823,7 +1012,7 @@ class Pipeline:
     def run_all(self):
         ''' Run all steps'''
         self.logger.info("==== Running pipeline ====")
-
+        
         self.to_parquet()
         self.preprocess()
         self.fracture()

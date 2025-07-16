@@ -40,6 +40,9 @@ class FractureXp(Xp):
         self.parse_read1 = getattr(self, 'parse_read1', False)
         self.sbc_len = getattr(self, 'sbc_len', 6)
 
+        if not hasattr(self, 'anchor_ont'):
+            raise ValueError("Missing required parameter 'anchor_ont' for BAM processing")
+
         # extensions
         self.extensions = getattr(self, 'extensions', [])
         self.extension_steps = getattr(self, 'extension_steps', {})
