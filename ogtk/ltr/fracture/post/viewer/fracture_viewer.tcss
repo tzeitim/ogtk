@@ -125,3 +125,19 @@ DirectoryTree TreeNode:hover {
     text-style: bold;
 }
 
+#log-display {
+    border: solid yellow;
+    margin-top: 1;
+    display: none;
+    overflow-y: auto;
+    overflow-x: auto;
+    width: auto;
+    height: auto;
+    dock: top;
+}
+
+/* Show log panel when -show-log class is active */
+FractureExplorer.-show-log #log-display {
+    display: block;
+    max-width: 80%;
+}

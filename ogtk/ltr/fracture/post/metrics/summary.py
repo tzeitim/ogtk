@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 from .base import SampleMetrics, StepMetrics
 from ..core.collection import PipelineMetricsCollection as CoreCollection
+from typing import Set
 
 def lazy_import_polars():
     """Import polars only when needed."""
@@ -14,7 +15,12 @@ def lazy_import_polars():
 
 class PipelineMetricsCollection(CoreCollection):
     """Extended collection with heavy analysis capabilities."""
-    
+    steps: Set[str]
+
+    def __init__(self):
+        super().__init__()
+        self.steps: Set[str] = set()
+
     @classmethod
     def from_summary_files(cls, file_paths=None, directory=None) -> 'PipelineMetricsCollection':
         """Create collection from summary JSON files using polars."""
@@ -41,6 +47,7 @@ class PipelineMetricsCollection(CoreCollection):
                     if isinstance(step_data, dict) and 'metrics' in step_data:
                         step_metrics = StepMetrics.from_dict(step_name, step_data)
                         sample_metrics.steps[step_name] = step_metrics
+                        collection.steps.add(step_name)
                 
                 collection.samples[sample_id] = sample_metrics
                 
@@ -75,8 +82,7 @@ class PipelineMetricsCollection(CoreCollection):
             })
         
         return pl.DataFrame(rows)
-    
-    def as_wide_df(self):
+    def as_wide_df(self, strip_step_names: bool = False):
         """Convert to wide format DataFrame (one row per sample)."""
         pl = lazy_import_polars()
         
@@ -84,7 +90,21 @@ class PipelineMetricsCollection(CoreCollection):
             return pl.DataFrame(schema={"sample_id": pl.Utf8})
         
         rows = [sample.to_dict() for sample in self.samples.values()]
-        return pl.DataFrame(rows)
+        df = pl.DataFrame(rows)
+        
+        if strip_step_names:
+            new_column_names = {}
+            for col in df.columns:
+                new_name = col
+                for step_name in self.steps:
+                    if col.startswith(f"{step_name}_"):
+                        new_name = col[len(step_name)+1:]
+                        break
+                new_column_names[col] = new_name
+            
+            return df.rename(new_column_names)
+        
+        return df    
     
     def get_metric_comparison(self, step: str, metric: str):
         """Compare a specific metric across all samples."""

@@ -1,4 +1,5 @@
 import polars as pl
+# rogtk includes the "dna" namespace
 import rogtk
 
 from ogtk.utils.log import Rlogger, call
@@ -338,6 +339,16 @@ class PlPipeline:
             .explode("assembly_results")
             .unnest("assembly_results")
         )
+
+    def ont_to_paired_format(self, umi_len: int, sbc_len: int, anchor: str) -> pl.DataFrame:
+        """Convert ONT BAM data to FRACTURE's expected R1/R2 format (DataFrame wrapper)"""
+        return (
+            self._df
+            .lazy()
+            .pp.ont_to_paired_format(umi_len=umi_len, sbc_len=sbc_len, anchor=anchor)
+            .collect()
+        )
+
 @pl.api.register_lazyframe_namespace("pp")
 class PllPipeline:
     def __init__(self, ldf: pl.LazyFrame) -> None:
@@ -387,8 +398,38 @@ class PllPipeline:
                                   )
                 )
 
-import polars as pl
-from ogtk.utils.log import Rlogger, call
+
+    def ont_to_paired_format(self, umi_len: int, sbc_len: int, anchor: str) -> pl.LazyFrame:
+        """Convert ONT BAM data to FRACTURE's expected R1/R2 format (LazyFrame)"""
+        return (
+            self._ldf
+            .with_columns([
+                pl.when(pl.col('sequence').str.contains(anchor))
+                .then(pl.col('sequence'))
+                .when(pl.col('sequence').dna.reverse_complement().str.contains(anchor))
+                .then(pl.col('sequence').dna.reverse_complement())
+                .otherwise(pl.col('sequence'))
+                .alias('oriented_sequence'),
+                
+                pl.when(pl.col('sequence').str.contains(anchor))
+                .then(pl.col('quality_scores'))
+                .when(pl.col('sequence').dna.reverse_complement().str.contains(anchor))
+                .then(pl.col('quality_scores').str.reverse())
+                .otherwise(pl.col('quality_scores'))
+                .alias('oriented_quality')
+            ])
+            .with_columns([
+                pl.col('oriented_sequence').str.slice(0, umi_len + sbc_len).alias('r1_seq'),
+                pl.col('oriented_sequence').str.slice(umi_len + sbc_len).alias('r2_seq'),
+                pl.col('oriented_quality').str.slice(0, umi_len + sbc_len).alias('r1_qual'),
+                pl.col('oriented_quality').str.slice(umi_len + sbc_len).alias('r2_qual')
+            ])
+            .with_columns([
+                pl.col('r1_seq').str.slice(0, umi_len).alias('umi'),
+                pl.col('r1_seq').str.slice(umi_len, sbc_len).alias('sbc')
+            ])
+            .select(['name', 'r1_seq', 'r1_qual', 'r2_seq', 'r2_qual', 'umi', 'sbc'])
+        )
 
 # TODO
 # ppp is the temporary expansion of the routines in a chunked manner with split logics
