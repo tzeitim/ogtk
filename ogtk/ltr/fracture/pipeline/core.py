@@ -346,14 +346,16 @@ class Pipeline:
             
             import rogtk
 
-            rogtk.bam_to_parquet(
-                bam_path=file,
-                parquet_path=raw_bam_fn,
-                include_sequence=True,
-                include_quality=True,
-                compression='snappy',
-                limit=limit
-            )
+
+            if not Path(raw_bam_fn).exists() or force_tab:
+                rogtk.bam_to_parquet(
+                    bam_path=file,
+                    parquet_path=raw_bam_fn,
+                    include_sequence=True,
+                    include_quality=True,
+                    compression='snappy',
+                    limit=limit
+                )
             
             (
                 pl.scan_parquet(raw_bam_fn)
@@ -370,7 +372,7 @@ class Pipeline:
             shutil.copy2(merged_fn, out_fn)
             
             # Clean up intermediate file
-            Path(raw_bam_fn).unlink(missing_ok=True)
+            #Path(raw_bam_fn).unlink(missing_ok=True)
 
     def _par_combine_parquet_files(self, file_list, output_file):
         """Combine multiple parquet files into one"""

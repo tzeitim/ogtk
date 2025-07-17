@@ -399,37 +399,65 @@ class PllPipeline:
                 )
 
 
-    def ont_to_paired_format(self, umi_len: int, sbc_len: int, anchor: str) -> pl.LazyFrame:
+    # TODO wildcard logics are bogus for ONT data
+    def ont_to_paired_format(self, umi_len: int, sbc_len: int, anchor: str, wildcard= '.{0,4}') -> pl.LazyFrame:
         """Convert ONT BAM data to FRACTURE's expected R1/R2 format (LazyFrame)"""
         return (
             self._ldf
-            .with_columns([
-                pl.when(pl.col('sequence').str.contains(anchor))
-                .then(pl.col('sequence'))
-                .when(pl.col('sequence').dna.reverse_complement().str.contains(anchor))
-                .then(pl.col('sequence').dna.reverse_complement())
-                .otherwise(pl.col('sequence'))
-                .alias('oriented_sequence'),
-                
-                pl.when(pl.col('sequence').str.contains(anchor))
-                .then(pl.col('quality_scores'))
-                .when(pl.col('sequence').dna.reverse_complement().str.contains(anchor))
-                .then(pl.col('quality_scores').str.reverse())
-                .otherwise(pl.col('quality_scores'))
-                .alias('oriented_quality')
-            ])
-            .with_columns([
-                pl.col('oriented_sequence').str.slice(0, umi_len + sbc_len).alias('r1_seq'),
-                pl.col('oriented_sequence').str.slice(umi_len + sbc_len).alias('r2_seq'),
-                pl.col('oriented_quality').str.slice(0, umi_len + sbc_len).alias('r1_qual'),
-                pl.col('oriented_quality').str.slice(umi_len + sbc_len).alias('r2_qual')
-            ])
-            .with_columns([
-                pl.col('r1_seq').str.slice(0, umi_len).alias('umi'),
-                pl.col('r1_seq').str.slice(umi_len, sbc_len).alias('sbc')
-            ])
-            .select(['name', 'r1_seq', 'r1_qual', 'r2_seq', 'r2_qual', 'umi', 'sbc'])
-        )
+            # Step 1: Orient reads using anchor
+                .with_columns([
+                    pl.when(pl.col('sequence').str.contains(anchor))
+                    .then(pl.col('sequence'))
+                    .when(pl.col('sequence').dna.reverse_complement().str.contains(anchor))
+                    .then(pl.col('sequence').dna.reverse_complement())
+                    .otherwise(pl.col('sequence'))
+                    .alias('oriented_sequence'),
+
+                    pl.when(pl.col('sequence').str.contains(anchor))
+                    .then(pl.col('quality_scores'))
+                    .when(pl.col('sequence').dna.reverse_complement().str.contains(anchor))
+                    .then(pl.col('quality_scores').str.reverse())
+                    .otherwise(pl.col('quality_scores'))
+                    .alias('oriented_quality')
+                ])
+                # Step 2: Replace adapter with canonical sequence for exact positioning
+                .with_columns([
+                    pl.col('oriented_sequence').fuzzy.replace_target(
+                        target=anchor,
+                        replacement=anchor,
+                        wildcard=wildcard,
+                    ).alias('normalized_sequence')
+                ])
+                # Step 3: Find adapter position and trim everything before AND including it
+                .with_columns([
+                    pl.col('normalized_sequence').str.find(anchor).alias('trim_pos')
+                ])
+                .with_columns([
+                    # Trim FROM (trim_pos + anchor_length) to end - keep everything AFTER anchor
+                    pl.when(pl.col('trim_pos') >= 0)
+                    .then(pl.col('oriented_sequence').str.slice(pl.col('trim_pos') + len(anchor)))
+                    .otherwise(pl.col('oriented_sequence'))
+                    .alias('trimmed_sequence'),
+
+                    # Trim quality scores accordingly
+                    pl.when(pl.col('trim_pos') >= 0)
+                    .then(pl.col('oriented_quality').str.slice(pl.col('trim_pos') + len(anchor)))
+                    .otherwise(pl.col('oriented_quality'))
+                    .alias('trimmed_quality')
+                ])
+                # Step 4: NOW extract UMI/SBC from clean sequences
+                .with_columns([
+                    pl.col('trimmed_sequence').str.slice(0, umi_len + sbc_len).alias('r1_seq'),
+                    pl.col('trimmed_sequence').str.slice(umi_len + sbc_len).alias('r2_seq'),
+                    pl.col('trimmed_quality').str.slice(0, umi_len + sbc_len).alias('r1_qual'),
+                    pl.col('trimmed_quality').str.slice(umi_len + sbc_len).alias('r2_qual')
+                ])
+                .rename({'name':'read_id'})
+                .select(['read_id', 'r1_seq', 'r1_qual', 'r2_seq', 'r2_qual'])
+                #.with_columns(pl.col('r1_seq').str.slice(0, 16).alias('cbc'))
+                #.with_columns(pl.col('r1_seq').str.slice(16, umi_len - 16).alias('umi'))
+            )
+
 
 # TODO
 # ppp is the temporary expansion of the routines in a chunked manner with split logics
