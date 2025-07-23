@@ -470,5 +470,105 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         # Implementation here
         pass
 
+
+def generate_mask_PEtracer_expression(features_csv, column_name="seq") -> pl.Expr:
+    """
+    Generate a Polars expression to replace TARGET sequences with scrambled versions
+    based on preceding META sequences.
+    
+    Expected csv format:
+        feature,seq,kind
+        META01,AGAAGCCGTGTGCCGGTCTA,META
+        META02,ATCGTGCGGACGAGACAGCA,META
+        RNF2,TGGCAGTCATCTTAGTCATTACGACAGGTGTTCGTTGTAACTCATATA,TARGET
+        HEK3,CTTGGGGCCCAGACTGAGCACGACTTGGCAGAGGAAAGGAAGCCCTGCTTCCTCCAGAGGGCGTCGCA,TARGET
+        EMX1,GGCCTGAGTCCGAGCAGAAGAACTTGGGCTCCCATCACATCAACCGGTGG,TARGET
+    
+    Args:
+        features_csv: Path to CSV file containing feature definitions
+        column_name: Name of the column to apply replacements to (default: "seq")
+        
+    Returns:
+        pl.Expr: Polars expression with chained replacements
+       
+    Usage:
+        expr = generate_mask_PEtracer_expression('features.csv')
+        result = (
+            df.lazy()
+            .with_columns(expr.alias("result"))
+            .collect()
+        )
+    """
+    import polars as pl
+    import random
+    
+    def scramble_dna_sequence(seed_string, sequence):
+        """
+        Scramble a DNA sequence using a deterministic seed.
+        """
+        seed = hash(seed_string) % (2**32)  # Ensure positive 32-bit integer
+        random.seed(seed)
+        seq_list = list(sequence.upper())
+        random.shuffle(seq_list)
+        return ''.join(seq_list)
+    
+    meta = pl.read_csv(features_csv)
+    
+    patterns_df = (
+        meta
+        .filter(pl.col('kind') == 'META')
+        .join(
+            meta.filter(pl.col('kind') == 'TARGET'),
+            suffix="_target",
+            how='cross'
+        )
+        .with_columns(
+            # Generate scrambled sequence for each META-TARGET combination
+            # Original version (META-specific): lambda x: scramble_dna_sequence(x['feature'], x['seq_target'])
+            pl.struct(['feature', 'feature_target']).map_elements(
+                lambda x: scramble_dna_sequence(f"{x['feature']}_{x['feature_target']}", 
+                                              meta.filter(pl.col('feature') == x['feature_target']).get_column('seq')[0]),
+                return_dtype=pl.Utf8
+            ).alias("scrambled_seq")
+        )
+        .with_columns(
+            # pattern = rf"("+pl.col('seq')+")(.*?)("+pl.col('seq_target')+")(.*$)",
+            # replacement = rf"$1${{2}}"+pl.col('scrambled_seq')+"$4"
+            pattern=pl.concat_str([
+                pl.lit("("),
+                pl.col('seq'),  # META sequence
+                pl.lit(")(.*?)("),
+                pl.col('seq_target'),  # TARGET sequence
+                pl.lit(")(.*$)")
+            ]),
+            replacement=pl.concat_str([
+                pl.lit("$1${2}"),
+                pl.col('scrambled_seq'),
+                pl.lit("$4")
+            ])
+        )
+    )
+    
+    if False:
+        print(f"Generated {len(patterns_df)} replacement patterns")
+        if len(patterns_df) > 0:
+            print("Sample patterns:")
+            sample = patterns_df.head(3).select(['feature', 'feature_target', 'pattern', 'replacement'])
+            for row in sample.iter_rows(named=True):
+                print(f"  {row['feature']} + {row['feature_target']}: {row['pattern'][:60]}...")
+                print(f"    -> {row['replacement'][:60]}...")
+    
+    # Build the chained expression
+    expr = pl.col(column_name)
+    
+    for row in patterns_df.iter_rows(named=True):
+        pattern = row['pattern']
+        replacement = row['replacement']
+        expr = expr.str.replace(pattern, replacement)
+    
+    print(f"Built expression with {len(patterns_df)} chained replacements")
+    return expr
+
 # Register the extension
 extension_registry.register(CassiopeiaLineageExtension)
+
