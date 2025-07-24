@@ -8,6 +8,7 @@ from .config import ExtensionConfig
 from ..pipeline.types import StepResults,FractureXp
 from dataclasses import dataclass, field
 from ogtk.utils.log import CustomLogger
+from ogtk.utils.general import fuzzy_match_str
 
 def plug_cassiopeia(
         ldf: pl.LazyFrame,
@@ -471,10 +472,27 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         pass
 
 
-def generate_mask_PEtracer_expression(features_csv, column_name="seq") -> pl.Expr:
+def generate_mask_PEtracer_expression(features_csv,
+                                      column_name="seq",
+                                      fuzzy_pattern:bool = True,
+                                      fuzzy_kwargs:dict = None,
+                                      logger: None|CustomLogger = None
+                                      ) -> pl.Expr:
     """
     Generate a Polars expression to replace TARGET sequences with scrambled versions
     based on preceding META sequences.
+
+    Example of usage:
+        expr = generate_mask_PEtracer_expression(
+            'features.csv',
+            fuzzy_pattern=True,
+            fuzzy_kwargs={
+                'wildcard': '.{0,2}',      # Allow up to 2 character variations
+                'include_original': False,  # Don't include exact match
+                'sep': '|',                # Use pipe separator
+                'max_length': 150          # Only fuzzify sequences up to 150 chars
+            }
+        )
     
     Expected csv format:
         feature,seq,kind
@@ -487,12 +505,28 @@ def generate_mask_PEtracer_expression(features_csv, column_name="seq") -> pl.Exp
     Args:
         features_csv: Path to CSV file containing feature definitions
         column_name: Name of the column to apply replacements to (default: "seq")
-        
+        fuzzy_pattern: Whether to perform fuzzy string matching to account for sequencing errors
+        fuzzy_kwargs: Dictionary of keyword arguments to pass to fuzzy_match_str function
+                     Supported keys: wildcard, include_original, sep, max_length
+                     
     Returns:
         pl.Expr: Polars expression with chained replacements
        
     Usage:
+        # Basic usage
         expr = generate_mask_PEtracer_expression('features.csv')
+        
+        # With custom fuzzy matching parameters
+        expr = generate_mask_PEtracer_expression(
+            'features.csv',
+            fuzzy_pattern=True,
+            fuzzy_kwargs={
+                'wildcard': '.{0,2}',  # Allow up to 2 character variations
+                'include_original': False,  # Don't include exact match
+                'max_length': 100  # Only fuzzify sequences up to 100 chars
+            }
+        )
+        
         result = (
             df.lazy()
             .with_columns(expr.alias("result"))
@@ -502,7 +536,39 @@ def generate_mask_PEtracer_expression(features_csv, column_name="seq") -> pl.Exp
     import polars as pl
     import random
     
-    def scramble_dna_sequence(seed_string, sequence):
+    if fuzzy_kwargs is None:
+        fuzzy_kwargs = {}
+    
+    def fuzzy_match_str(string, wildcard=".{0,1}", include_original=True, sep='|', max_length=200):
+        """Generate fuzzy regex pattern allowing single character variations.
+        
+        Args:
+            string: Input string to fuzzify
+            wildcard: Regex pattern for character substitution
+            include_original: Whether to include exact match
+            sep: Separator for alternatives
+            max_length: Skip fuzzy variants for strings longer than this
+            
+        Returns:
+            Regex pattern string for fuzzy matching
+        """
+        if not string:
+            return string
+            
+        fuzz = []
+        if include_original:
+            fuzz.append(string)
+            
+        # Skip fuzzy generation for very long strings to avoid performance issues
+        if len(string) <= max_length:
+            for i in range(len(string)):
+                # Use list comprehension + join instead of character-by-character building
+                variant = ''.join(wildcard if j == i else c for j, c in enumerate(string))
+                fuzz.append(variant)
+                
+        return sep.join(fuzz)
+    
+    def scramble_dna_sequence(seed_string, sequence, fuzzy_pattern):
         """
         Scramble a DNA sequence using a deterministic seed.
         """
@@ -510,7 +576,10 @@ def generate_mask_PEtracer_expression(features_csv, column_name="seq") -> pl.Exp
         random.seed(seed)
         seq_list = list(sequence.upper())
         random.shuffle(seq_list)
-        return ''.join(seq_list)
+        scrambled_seq = ''.join(seq_list)
+        if fuzzy_pattern:
+            return fuzzy_match_str(scrambled_seq, **fuzzy_kwargs)
+        return scrambled_seq 
     
     meta = pl.read_csv(features_csv)
     
@@ -524,13 +593,16 @@ def generate_mask_PEtracer_expression(features_csv, column_name="seq") -> pl.Exp
         )
         .with_columns(
             # Generate scrambled sequence for each META-TARGET combination
-            # Original version (META-specific): lambda x: scramble_dna_sequence(x['feature'], x['seq_target'])
+            # Original version (META-specific): 
+            # lambda x: scramble_dna_sequence(x['feature'], x['seq_target'])
             pl.struct(['feature', 'feature_target']).map_elements(
-                lambda x: scramble_dna_sequence(f"{x['feature']}_{x['feature_target']}", 
-                                              meta.filter(pl.col('feature') == x['feature_target']).get_column('seq')[0]),
+                lambda x: scramble_dna_sequence(
+                    seed_string = f"{x['feature']}_{x['feature_target']}", 
+                    sequence  = meta.filter(pl.col('feature') == x['feature_target']).get_column('seq')[0],
+                    fuzzy_pattern = fuzzy_pattern),
                 return_dtype=pl.Utf8
-            ).alias("scrambled_seq")
-        )
+                ).alias("scrambled_seq")
+            )
         .with_columns(
             # pattern = rf"("+pl.col('seq')+")(.*?)("+pl.col('seq_target')+")(.*$)",
             # replacement = rf"$1${{2}}"+pl.col('scrambled_seq')+"$4"
@@ -549,14 +621,14 @@ def generate_mask_PEtracer_expression(features_csv, column_name="seq") -> pl.Exp
         )
     )
     
-    if False:
-        print(f"Generated {len(patterns_df)} replacement patterns")
+    if logger is not None:
+        logger.debug(f"Generated {len(patterns_df)} replacement patterns")
         if len(patterns_df) > 0:
-            print("Sample patterns:")
+            logger.debug("Sample patterns:")
             sample = patterns_df.head(3).select(['feature', 'feature_target', 'pattern', 'replacement'])
             for row in sample.iter_rows(named=True):
-                print(f"  {row['feature']} + {row['feature_target']}: {row['pattern'][:60]}...")
-                print(f"    -> {row['replacement'][:60]}...")
+                logger.debug(f"  {row['feature']} + {row['feature_target']}: {row['pattern'][:60]}...")
+                logger.debug(f"    -> {row['replacement'][:60]}...")
     
     # Build the chained expression
     expr = pl.col(column_name)
@@ -568,7 +640,6 @@ def generate_mask_PEtracer_expression(features_csv, column_name="seq") -> pl.Exp
     
     print(f"Built expression with {len(patterns_df)} chained replacements")
     return expr
-
 # Register the extension
 extension_registry.register(CassiopeiaLineageExtension)
 
