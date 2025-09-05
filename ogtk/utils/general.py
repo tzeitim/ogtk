@@ -933,3 +933,31 @@ def run_sge_job(xp, files, sge_conf):
     # This part depends on how results are handled in your setup
     return f"Job {job_id} (Unique ID: {unique_job_id}) completed. Check results in the specified directory."
 
+def fuzzy_match_str(string, wildcard=".{0,1}", include_original=True, sep='|', max_length=200):
+    """Generate fuzzy regex pattern allowing single character variations.
+
+    Args:
+        string: Input string to fuzzify
+        wildcard: Regex pattern for character substitution
+        include_original: Whether to include exact match
+        sep: Separator for alternatives
+        max_length: Skip fuzzy variants for strings longer than this
+
+    Returns:
+        Regex pattern string for fuzzy matching
+    """
+    if not string:
+        return string
+
+    fuzz = []
+    if include_original:
+        fuzz.append(string)
+
+    # Skip fuzzy generation for very long strings to avoid performance issues
+    if len(string) <= max_length:
+        for i in range(len(string)):
+            # Use list comprehension + join instead of character-by-character building
+            variant = ''.join(wildcard if j == i else c for j, c in enumerate(string))
+            fuzz.append(variant)
+
+    return sep.join(fuzz)

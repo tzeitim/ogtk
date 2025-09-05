@@ -588,7 +588,6 @@ class ComparisonScreen(Screen):
 
     def _run_comparison(self) -> None:
         """Run the selected comparison."""
-        # Get currently selected samples from SelectionList
         selection_list = self.query_one("#sample-selection-list", SelectionList)
         selected_indices = selection_list.selected
         
@@ -596,11 +595,8 @@ class ComparisonScreen(Screen):
             self.notify("Please select at least one sample to compare", severity="warning")
             return
 
-        # Get the sample IDs for selected indices
         current_selected = list(self.selected_samples)
-        #current_selected = {all_samples[i] for i in selected_indices}
 
-        # Default to compare all fields 
         df = self.collection.as_wide_df(strip_step_names=True)
         df = df.filter(pl.col("sample_id").is_in(list(current_selected)))
 

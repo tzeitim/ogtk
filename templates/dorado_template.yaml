@@ -1,0 +1,25 @@
+# Dorado ONT Basecalling Template Configuration
+# Simple template - dorado handles model details automatically
+
+dorado:
+  # Dorado binary path
+  bin_path: "~/.bin/dorado-1.0.2-linux-x64/bin/dorado"
+  
+  # Basecalling accuracy: 'sup', 'hac', or 'fast'
+  model: "sup"
+  
+  # Device (dorado will auto-detect best GPU if available)
+  device: "cuda:0"
+  
+  # Additional options (keep minimal)
+  options: ""
+  
+  # Command template - dorado outputs BAM by default
+  # Placeholders: DORADO_BIN, MODEL, INPUT_DIR, OUTPUT_FILE, DEVICE, OPTIONS
+  cmd: "DORADO_BIN basecaller MODEL INPUT_DIR --device DEVICE OPTIONS > OUTPUT_FILE"
+  
+  # LSF cluster configuration
+  use_lsf: true
+  lsf_queue: "gsla_high_gpu"
+  lsf_gpu: "num=1:gmem=80G"
+  lsf_mem: "64GB"

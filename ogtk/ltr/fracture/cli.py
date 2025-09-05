@@ -10,7 +10,7 @@ __all__ = [
 ]
 
 # Define the pipeline step names for argument parsing without importing PipelineStep
-PIPELINE_STEP_NAMES = ['parquet', 'preprocess', 'fracture', 'test']
+PIPELINE_STEP_NAMES = ['dorado', 'parquet', 'preprocess', 'fracture', 'test']
 
 def parse_args():
     """Parse command line arguments"""

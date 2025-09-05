@@ -149,7 +149,7 @@ def parse_contigs(
     )
     
     return StepResults(results={'ldf':ldf},
-                       metrics={'n_parsed_contigs':ldf.height})
+                       metrics={'n_parsed_contigs':ldf.select(pl.len()).collect().item()})
 
 
 def generate_refs_from_fasta(refs_fasta_path: str|Path, anchor1: str, anchor2: str) -> pl.DataFrame:
@@ -184,6 +184,9 @@ class CassiopeiaConfig(ExtensionConfig):
     refs_fasta_path: Optional[str] = None
     anchor1: Optional[str] = None
     anchor2: Optional[str] = None
+    
+    # Runtime parameters (set during processing)
+    ann_intbc_mod: Optional[pl.DataFrame] = None
 
     barcode_interval: Tuple[int, int] = (0, 7)
     cutsite_locations: List[int] = field(default_factory=lambda: [40, 67, 94, 121, 148, 175, 202, 229, 256, 283])
@@ -340,10 +343,11 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         seq - The actual sequence to be aligned
 
         """
+        # Update config with runtime parameter
+        self.config.ann_intbc_mod = self.ann_intbc_mod
         config = self.config.get_function_config(plug_cassiopeia)
 
-        return plug_cassiopeia(ldf=self.ldf, 
-                               ann_intbc_mod=self.ann_intbc_mod,
+        return plug_cassiopeia(ldf=self.ldf,
                                workdir=self.workdir,
                                logger=self.xp.logger,
                                **config)

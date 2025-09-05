@@ -89,6 +89,364 @@ def run_bcl2fq(xp, force=False, dry=False, **args):
         return(p1)
     else:
        return(0)
+
+
+def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
+    '''ONT basecalling using dorado following the bcl2fastq pattern
+    
+    Args:
+        xp: Experiment configuration object
+        force: Force re-run even if done token exists
+        dry: Dry run - only show commands without executing
+        bam_output_dir: Directory to save BAM files (if None, uses wd_bam or wd_fastq)
+        **args: Additional arguments to override configuration
+    '''
+    import subprocess
+    from pathlib import Path
+
+    if not xp.consolidated:
+        raise ValueError("Check the configuration be consolidated")
+
+    # Extract pre-processing config
+    pp = xp.pp
+    
+    # Extract dorado config
+    dorado_conf = pp['dorado']
+    
+    # Populate xp-specific information
+    if bam_output_dir:
+        dorado_conf['outdir'] = bam_output_dir
+    else:
+        dorado_conf['outdir'] = getattr(xp, 'wd_bam', xp.wd_fastq)
+    dorado_conf['input_dir'] = dorado_conf.get('pod5_dir', xp.pro_datain)
+    
+    # Resolve ${prefix} placeholders in sample_barcode_dirs
+    if 'sample_barcode_dirs' in dorado_conf:
+        for sample_id, paths in dorado_conf['sample_barcode_dirs'].items():
+            if isinstance(paths, list):
+                dorado_conf['sample_barcode_dirs'][sample_id] = [
+                    path.replace('${prefix}', xp.prefix) for path in paths
+                ]
+            else:
+                dorado_conf['sample_barcode_dirs'][sample_id] = paths.replace('${prefix}', xp.prefix)
+
+    # Load template and merge configurations
+    template_path = dorado_conf['template'].replace('${prefix}', xp.prefix)
+    template_data = yaml.load(open(template_path), Loader=yaml.FullLoader)
+    
+    # Extract dorado section from template (if it exists)
+    if 'pp' in template_data and 'dorado' in template_data['pp']:
+        dorado_template = template_data['pp']['dorado'].copy()
+    else:
+        dorado_template = {}
+    
+    # Override template with experiment-specific args
+    if args is not None:
+        for k in args.keys():
+            dorado_conf[k] = args[k]
+            
+    for k in dorado_conf.keys():
+        dorado_template[k] = dorado_conf[k]
+        logger.debug(f'setting {k}\t-->\t{dorado_template[k]}')
+
+    # Sanitize types
+    for k, v in dorado_template.items():
+        dorado_template[k] = str(v)
+
+    logger.debug(f"Dorado config: {dorado_conf}")
+    logger.debug(f"Dorado template: {dorado_template}")
+
+    # Handle sample-specific barcode directories
+    consolidated_input_dir = _prepare_sample_specific_input(xp, dorado_conf, dorado_template, logger)
+    
+    # Find POD5 directories in consolidated location
+    input_path = Path(consolidated_input_dir)
+    if not input_path.exists():
+        raise ValueError(f"POD5 input directory does not exist: {input_path}")
+    
+    # Look for sample directories (could be barcode dirs or consolidated sample dirs)
+    sample_dirs = [d for d in input_path.iterdir() if d.is_dir()]
+    
+    if not sample_dirs:
+        sample_dirs = [input_path]
+        logger.info(f"No sample directories found, processing single sample from {input_path}")
+    else:
+        logger.info(f"Found {len(sample_dirs)} sample directories: {[d.name for d in sample_dirs]}")
+        
+    # For consistency with existing code, call them barcode_dirs
+    barcode_dirs = sample_dirs
+
+    # Create output directory
+    output_dir = Path(dorado_template['outdir'])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    done_token = f"{xp.sample_logs}/.dorado_done"
+    
+    if not dry:
+        if os.path.exists(done_token) and not force:
+            logger.info("Dorado basecalling already completed")
+            return 0
+
+    # Process each barcode directory
+    commands = []
+    for barcode_dir in barcode_dirs:
+        barcode_name = barcode_dir.name
+        output_bam = output_dir / f"{xp.target_sample}.bam"
+        
+        # Build command with template substitution
+        base_cmd = (
+            dorado_template['cmd']
+                .replace('DORADO_BIN', dorado_template['bin_path'])
+                .replace('MODEL', dorado_template['model'])
+                .replace('INPUT_DIR', str(barcode_dir))
+                .replace('OUTPUT_FILE', str(output_bam))
+                .replace('DEVICE', dorado_template.get('device', 'cuda:0'))
+                .replace('OPTIONS', dorado_template.get('options', ''))
+        )
+        
+        # For LSF jobs, add done token creation for the last job only
+        if dorado_template.get('use_lsf', False) and len(barcode_dirs) == 1:
+            # Single job - add done token creation
+            cmd = f"{base_cmd} && touch {done_token}"
+        elif dorado_template.get('use_lsf', False) and barcode_dir == barcode_dirs[-1]:
+            # Last job in multi-job scenario - add done token creation
+            cmd = f"{base_cmd} && touch {done_token}"
+        else:
+            cmd = base_cmd
+        
+        # Add conda environment if specified
+        if 'conda_env' in dorado_template:
+            cmd = f"conda run -n {dorado_template['conda_env']} {cmd}"
+            
+        commands.append((cmd, barcode_name, str(output_bam)))
+
+    logger.debug(f"Generated {len(commands)} dorado commands")
+    
+    if not dry:
+        # Check if using LSF for job submission
+        if dorado_template.get('use_lsf', False):
+            return _submit_dorado_lsf_jobs(xp, commands, dorado_template, done_token)
+        else:
+            return _run_dorado_sequential(xp, commands, done_token)
+    else:
+        logger.info("DRY RUN - Commands that would be executed:")
+        for cmd, barcode, output in commands:
+            logger.info(f"  Barcode {barcode}: {cmd}")
+        return 0
+
+
+def _run_dorado_sequential(xp, commands, done_token):
+    '''Run dorado commands sequentially'''
+    import subprocess
+    
+    all_success = True
+    
+    for i, (cmd, barcode, output_file) in enumerate(commands):
+        logger.info(f"Processing barcode {barcode} ({i+1}/{len(commands)})")
+        logger.debug(f"Command: {cmd}")
+        
+        log_out = f'{xp.sample_logs}/dorado_{barcode}.out'
+        log_err = f'{xp.sample_logs}/dorado_{barcode}.err'
+        
+        try:
+            result = subprocess.run(cmd, shell=True,
+                                  stdout=open(log_out, 'w'),
+                                  stderr=open(log_err, 'w'))
+            
+            if result.returncode == 0:
+                logger.info(f"Successfully processed {barcode} -> {output_file}")
+            else:
+                logger.error(f"Failed to process {barcode} (exit code: {result.returncode})")
+                all_success = False
+                
+        except Exception as e:
+            logger.error(f"Error processing {barcode}: {str(e)}")
+            all_success = False
+    
+    if all_success:
+        # Done token already created by the last command in LSF mode
+        # For sequential mode, create it here
+        if not any('touch' in cmd for cmd, _, _ in commands):
+            subprocess.run(f'touch {done_token}'.split())
+        
+        logger.info("All dorado basecalling completed successfully")
+        
+        # Cleanup temporary symlink directory if it was created
+        if 'temp_symlink_dir' in dorado_template:
+            temp_dir = Path(dorado_template['temp_symlink_dir'])
+            if temp_dir.exists() and 'consolidated' in str(temp_dir):
+                logger.info(f"Cleaning up temporary symlink directory: {temp_dir}")
+                _cleanup_symlink_dir(temp_dir, logger)
+        
+        return 0
+    else:
+        logger.error("Some dorado basecalling jobs failed")
+        return 1
+
+
+def _submit_dorado_lsf_jobs(xp, commands, dorado_template, done_token):
+    '''Submit dorado jobs to LSF cluster'''
+    import subprocess
+    
+    logger.info(f"Submitting {len(commands)} dorado jobs to LSF")
+    
+    job_ids = []
+    
+    for cmd, barcode, output_file in commands:
+        lsf_cmd = [
+            'bsub',
+            '-q', dorado_template.get('lsf_queue', 'gsla_high_gpu'),
+            '-gpu', dorado_template.get('lsf_gpu', 'num=1:gmem=80G'),
+            '-R', f"rusage[mem={dorado_template.get('lsf_mem', '64GB')}]",
+            '-o', f"{xp.sample_logs}/dorado_{barcode}.lsf.out",
+            '-e', f"{xp.sample_logs}/dorado_{barcode}.lsf.err",
+            '-J', f"dorado_{barcode}_{xp.target_sample}",
+            cmd
+        ]
+        
+        logger.debug(f"LSF command: {' '.join(lsf_cmd)}")
+        
+        try:
+            result = subprocess.run(lsf_cmd, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                import re
+                match = re.search(r'Job <(\d+)>', result.stdout)
+                if match:
+                    job_id = match.group(1)
+                    job_ids.append(job_id)
+                    logger.info(f"Submitted {barcode} job with ID: {job_id}")
+                else:
+                    logger.warning(f"Could not extract job ID for {barcode}: {result.stdout}")
+            else:
+                logger.error(f"Failed to submit {barcode} job: {result.stderr}")
+                return 1
+                
+        except Exception as e:
+            logger.error(f"Error submitting {barcode} job: {str(e)}")
+            return 1
+    
+    logger.info(f"Submitted {len(job_ids)} jobs to LSF. Job IDs: {job_ids}")
+    logger.info("Done token will be created automatically when the last job completes")
+    
+    return 0
+
+
+def _prepare_sample_specific_input(xp, dorado_conf, dorado_template, logger):
+    '''Prepare input directory for sample-specific barcode directories across flowcells'''
+    from pathlib import Path
+    import os
+    
+    # Check if sample-specific barcode directories are configured
+    sample_barcode_dirs = dorado_conf.get('sample_barcode_dirs', {})
+    
+    if not sample_barcode_dirs:
+        # No sample-specific config - fallback to original logic
+        single_dir = dorado_conf.get('pod5_dir', dorado_template['input_dir'])
+        logger.info(f"Single directory mode (no sample-specific config): {single_dir}")
+        return single_dir
+    
+    # Check if current target sample has specific barcode directories configured
+    target_sample = xp.target_sample
+    if target_sample not in sample_barcode_dirs:
+        logger.warning(f"No barcode directories configured for sample '{target_sample}', using fallback")
+        single_dir = dorado_conf.get('pod5_dir', dorado_template['input_dir'])
+        return single_dir
+    
+    sample_barcode_paths = sample_barcode_dirs[target_sample]
+    if not isinstance(sample_barcode_paths, list):
+        sample_barcode_paths = [sample_barcode_paths]
+    
+    if len(sample_barcode_paths) == 1:
+        # Single barcode directory for this sample
+        single_path = sample_barcode_paths[0]
+        logger.info(f"Single barcode directory for sample '{target_sample}': {single_path}")
+        return single_path
+    
+    # Multi-flowcell mode - consolidate barcode directories for this sample
+    temp_dir_template = dorado_template.get('temp_symlink_dir', f"/tmp/dorado_consolidated_{target_sample}_{os.getpid()}")
+    # Resolve template variables using eval (like the rest of the xp system)
+    if 'self.' in temp_dir_template:
+        # This is a template string that needs evaluation
+        temp_dir_path = eval(temp_dir_template.replace('self.', 'xp.'))
+    else:
+        temp_dir_path = temp_dir_template
+    temp_dir = Path(temp_dir_path)
+    logger.info(f"Multi-flowcell mode for sample '{target_sample}': consolidating {len(sample_barcode_paths)} barcode directories into {temp_dir}")
+    
+    # Clean up any existing temp directory
+    if temp_dir.exists():
+        logger.warning(f"Removing existing temp directory: {temp_dir}")
+        _cleanup_symlink_dir(temp_dir, logger)
+    
+    # Create consolidated directory structure
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create a single consolidated directory for this sample
+    consolidated_sample_dir = temp_dir / target_sample
+    consolidated_sample_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create symlinks for all POD5 files from all barcode directories for this sample
+    total_pod5_count = 0
+    
+    for i, barcode_dir_path in enumerate(sample_barcode_paths):
+        barcode_path = Path(barcode_dir_path)
+        logger.debug(f"Processing barcode directory {i+1}/{len(sample_barcode_paths)}: {barcode_path}")
+        
+        if not barcode_path.exists():
+            logger.warning(f"Barcode directory does not exist: {barcode_path}")
+            continue
+        
+        flowcell_name = f"fc{i:02d}"  # fc00, fc01, fc02, etc.
+        
+        # Find all POD5 files in this barcode directory
+        pod5_files = list(barcode_path.rglob("*.pod5"))
+        logger.debug(f"Found {len(pod5_files)} POD5 files in {barcode_path}")
+        
+        for pod5_file in pod5_files:
+            # Create unique symlink name including flowcell identifier
+            rel_path = pod5_file.relative_to(barcode_path)
+            symlink_name = f"{flowcell_name}_{rel_path.name}"
+            symlink_path = consolidated_sample_dir / rel_path.parent / symlink_name
+            
+            # Create subdirectories if needed
+            symlink_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Create symlink
+            try:
+                symlink_path.symlink_to(pod5_file.resolve())
+                logger.debug(f"Created symlink: {symlink_path} -> {pod5_file}")
+                total_pod5_count += 1
+            except FileExistsError:
+                logger.warning(f"Symlink already exists: {symlink_path}")
+            except Exception as e:
+                logger.error(f"Failed to create symlink {symlink_path} -> {pod5_file}: {e}")
+    
+    logger.info(f"Consolidated sample '{target_sample}': {total_pod5_count} POD5 files from {len(sample_barcode_paths)} barcode directories")
+    
+    return str(temp_dir)
+
+
+def _cleanup_symlink_dir(symlink_dir, logger):
+    '''Safely cleanup symlink directory (only removes symlinks, not original files)'''
+    import shutil
+    from pathlib import Path
+    
+    symlink_path = Path(symlink_dir)
+    
+    if not symlink_path.exists():
+        return
+        
+    # Double-check we're only removing symlinks for safety
+    for item in symlink_path.rglob("*"):
+        if item.is_file() and not item.is_symlink():
+            logger.error(f"WARNING: Found non-symlink file in temp directory: {item}")
+            logger.error("Aborting cleanup to prevent data loss!")
+            return
+    
+    # Safe to remove - contains only symlinks and directories
+    shutil.rmtree(symlink_path)
+    logger.debug(f"Cleaned up symlink directory: {symlink_path}")
 import os
 import subprocess
 import hashlib

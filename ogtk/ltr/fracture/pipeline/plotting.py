@@ -25,7 +25,7 @@ class PlotDB():
                 pl.scan_parquet(ifn)
                     .group_by('umi')
                               .len().rename({'len':'reads'})
-                    .collect(),
+                    .collect(engine='streaming'),
                     y='reads', 
                     log_scale=(10, 10), 
                     kind='ecdf', 
@@ -42,7 +42,8 @@ class PlotDB():
 
             #plt.axhline(y=th_kmeans, color='r', linestyle='--', label="kmeans")
             #plt.axhline(y=th_kneedle, color='g', linestyle='--', label="kneedle")
-            plt.axhline(y=10, color='g', linestyle='--', label="hard coded")
+            if hasattr(xp, 'fracture'):
+                plt.axhline(y=xp.fracture['min_reads'], color='g', linestyle='--', label="min reads")
 
             fig.savefig(out_path)
             xp.logger.info(f"saved {out_path}")
@@ -50,14 +51,14 @@ class PlotDB():
             # saturation coverage
             out_path = f'{xp.sample_figs}/{xp.target_sample}_{key}_sat-coverage.png'
             
-            total_reads = pl.scan_parquet(ifn).collect().height # replace for direct extraction from the summary metrics
+            total_reads = pl.scan_parquet(ifn).select(pl.len()).collect().item()
 
             _=[
                 sns.ecdfplot(pl.scan_parquet(ifn)
                                 .head(int(i))
                                 .group_by('umi')
                                 .len().rename({'len':'reads'})
-                                .collect(), 
+                                .collect(engine="streaming"), 
                              y='reads', 
                              complementary=True, 
                              stat='count',
@@ -67,7 +68,7 @@ class PlotDB():
                 for i in np.linspace(0, total_reads, num=5)
             ]
 
-            #plt.title(f'{pl.scan_parquet(mfn_pcr).collect().height/1e6:.2f}')
+            #plt.title(f'{pl.scan_parquet(mfn_pcr).select(pl.len()).collect().item()/1e6:.2f}')
             plt.title(f'{xp.target_sample} {total_reads/1e6:.2f}M reads')
 
             plt.xscale('log')

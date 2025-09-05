@@ -3,6 +3,7 @@ import polars as pl
 import rogtk
 
 from ogtk.utils.log import Rlogger, call
+from ogtk.utils.general import fuzzy_match_str
 
 __all__ = [
         'PlDNA',
@@ -251,16 +252,29 @@ class PlPipeline:
                     auto_k: bool = True,
                     export_graphs: bool = False,
                     groups = ['umi', 'sbc'],
+                    do_trim: bool = True,
                     only_largest: bool = True) -> pl.DataFrame:
-        """
-        """
+
+        
+        trim_expr = pl.col("r2_seq")
+
+        match method:
+            case "compression":
+                start_anchor = None
+                end_anchor = None
+            case "shortest_path":
+                if do_trim:
+                    trim_expr = (
+                        pl.col("r2_seq")
+                        .str.replace(f'^.*{start_anchor}', start_anchor)
+                        .str.replace(f'{end_anchor}.*$', end_anchor)
+                    )
+        
         return (
             self._df
-             .with_columns(pl.col('r2_seq').str.replace(f'^.*{start_anchor}', start_anchor))
-             .with_columns(pl.col('r2_seq').str.replace(f'{end_anchor}.*$', end_anchor))
             .group_by(groups).agg(
                 rogtk.assemble_sequences(
-                    expr=pl.col("r2_seq"),
+                    expr=trim_expr,
                     k=k,
                     min_coverage=min_coverage,
                     method=method,
@@ -340,12 +354,12 @@ class PlPipeline:
             .unnest("assembly_results")
         )
 
-    def ont_to_paired_format(self, umi_len: int, sbc_len: int, anchor: str) -> pl.DataFrame:
+    def ont_to_paired_format(self, umi_len: int, sbc_len: int, anchor: str, anchor_ont:str) -> pl.DataFrame:
         """Convert ONT BAM data to FRACTURE's expected R1/R2 format (DataFrame wrapper)"""
         return (
             self._df
             .lazy()
-            .pp.ont_to_paired_format(umi_len=umi_len, sbc_len=sbc_len, anchor=anchor)
+            .pp.ont_to_paired_format(umi_len=umi_len, sbc_len=sbc_len, anchor=anchor, anchor_ont=anchor_ont)
             .collect()
         )
 
@@ -353,6 +367,40 @@ class PlPipeline:
 class PllPipeline:
     def __init__(self, ldf: pl.LazyFrame) -> None:
         self._ldf = ldf
+        self.logger = Rlogger().get_logger()
+
+    def assemble_umis(self,
+                    k: int = 15,
+                    min_coverage: int = 20, 
+                    method: str = "shortest_path",
+                    start_anchor: str | None = None,
+                    end_anchor: str | None = None,
+                    min_length: int | None = None,
+                    auto_k: bool = True,
+                    export_graphs: bool = False,
+                    groups = ['umi', 'sbc'],
+                    only_largest: bool = True) -> pl.LazyFrame:
+        """
+        """
+        return (
+            self._ldf
+             .with_columns(pl.col('r2_seq').str.replace(f'^.*{start_anchor}', start_anchor))
+             .with_columns(pl.col('r2_seq').str.replace(f'{end_anchor}.*$', end_anchor))
+            .group_by(groups).agg(
+                rogtk.assemble_sequences(
+                    expr=pl.col("r2_seq"),
+                    k=k,
+                    min_coverage=min_coverage,
+                    method=method,
+                    start_anchor=start_anchor,
+                    end_anchor=end_anchor,
+                    min_length=min_length,
+                    auto_k=auto_k,
+                    only_largest=only_largest,
+                    export_graphs=export_graphs,
+                ).alias('contig')
+            )
+        )
 
     # [12N][6N]
     # [  18N  ]
@@ -372,7 +420,9 @@ class PllPipeline:
                     #.filter(pl.col('ont'))
                     # UMI validation
                     .with_columns(pl.col('r1_seq')
-                                  .str.extract(f'(.*?){anchor_ont}.*$',1)
+                                  # making this more strict to expect the on-target sequence in the end 
+                                  #.str.extract(f'(.*?){anchor_ont}.*$',1)
+                                  .str.extract(f'(.*?){anchor_ont}$',1) 
                                   .str.len_chars()
                                   .fill_null(0)
                                   .alias('valid_umi')
@@ -398,65 +448,81 @@ class PllPipeline:
                                   )
                 )
 
-
-    # TODO wildcard logics are bogus for ONT data
-    def ont_to_paired_format(self, umi_len: int, sbc_len: int, anchor: str, wildcard= '.{0,4}') -> pl.LazyFrame:
+    def ont_to_paired_format(self, umi_len: int, sbc_len: int, anchor_orient: str, anchor_ont:str, wildcard= '.{0,4}') -> pl.LazyFrame:
         """Convert ONT BAM data to FRACTURE's expected R1/R2 format (LazyFrame)"""
-        return (
-            self._ldf
-            # Step 1: Orient reads using anchor
-                .with_columns([
-                    pl.when(pl.col('sequence').str.contains(anchor))
-                    .then(pl.col('sequence'))
-                    .when(pl.col('sequence').dna.reverse_complement().str.contains(anchor))
-                    .then(pl.col('sequence').dna.reverse_complement())
-                    .otherwise(pl.col('sequence'))
-                    .alias('oriented_sequence'),
+        anchor_ont_l = len(anchor_ont)
+        trim_range = umi_len + sbc_len + anchor_ont_l
+        self.logger.debug(f"{trim_range=}")
+        self.logger.debug(f"{umi_len=} {sbc_len=} {anchor_ont_l=} {anchor_ont}")
 
-                    pl.when(pl.col('sequence').str.contains(anchor))
-                    .then(pl.col('quality_scores'))
-                    .when(pl.col('sequence').dna.reverse_complement().str.contains(anchor))
-                    .then(pl.col('quality_scores').str.reverse())
-                    .otherwise(pl.col('quality_scores'))
-                    .alias('oriented_quality')
-                ])
-                # Step 2: Replace adapter with canonical sequence for exact positioning
-                .with_columns([
-                    pl.col('oriented_sequence').fuzzy.replace_target(
-                        target=anchor,
-                        replacement=anchor,
-                        wildcard=wildcard,
-                    ).alias('normalized_sequence')
-                ])
-                # Step 3: Find adapter position and trim everything before AND including it
-                .with_columns([
-                    pl.col('normalized_sequence').str.find(anchor).alias('trim_pos')
-                ])
-                .with_columns([
-                    # Trim FROM (trim_pos + anchor_length) to end - keep everything AFTER anchor
-                    pl.when(pl.col('trim_pos') >= 0)
-                    .then(pl.col('oriented_sequence').str.slice(pl.col('trim_pos') + len(anchor)))
-                    .otherwise(pl.col('oriented_sequence'))
-                    .alias('trimmed_sequence'),
+        fuzzy_anchor_pattern = fuzzy_match_str(anchor_orient, wildcard=wildcard)
 
-                    # Trim quality scores accordingly
-                    pl.when(pl.col('trim_pos') >= 0)
-                    .then(pl.col('oriented_quality').str.slice(pl.col('trim_pos') + len(anchor)))
-                    .otherwise(pl.col('oriented_quality'))
-                    .alias('trimmed_quality')
-                ])
-                # Step 4: NOW extract UMI/SBC from clean sequences
-                .with_columns([
-                    pl.col('trimmed_sequence').str.slice(0, umi_len + sbc_len).alias('r1_seq'),
-                    pl.col('trimmed_sequence').str.slice(umi_len + sbc_len).alias('r2_seq'),
-                    pl.col('trimmed_quality').str.slice(0, umi_len + sbc_len).alias('r1_qual'),
-                    pl.col('trimmed_quality').str.slice(umi_len + sbc_len).alias('r2_qual')
-                ])
-                .rename({'name':'read_id'})
-                .select(['read_id', 'r1_seq', 'r1_qual', 'r2_seq', 'r2_qual'])
-                #.with_columns(pl.col('r1_seq').str.slice(0, 16).alias('cbc'))
-                #.with_columns(pl.col('r1_seq').str.slice(16, umi_len - 16).alias('umi'))
-            )
+        return(
+        self._ldf
+            # Step 1: Orient reads using fuzzy_anchor_pattern 
+            .with_columns([
+                pl.when(pl.col('sequence').str.contains(fuzzy_anchor_pattern))
+                .then(pl.col('sequence'))
+                .when(pl.col('sequence').dna.reverse_complement().str.contains(fuzzy_anchor_pattern)) #pyright:ignore
+                .then(pl.col('sequence').dna.reverse_complement()) #pyright:ignore
+                .otherwise(pl.col('sequence'))
+                .alias('oriented_sequence'),
+                pl.when(pl.col('sequence').str.contains(fuzzy_anchor_pattern))
+                .then(pl.col('quality_scores'))
+                .when(pl.col('sequence').dna.reverse_complement().str.contains(fuzzy_anchor_pattern)) #pyright:ignore
+                .then(pl.col('quality_scores').str.reverse())
+                .otherwise(pl.col('quality_scores'))
+                .alias('oriented_quality')
+            ])
+
+            # Step 2: Find adapter position - extract everything after the match
+            .with_columns([
+                pl.col('oriented_sequence').str.extract(
+                    f'^(.*)({fuzzy_anchor_pattern})(.*)$',
+                    group_index=3
+                ).alias('after_adapter')
+            ])
+            .with_columns([
+                # Calculate trim position: total_length - after_adapter_length
+                (pl.col('oriented_sequence').str.len_chars() - pl.col('after_adapter').str.len_chars()).alias('trim_pos')
+            ])
+
+            # Step 3: Create normalized sequence for visualization (optional)
+           # .with_columns([
+           #     pl.when(pl.col('after_adapter').is_not_null())
+           #     .then(
+           #         pl.col('oriented_sequence').str.slice(0, pl.col('trim_pos') - len(anchor_orient)) +
+           #         anchor_orient +
+           #         pl.col('after_adapter')
+           #     )
+           #     .otherwise(pl.col('oriented_sequence'))
+           #     .alias('normalized_sequence')
+           # ])
+
+            # Step 4: Use after_adapter directly as trimmed sequence
+            .with_columns([
+                pl.when(pl.col('after_adapter').is_not_null())
+                .then(pl.col('after_adapter'))
+                .otherwise(pl.col('oriented_sequence'))
+                .alias('trimmed_sequence'),
+                # Trim quality scores from the same position
+                pl.when(pl.col('trim_pos').is_not_null())
+                .then(pl.col('oriented_quality').str.slice(pl.col('trim_pos')))
+                .otherwise(pl.col('oriented_quality'))
+                .alias('trimmed_quality')
+            ])
+
+            # Step 5: Extract UMI/SBC from clean sequences
+            .with_columns([
+                pl.col('trimmed_sequence').str.slice(0, trim_range).alias('r1_seq'),
+                pl.col('trimmed_sequence').str.slice(trim_range).alias('r2_seq'),
+                pl.col('trimmed_quality').str.slice(0, trim_range).alias('r1_qual'),
+                pl.col('trimmed_quality').str.slice(trim_range).alias('r2_qual')
+            ])
+            .rename({'name':'read_id'})
+            #.select(['read_id', 'r1_seq', 'r1_qual', 'r2_seq', 'r2_qual', 'normalized_sequence', 'trim_pos'])
+            .select(['read_id', 'r1_seq', 'r1_qual', 'r2_seq', 'r2_qual', 'trim_pos'])
+        )
 
 
 # TODO

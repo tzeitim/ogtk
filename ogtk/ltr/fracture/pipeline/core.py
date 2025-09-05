@@ -12,6 +12,11 @@ from .types import FractureXp,StepResults
 class PipelineStep(Enum):
     """Enum defining available pipeline steps"""
 
+    DORADO = {
+        'required_params': {'target_sample'},
+        'description': "Run dorado basecaller on POD5 files"
+    }
+    
     PARQUET = {
         'required_params': {'umi_len', 'rev_comp', 'modality'},
         'description': "Convert fastq reads to parquet format"
@@ -81,6 +86,7 @@ def log_invocation_params(logger: Any, step: PipelineStep, xp: Any, kwargs: Dict
     
     # Log step-specific nested configurations
     step_specific_configs = {
+        PipelineStep.DORADO: ['pp'],
         PipelineStep.FRACTURE: ['fracture'],
         PipelineStep.PARQUET: ['force_tab'],
         # Add other step-specific params as needed
@@ -91,11 +97,11 @@ def log_invocation_params(logger: Any, step: PipelineStep, xp: Any, kwargs: Dict
             if hasattr(xp, config_attr):
                 config_value = getattr(xp, config_attr)
                 if isinstance(config_value, dict):
-                    logger.info(f"  {config_attr} configuration:")
+                    logger.debug(f"  {config_attr} configuration:")
                     for k, v in config_value.items():
-                        logger.info(f"    {k}: {v}")
+                        logger.debug(f"    {k}: {v}")
                 else:
-                    logger.info(f"  {config_attr}: {config_value}")
+                    logger.debug(f"  {config_attr}: {config_value}")
     
     # Log additional parameters from kwargs
     if kwargs:
@@ -271,7 +277,7 @@ class Pipeline:
         """Validate required parameters for specific input format"""
         format_requirements = {
             'fastq': ['rev_comp'],
-            'bam': ['anchor_ont', 'sbc_len']
+            'bam': ['anchor_ont', 'sbc_len', 'anchor_orient']
         }
         
         if input_format not in format_requirements:
@@ -346,7 +352,6 @@ class Pipeline:
             
             import rogtk
 
-
             if not Path(raw_bam_fn).exists() or force_tab:
                 rogtk.bam_to_parquet(
                     bam_path=file,
@@ -356,13 +361,13 @@ class Pipeline:
                     compression='snappy',
                     limit=limit
                 )
-            
             (
                 pl.scan_parquet(raw_bam_fn)
                 .pp.ont_to_paired_format(
                     umi_len=self.xp.umi_len,
                     sbc_len=self.xp.sbc_len,
-                    anchor=self.xp.anchor_ont
+                    anchor_orient=self.xp.anchor_orient,
+                    anchor_ont=self.xp.anchor_ont,
                 )
                 .sink_parquet(merged_fn)
             )
@@ -394,15 +399,65 @@ class Pipeline:
                 .collect()
                 .height
             ),
+            # TODO  there is a bug here where 'umi' is not found
+            # this wa probably introduced when importing from bam_path
+            # the real issue is that the progression of file names is not correct
+            # what is the difference between parsed and merged and why do parsed gets overwritten ?
             'total_umis': (
                 pl.scan_parquet(out_fn)
-                .select('umi')
-                .unique()
+                #.select('umi')
+                #.unique()
+                #
+                #.select(pl.len())
                 .collect()
                 .height
+                #.item()
             ),
             'downsampled': limit
         }
+
+    @call  
+    @pipeline_step(PipelineStep.DORADO)
+    def dorado_basecall(self) -> StepResults|None:
+        """Run dorado basecaller on POD5 files"""
+        try:
+            from ogtk.utils.db import run_dorado
+            
+            self.logger.info(f"Running dorado basecalling from {self.xp.pro_datain}")
+            
+            # Check if this is an Xp object with preprocessing config
+            if not hasattr(self.xp, 'pp') or 'dorado' not in self.xp.pp:
+                raise ValueError("Missing dorado configuration in xp.pp['dorado']")
+            
+            # Run dorado basecalling - save BAMs to datain/fracture directory
+            result = run_dorado(self.xp, 
+                              force=getattr(self.xp, 'force_dorado', False), 
+                              dry=self.xp.dry,
+                              bam_output_dir=self.xp.pro_datain)
+            
+            if result != 0 and not self.xp.dry:
+                raise RuntimeError(f"Dorado basecalling failed with exit code: {result}")
+            
+            # Count generated BAM files
+            from pathlib import Path
+            output_dir = Path(self.xp.pro_datain)  # BAMs saved to datain/fracture
+            bam_files = list(output_dir.glob("*.bam"))
+            
+            metrics = {
+                'bam_files_generated': len(bam_files),
+                'output_directory': str(output_dir)
+            }
+            
+            self.logger.info(f"Dorado basecalling completed. Generated {len(bam_files)} BAM files")
+            
+            return StepResults(
+                results={'bam_output_dir': str(output_dir), 'bam_files': [str(f) for f in bam_files]},
+                metrics=metrics
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to run dorado basecalling: {str(e)}", with_traceback=True)
+            raise
 
     @call  
     @pipeline_step(PipelineStep.PARQUET)
@@ -604,12 +659,15 @@ class Pipeline:
 
                 # save without gc fields
                 if not self.xp.parse_read1:
+                    self.logger.info(f"Exporting lazily to {out_file}")
                     (
                             ldf
                             .filter(pl.col('valid_umi'))
                             .filter(pl.col('ont'))
                             .sink_parquet(out_file)
                     )
+
+                    self.logger.info(f"Exporting lazily to {out_file_inv}")
                     (
                             ldf
                             .filter((~pl.col('valid_umi')) | (~pl.col('ont')))
@@ -704,25 +762,25 @@ class Pipeline:
                 self.xp.fracture['start_min_coverage'] = 25
                 self.xp.fracture['start_k'] = 17
                 self.xp.fracture['min_reads'] = 10 #qc.find_read_count_threshold(in_file, method="kmeans")
-            else:
-                self.xp.fracture['min_reads'] = 10 #qc.find_read_count_threshold(in_file, 
+            #else:
+            #    self.xp.fracture['min_reads'] = 10 #qc.find_read_count_threshold(in_file, 
                                                    #              method=self.xp.fracture['method_th'])
-
 
             in_files = {
                     'valid': f"{self.xp.sample_wd}/parsed_reads.parquet", #pyright:ignore
                     'invalid':f"{self.xp.sample_wd}/parsed_reads_invalid.parquet", #pyright:ignore
                     }
+
             for key,in_file in in_files.items():
                 if not self.xp.dry:
                     self.logger.info(f'Reading {in_file}')
-                    out_file = f"{self.xp.sample_wd}/contigs_pl_direct{key}.parquet" #pyright:ignore
+                    out_file = f"{self.xp.sample_wd}/contigs_pl_direct_{key}.parquet" #pyright:ignore
                     self.logger.info(f"exporting assembled contigs to {out_file}")
                     
                     filter_expr= pl.col('reads')>=self.xp.fracture['min_reads']
 
                     df_contigs = (
-                            pl.read_parquet(in_file)
+                            pl.scan_parquet(in_file)
                             .filter(filter_expr)
                             .pp.assemble_umis( #pyright: ignore
                               k=self.xp.fracture['start_k'], 
@@ -741,15 +799,15 @@ class Pipeline:
                                 pl.scan_parquet(in_file)
                                   .select('umi','reads')
                                   .filter(filter_expr)
-                                  .unique()
-                                  .collect(), 
+                                  .unique(),
+                                  #.collect(), 
                                left_on='umi', right_on='umi', how='left')
                             )
 
-                    df_contigs.write_parquet(out_file)
+                    df_contigs.sink_parquet(out_file)
 
-                    success_rate = (df_contigs.get_column('length')>0).mean()
-                    total_assembled = (df_contigs.get_column('length')>0).sum()
+                    success_rate = (df_contigs.collect().get_column('length')>0).mean()
+                    total_assembled = (df_contigs.collect().get_column('length')>0).sum()
                    
                     self.logger.critical(f"from {in_file} {total_assembled} assembled ({success_rate:.2%} success) {key}")
                     
@@ -758,8 +816,8 @@ class Pipeline:
                                      'contigs':out_file},
                             metrics={'success_rate':success_rate,
                                      'total_assembled':total_assembled,
-                                     'mean_contig_length': df_contigs.filter(pl.col('length')>0).get_column('length').mean(),
-                                     'median_contig_length': df_contigs.filter(pl.col('length')>0).get_column('length').median(),
+                                     'mean_contig_length': df_contigs.collect().filter(pl.col('length')>0).get_column('length').mean(),
+                                     'median_contig_length': df_contigs.collect().filter(pl.col('length')>0).get_column('length').median(),
                                      },
                             )
 
@@ -783,7 +841,9 @@ class Pipeline:
             return True
         
         # Look for contigs file
-        contigs_path = Path(f"{self.xp.sample_wd}/contigs_pl_direct.parquet")
+        # on valid reads only
+        key = 'valid'
+        contigs_path = Path(f"{self.xp.sample_wd}/contigs_pl_direct_{key}.parquet")
         if not contigs_path.exists():
             self.logger.error("No contigs found for post-processing. Run fracture step first.")
             return False
@@ -1012,12 +1072,18 @@ class Pipeline:
             return False
 
     def run_all(self):
-        ''' Run all steps'''
+        ''' Run all steps (respecting step configuration)'''
         self.logger.info("==== Running pipeline ====")
         
-        self.to_parquet()
-        self.preprocess()
-        self.fracture()
+        # Run steps in order, but only if configured to run
+        if self.should_run_step(PipelineStep.DORADO):
+            self.dorado_basecall()
+        if self.should_run_step(PipelineStep.PARQUET):
+            self.to_parquet()
+        if self.should_run_step(PipelineStep.PREPROCESS):
+            self.preprocess()
+        if self.should_run_step(PipelineStep.FRACTURE):
+            self.fracture()
         #self.run_qcs()
 
     def get_metric_from_summary(self, step: str, metric: str):
