@@ -368,6 +368,9 @@ class Pipeline:
                     sbc_len=self.xp.sbc_len,
                     anchor_orient=self.xp.anchor_orient,
                     anchor_ont=self.xp.anchor_ont,
+                    modality=self.xp.modality,
+                    cbc_len=getattr(self.xp, 'cbc_len', 16),
+                    do_rev_comp=self.xp.rev_comp,
                 )
                 .sink_parquet(merged_fn)
             )
@@ -653,6 +656,8 @@ class Pipeline:
                     .pp.parse_reads(umi_len=self.xp.umi_len,  #pyright:ignore
                                     sbc_len=self.xp.sbc_len,
                                     anchor_ont=self.xp.anchor_ont,
+                                    modality=self.xp.modality,
+                                    cbc_len=getattr(self.xp, 'cbc_len', 16),
                                     )
                     .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                  )
@@ -792,6 +797,7 @@ class Pipeline:
                               export_graphs=False,
                               only_largest=True,
                               method=self.xp.fracture['assembly_method'],
+                              modality=self.xp.modality,
                               )
                             .with_columns(pl.col('contig').str.len_chars().alias('length'))
                             .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))

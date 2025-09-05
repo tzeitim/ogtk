@@ -354,12 +354,12 @@ class PlPipeline:
             .unnest("assembly_results")
         )
 
-    def ont_to_paired_format(self, umi_len: int, sbc_len: int, anchor: str, anchor_ont:str) -> pl.DataFrame:
+    def ont_to_paired_format(self, umi_len: int, sbc_len: int, anchor: str, anchor_ont:str, modality: str = 'single-molecule', cbc_len: int = 16) -> pl.DataFrame:
         """Convert ONT BAM data to FRACTURE's expected R1/R2 format (DataFrame wrapper)"""
         return (
             self._df
             .lazy()
-            .pp.ont_to_paired_format(umi_len=umi_len, sbc_len=sbc_len, anchor=anchor, anchor_ont=anchor_ont)
+            .pp.ont_to_paired_format(umi_len=umi_len, sbc_len=sbc_len, anchor_orient=anchor, anchor_ont=anchor_ont, modality=modality, cbc_len=cbc_len)
             .collect()
         )
 
@@ -379,14 +379,27 @@ class PllPipeline:
                     auto_k: bool = True,
                     export_graphs: bool = False,
                     groups = ['umi', 'sbc'],
+                    modality: str = 'single-molecule',
                     only_largest: bool = True) -> pl.LazyFrame:
         """
+        Assemble UMI sequences with modality-aware grouping.
+        
+        For single-cell: groups by 'umi' only (compound cbc+umi)
+        For single-molecule: groups by 'umi' and 'sbc'
         """
+        # Adjust grouping based on modality
+        if modality == 'single-cell':
+            # For single-cell, group only by UMI (which contains cbc+umi compound)
+            effective_groups = ['umi']
+        else:
+            # Use provided groups or default for single-molecule
+            effective_groups = groups
+        
         return (
             self._ldf
              .with_columns(pl.col('r2_seq').str.replace(f'^.*{start_anchor}', start_anchor))
              .with_columns(pl.col('r2_seq').str.replace(f'{end_anchor}.*$', end_anchor))
-            .group_by(groups).agg(
+            .group_by(effective_groups).agg(
                 rogtk.assemble_sequences(
                     expr=pl.col("r2_seq"),
                     k=k,
@@ -404,10 +417,48 @@ class PllPipeline:
 
     # [12N][6N]
     # [  18N  ]
-    def parse_reads(self, umi_len, anchor_ont, sbc_len):
-        ''' sbc_len : sample barcode length'''
+    def parse_reads(self, umi_len, anchor_ont, sbc_len, modality='single-molecule', cbc_len=16):
+        ''' 
+        Parse reads from merged R1/R2 format, extracting UMI and barcode information.
+        
+        Args:
+            umi_len: UMI length
+            anchor_ont: ONT anchor sequence
+            sbc_len: Sample barcode length (0 for single-cell)
+            modality: 'single-cell' or 'single-molecule' 
+            cbc_len: Cell barcode length (for single-cell data)
+        '''
         # metric_field_name represent QC columns
-        return(
+        if modality == 'single-cell':
+            # For single-cell: r1_seq structure is cbc + umi
+            # Extract compound UMI (cell barcode + umi) for downstream processing
+            expected_len = cbc_len + umi_len
+            return(
+                self._ldf
+                    .with_columns(pl.col('r1_seq').str.slice(0, cbc_len).alias('cbc'))
+                    .with_columns(pl.col('r1_seq').str.slice(cbc_len, umi_len).alias('umi_only'))
+                    .with_columns((pl.col('cbc') + pl.col('umi_only')).alias('umi'))  # Compound UMI
+                    .with_columns(pl.lit('').alias('sbc'))  # No sample barcode for single-cell
+                    .with_columns(pl.col('r1_seq').str.contains(anchor_ont).alias('ont'))
+                    # read level metrics
+                    .with_columns(metric_reads_ont = pl.col('ont').sum())
+                    .with_columns(metric_reads_offt = pl.col('ont').not_().sum())
+                    .with_columns(metric_fraction_ont = pl.col('ont').mean())
+                    .with_columns(metric_fraction_offt = pl.col('ont').not_().mean())
+                    # UMI validation - check if prefix length matches expected
+                    .with_columns(pl.col('r1_seq')
+                                  .str.extract(f'(.*?){anchor_ont}$',1) 
+                                  .str.len_chars()
+                                  .fill_null(0)
+                                  .alias('valid_umi')
+                                  )
+                    .with_columns((pl.col('valid_umi')==expected_len).alias('valid_umi'))
+                    .with_columns(pl.len().over('umi').alias('reads'))
+            )
+        else:
+            # For single-molecule: r1_seq structure is umi + sbc
+            expected_len = umi_len + sbc_len
+            return(
                 self._ldf
                     .with_columns(pl.col('r1_seq').str.slice(0, umi_len).alias('umi'))
                     .with_columns(pl.col('r1_seq').str.slice(umi_len, sbc_len).alias('sbc'))
@@ -417,19 +468,16 @@ class PllPipeline:
                     .with_columns(metric_reads_offt = pl.col('ont').not_().sum())
                     .with_columns(metric_fraction_ont = pl.col('ont').mean())
                     .with_columns(metric_fraction_offt = pl.col('ont').not_().mean())
-                    #.filter(pl.col('ont'))
                     # UMI validation
                     .with_columns(pl.col('r1_seq')
-                                  # making this more strict to expect the on-target sequence in the end 
-                                  #.str.extract(f'(.*?){anchor_ont}.*$',1)
                                   .str.extract(f'(.*?){anchor_ont}$',1) 
                                   .str.len_chars()
                                   .fill_null(0)
                                   .alias('valid_umi')
                                   )
-                    .with_columns((pl.col('valid_umi')==umi_len+sbc_len).alias('valid_umi'))
+                    .with_columns((pl.col('valid_umi')==expected_len).alias('valid_umi'))
                     .with_columns(pl.len().over('umi').alias('reads'))
-                )    
+            )    
 
     def parse_read1(self, anchor_ont):
         """ Optional step for parsing also read 1. 
@@ -448,12 +496,33 @@ class PllPipeline:
                                   )
                 )
 
-    def ont_to_paired_format(self, umi_len: int, sbc_len: int, anchor_orient: str, anchor_ont:str, wildcard= '.{0,4}') -> pl.LazyFrame:
-        """Convert ONT BAM data to FRACTURE's expected R1/R2 format (LazyFrame)"""
+    def ont_to_paired_format(self, umi_len: int, sbc_len: int, anchor_orient: str, anchor_ont:str, modality: str = 'single-molecule', cbc_len: int = 16, wildcard= '.{0,4}', do_rev_comp: bool = False) -> pl.LazyFrame:
+        """Convert ONT BAM data to FRACTURE's expected R1/R2 format (LazyFrame)
+        
+        Args:
+            umi_len: Length of UMI sequence
+            sbc_len: Length of sample barcode (set to 0 for single-cell data)
+            anchor_orient: Anchor sequence for read orientation
+            anchor_ont: ONT anchor sequence for trimming
+            modality: 'single-cell' or 'single-molecule'
+            cbc_len: Length of cell barcode (only used for single-cell data)
+            wildcard: Regex wildcard pattern for fuzzy matching
+            do_rev_comp: Apply reverse complement to R2 sequence
+        """
         anchor_ont_l = len(anchor_ont)
-        trim_range = umi_len + sbc_len + anchor_ont_l
-        self.logger.debug(f"{trim_range=}")
-        self.logger.debug(f"{umi_len=} {sbc_len=} {anchor_ont_l=} {anchor_ont}")
+        
+        # For single-cell data, the compound UMI structure is: cell_barcode + umi
+        # For single-molecule data, the structure is: umi + sample_barcode
+        if modality == 'single-cell':
+            # For single-cell: cbc + umi (no sample barcode)
+            trim_range = cbc_len + umi_len + anchor_ont_l
+            self.logger.debug(f"Single-cell mode: {cbc_len=} {umi_len=} {anchor_ont_l=} {trim_range=}")
+        else:
+            # For single-molecule: umi + sbc
+            trim_range = umi_len + sbc_len + anchor_ont_l
+            self.logger.debug(f"Single-molecule mode: {umi_len=} {sbc_len=} {anchor_ont_l=} {trim_range=}")
+        
+        self.logger.debug(f"{modality=} {anchor_ont=}")
 
         fuzzy_anchor_pattern = fuzzy_match_str(anchor_orient, wildcard=wildcard)
 
@@ -515,9 +584,15 @@ class PllPipeline:
             # Step 5: Extract UMI/SBC from clean sequences
             .with_columns([
                 pl.col('trimmed_sequence').str.slice(0, trim_range).alias('r1_seq'),
-                pl.col('trimmed_sequence').str.slice(trim_range).alias('r2_seq'),
+                pl.when(do_rev_comp)
+                .then(pl.col('trimmed_sequence').str.slice(trim_range).dna.reverse_complement()) #pyright:ignore
+                .otherwise(pl.col('trimmed_sequence').str.slice(trim_range))
+                .alias('r2_seq'),
                 pl.col('trimmed_quality').str.slice(0, trim_range).alias('r1_qual'),
-                pl.col('trimmed_quality').str.slice(trim_range).alias('r2_qual')
+                pl.when(do_rev_comp)
+                .then(pl.col('trimmed_quality').str.slice(trim_range).str.reverse())
+                .otherwise(pl.col('trimmed_quality').str.slice(trim_range))
+                .alias('r2_qual')
             ])
             .rename({'name':'read_id'})
             #.select(['read_id', 'r1_seq', 'r1_qual', 'r2_seq', 'r2_qual', 'normalized_sequence', 'trim_pos'])

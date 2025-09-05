@@ -15,6 +15,7 @@ class FractureXp(Xp):
     modality: str
     umi_len: int
     sbc_len: int
+    cbc_len: int
     rev_comp: bool
     anchor_ont: str
     samples: List[str]
@@ -39,6 +40,16 @@ class FractureXp(Xp):
         self.make_test = getattr(self, 'make_test', False)
         self.parse_read1 = getattr(self, 'parse_read1', False)
         self.sbc_len = getattr(self, 'sbc_len', 6)
+        
+        # Set defaults based on modality
+        modality = getattr(self, 'modality', 'single-molecule')
+        if modality == 'single-cell':
+            # For single-cell data: no sample barcode, set cell barcode length
+            self.sbc_len = getattr(self, 'sbc_len', 0)  # Override default for single-cell
+            self.cbc_len = getattr(self, 'cbc_len', 16)  # Default cell barcode length
+        else:
+            # For single-molecule data: standard settings
+            self.cbc_len = getattr(self, 'cbc_len', 0)  # No cell barcode for single-molecule
 
         if not hasattr(self, 'anchor_ont'):
             raise ValueError("Missing required parameter 'anchor_ont' for BAM processing")
