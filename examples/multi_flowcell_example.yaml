@@ -1,0 +1,62 @@
+# Example: Multi-flowcell ONT experiment configuration
+# This demonstrates how to configure dorado basecalling with sample-specific barcode directories
+
+system:
+  prefixes:
+    wexac: "/home/projects/nyosef/pedro/"
+  default: "wexac"
+
+project: "20250824_multi_flowcell"
+xp_template: "${prefix}/projects/lt/conf/ontCarlin_xp_template.yml"
+
+# Override preprocessing to specify sample-specific barcode directories
+pp:
+  dorado:
+    # Map biological samples to their specific barcode directories across flowcells
+    # This handles cases where the same sample gets different barcodes in different runs
+    sample_barcode_dirs:
+      # Sample A was barcode01 in flowcell1, barcode03 in flowcell2, barcode05 in flowcell3
+      "sampleA":
+        - "${prefix}/projects/lt/datain/pilotII/flowcell1/20250823_1242_MD-103005_FBD78435_f740859c/pod5_pass/barcode01/"
+        - "${prefix}/projects/lt/datain/pilotII/flowcell2/20250824_1356_MD-103006_ABC12345_a1b2c3d4/pod5_pass/barcode03/"
+        - "${prefix}/projects/lt/datain/pilotII/flowcell3/20250825_0923_MD-103007_DEF67890_e5f6g7h8/pod5_pass/barcode05/"
+      
+      # Sample B was barcode02 in flowcell1, barcode01 in flowcell2, barcode04 in flowcell3  
+      "sampleB":
+        - "${prefix}/projects/lt/datain/pilotII/flowcell1/20250823_1242_MD-103005_FBD78435_f740859c/pod5_pass/barcode02/"
+        - "${prefix}/projects/lt/datain/pilotII/flowcell2/20250824_1356_MD-103006_ABC12345_a1b2c3d4/pod5_pass/barcode01/"
+        - "${prefix}/projects/lt/datain/pilotII/flowcell3/20250825_0923_MD-103007_DEF67890_e5f6g7h8/pod5_pass/barcode04/"
+      
+      # Sample C was only in flowcell1 and flowcell3
+      "sampleC":
+        - "${prefix}/projects/lt/datain/pilotII/flowcell1/20250823_1242_MD-103005_FBD78435_f740859c/pod5_pass/barcode04/"
+        - "${prefix}/projects/lt/datain/pilotII/flowcell3/20250825_0923_MD-103007_DEF67890_e5f6g7h8/pod5_pass/barcode02/"
+    
+    # Override model if needed
+    model: "hac"  # Use high-accuracy instead of super-accurate for faster processing
+    # Use different GPU
+    device: "cuda:1"
+
+# Standard fracture parameters
+modality: "single-molecule"  # For ONT data - use 'single-molecule'
+umi_len: 12
+sbc_len: 6
+allow_wildcards: 5
+
+# Pipeline steps - include dorado first
+steps:
+  - dorado      # Basecall POD5s from sample-specific barcode directories
+  - parquet     # Convert consolidated BAMs to parquet
+  - preprocess  # Process molecules
+  - fracture    # Assemble contigs
+
+# Samples to process (must match keys in sample_barcode_dirs)
+samples:
+  - id: "sampleA"
+  - id: "sampleB"  
+  - id: "sampleC"
+
+target_sample: "sampleA"
+
+extensions:
+  - cassiopeia_lineage
