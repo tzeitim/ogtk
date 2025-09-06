@@ -77,6 +77,9 @@ def run_bcl2fq(xp, force=False, dry=False, **args):
     if not dry:
         if os.path.exists(done_token) and not force:
             return(0)
+        elif os.path.exists(done_token) and force:
+            logger.info("Forcing bcl2fastq re-run - removing existing completion token")
+            os.remove(done_token)
 
         p1 = subprocess.run(cmd.split(),
                             shell=False,
@@ -186,6 +189,9 @@ def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
         if os.path.exists(done_token) and not force:
             logger.info("Dorado basecalling already completed")
             return 0
+        elif os.path.exists(done_token) and force:
+            logger.info("Forcing dorado re-run - removing existing completion token")
+            os.remove(done_token)
 
     # Process each barcode directory
     commands = []
@@ -327,9 +333,50 @@ def _submit_dorado_lsf_jobs(xp, commands, dorado_template, done_token):
             return 1
     
     logger.info(f"Submitted {len(job_ids)} jobs to LSF. Job IDs: {job_ids}")
-    logger.info("Done token will be created automatically when the last job completes")
     
-    return 0
+    # Check if we should wait for jobs to complete (default: False for non-blocking behavior)
+    wait_for_completion = dorado_template.get('wait_for_completion', False)
+    
+    if wait_for_completion:
+        logger.info("Monitoring LSF jobs until completion...")
+        result = _monitor_lsf_jobs(job_ids, done_token, dorado_template.get('poll_interval', 30), 
+                                 dorado_template.get('max_wait_hours', 24))
+        return result
+    else:
+        logger.info("Done token will be created automatically when the last job completes")
+        logger.info("Pipeline will continue without waiting for LSF jobs")
+        return 0
+
+
+def _monitor_lsf_jobs(job_ids, done_token, poll_interval=30, max_wait_hours=24):
+    '''Monitor LSF jobs by checking for completion token'''
+    import time
+    import os
+    
+    logger = Rlogger().get_logger()
+    max_wait_seconds = max_wait_hours * 3600
+    start_time = time.time()
+    
+    logger.info(f"Waiting for done token: {done_token}")
+    logger.info(f"Polling every {poll_interval}s (max wait: {max_wait_hours}h)")
+    
+    while True:
+        # Check if done token exists
+        if os.path.exists(done_token):
+            logger.info("Done token found - dorado basecalling completed")
+            return 0
+        
+        # Check timeout
+        elapsed = time.time() - start_time
+        if elapsed > max_wait_seconds:
+            logger.error(f"Timeout after {max_wait_hours} hours waiting for completion token")
+            return 1
+        
+        # Log progress every 10 polls
+        if int(elapsed / poll_interval) % 10 == 0:
+            logger.info(f"Still waiting for completion... (elapsed: {elapsed/60:.1f}min)")
+        
+        time.sleep(poll_interval)
 
 
 def _prepare_sample_specific_input(xp, dorado_conf, dorado_template, logger):
@@ -872,6 +919,9 @@ def run_cranger(xp, force=False, dry=False, **args):
     if not dry:
         if os.path.exists(done_token) and not force:
             return(0)
+        elif os.path.exists(done_token) and force:
+            logger.info("Forcing cellranger re-run - removing existing completion token")
+            os.remove(done_token)
 
         p1 = subprocess.run(cmd.split(), 
                             shell=False, 
