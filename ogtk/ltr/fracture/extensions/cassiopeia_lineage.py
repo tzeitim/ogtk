@@ -15,6 +15,8 @@ def plug_cassiopeia(
         ann_intbc_mod: pl.DataFrame,
         workdir: Path|str ='.',
         logger: None|CustomLogger=  None,
+        modality: str = 'single-molecule',
+        cbc_len: int = 16,
         barcode_interval: List|Tuple = (0, 7),
         cutsite_locations: List =  [40, 67, 94, 121, 148, 175, 202, 229, 256, 283],
         cutsite_width: int = 12,
@@ -39,25 +41,54 @@ def plug_cassiopeia(
         'context_size': context_size,
     }
 
-    cass_ldf = (
+    if modality == 'single-cell':
+        # For single-cell: extract cell barcode from compound UMI, keep full UMI
+        cass_ldf = (
             ldf.with_columns(
-            readName=pl.col('umi'),
-            cellBC=pl.col('umi'), 
-            UMI=pl.col('umi'),
-            readCount=pl.col('reads'),
-            seq=pl.col('intBC')+pl.col('contig'),
+                readName=pl.col('umi'),
+                cellBC=pl.col('umi').str.slice(0, cbc_len),  # Extract cell barcode portion
+                UMI=pl.col('umi'),                           # Keep compound UMI (cbc+umi) 
+                readCount=pl.col('reads'),
+                seq=pl.col('intBC')+pl.col('contig'),
+            )
+            .select('readName', 'cellBC', 'UMI', 'readCount', 'seq', 'intBC')
+            .join(ann_intbc_mod.lazy(), left_on='intBC', right_on='intBC', how='inner')
+        )
+    else:
+        # For single-molecule: duplicate UMI as cellBC (existing behavior)
+        cass_ldf = (
+            ldf.with_columns(
+                readName=pl.col('umi'),
+                cellBC=pl.col('umi'),                        # Duplicate UMI as fake cellBC
+                UMI=pl.col('umi'),
+                readCount=pl.col('reads'),
+                seq=pl.col('intBC')+pl.col('contig'),
             )
             .select('readName', 'cellBC', 'UMI', 'readCount', 'seq', 'intBC', 'sbc')
-            #TODO: change `how`?
             .join(ann_intbc_mod.lazy(), left_on='intBC', right_on='intBC', how='inner')
-    )
+        )
 
     res = []
     umi_tables = []
     nones = 0
 
 
-    for (intBC, mod, sbc), queries in cass_ldf.collect().partition_by('intBC', 'mod', 'sbc', as_dict=True).items():
+    # Choose partition columns based on modality
+    if modality == 'single-cell':
+        partition_cols = ['intBC', 'mod']  # No sample barcode for single-cell
+        extra_cols = {}
+    else:
+        partition_cols = ['intBC', 'mod', 'sbc'] 
+        extra_cols = {}
+    
+    for partition_key, queries in cass_ldf.collect().partition_by(partition_cols, as_dict=True).items():
+        # Handle both single value (when partitioning by 2 cols) and tuple (when partitioning by 3 cols)
+        if len(partition_cols) == 2:
+            intBC, mod = partition_key
+            sbc = None
+        else:
+            intBC, mod, sbc = partition_key
+            
         if mod is None:
             nones+=1
         else:
@@ -81,7 +112,8 @@ def plug_cassiopeia(
             # include colums dropped by cass?
             allele_table['intBC'] = intBC
             allele_table['mod'] = mod
-            allele_table['sbc'] = sbc
+            if sbc is not None:
+                allele_table['sbc'] = sbc
 
             umi_tables.append(umi_table.copy())
             #self.xp.logger.info(f"found {umi_table['intBC'].n_unique()} integrations for {mod}")
@@ -102,17 +134,23 @@ def save_ref_to_fasta(refs, out_dir='.', field='mod') -> None :
             refs.filter(pl.col(field)==i).dna.to_fasta(read_id_col=field, read_col='seq').get_column('seq_fasta')[0]
             )
 
-def kmer_classify_cassettes(ldf, refs: pl.DataFrame, K: int = 25) -> StepResults:
+def kmer_classify_cassettes(ldf, refs: pl.DataFrame, K: int = 25, modality: str = 'single-molecule') -> StepResults:
     """ Annotates contigs based on the top occurring mod based on kmer matches """
 
     k_ref = refs.kmer.explode_kmers(k=K, seq_field='seq')
+
+    # Choose grouping columns based on modality
+    if modality == 'single-cell':
+        group_cols = ['intBC', 'mod']  # No sample barcode for single-cell
+    else:
+        group_cols = ['intBC', 'mod', 'sbc']
 
     cont_k = (
         ldf
         .kmer.explode_kmers(k=K, seq_field='contig', only_unique=False)
         .filter(pl.col('kmer').is_in(set(k_ref.get_column('kmer').to_list())))
         .join(k_ref.drop('seq').lazy(), left_on='kmer', right_on='kmer', how='inner')
-        .group_by('intBC', 'mod', 'sbc')
+        .group_by(group_cols)
                 .agg(fps=pl.col('umi').n_unique())
         .group_by('intBC', 'mod')
                 .agg(fps=pl.col('fps').sum())
@@ -179,6 +217,8 @@ class CassiopeiaConfig(ExtensionConfig):
     int_anchor2: str
     
     # Optional fields with defaults
+    modality: str = 'single-molecule'  # 'single-cell' or 'single-molecule'
+    cbc_len: int = 16                  # Cell barcode length (for single-cell)
     sbc_dict: Optional[Dict] = None
     annotation: str = 'sbc'
     refs_fasta_path: Optional[str] = None
@@ -322,7 +362,8 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         """ Guesses what reference a given intBC corresponds to based on kmer composition analysis"""
         return kmer_classify_cassettes(
                 ldf=self.ldf, 
-                refs=self.refs, 
+                refs=self.refs,
+                modality=self.config.modality,
                 **self.config.get_function_config(kmer_classify_cassettes)
                 )
 
