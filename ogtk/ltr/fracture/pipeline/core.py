@@ -779,13 +779,38 @@ class Pipeline:
             for key,in_file in in_files.items():
                 if not self.xp.dry:
                     self.logger.info(f'Reading {in_file}')
+
+                    ldf = pl.scan_parquet(in_file)
+
+                    # Apply masking if configured
+                    if hasattr(self.xp, 'features_csv') and self.xp.features_csv:
+                        self.logger.info(f"Masking repetitive sequences using {self.xp.features_csv}")
+                        n_reads = ldf.select(pl.len()).collect().item()
+
+                        ldf = ldf.pp.mask_repeats(
+                            features_csv=self.xp.features_csv,
+                            column_name='r2_seq',
+                            fuzzy_pattern=getattr(self.xp, 'mask_fuzzy_pattern', True),
+                            fuzzy_kwargs=getattr(self.xp, 'mask_fuzzy_kwargs', None)
+                        )
+
+                        self.logger.info(f"Applied masking to {n_reads} reads")
+
+                        if getattr(self.xp, 'save_intermediate_files', False):
+                            intermediate_dir = Path(self.xp.sample_wd) / 'intermediate'
+                            intermediate_dir.mkdir(exist_ok=True)
+                            masked_file = intermediate_dir / f"masked_reads_{key}.parquet"
+                            self.logger.info(f"Saving masked reads to {masked_file}")
+                            ldf.sink_parquet(str(masked_file))
+                            ldf = pl.scan_parquet(str(masked_file))
+
                     out_file = f"{self.xp.sample_wd}/contigs_pl_direct_{key}.parquet" #pyright:ignore
                     self.logger.info(f"exporting assembled contigs to {out_file}")
-                    
+
                     filter_expr= pl.col('reads')>=self.xp.fracture['min_reads']
 
                     df_contigs = (
-                            pl.scan_parquet(in_file)
+                            ldf
                             .filter(filter_expr)
                             .pp.assemble_umis( #pyright: ignore
                               k=self.xp.fracture['start_k'], 
