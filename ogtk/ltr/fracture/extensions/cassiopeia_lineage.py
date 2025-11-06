@@ -6,6 +6,7 @@ from .base import PostProcessorExtension
 from .registry import extension_registry
 from .config import ExtensionConfig
 from ..pipeline.types import StepResults,FractureXp
+from ..pipeline.masking import generate_mask_PEtracer_expression
 from dataclasses import dataclass, field
 from ogtk.utils.log import CustomLogger
 from ogtk.utils.general import fuzzy_match_str
@@ -54,6 +55,8 @@ def plug_cassiopeia(
             .select('readName', 'cellBC', 'UMI', 'readCount', 'seq', 'intBC')
             .join(ann_intbc_mod.lazy(), left_on='intBC', right_on='intBC', how='inner')
         )
+        if logger:
+            logger.debug("Single-cell mode: using cellBC instead of sbc")
     else:
         # For single-molecule: duplicate UMI as cellBC (existing behavior)
         cass_ldf = (
@@ -81,7 +84,21 @@ def plug_cassiopeia(
         partition_cols = ['intBC', 'mod', 'sbc'] 
         extra_cols = {}
     
-    for partition_key, queries in cass_ldf.collect().partition_by(partition_cols, as_dict=True).items():
+    if logger:
+        logger.debug(f"Using modality: {modality}, partition columns: {partition_cols}")
+        
+    collected_df = cass_ldf.collect()
+    if logger:
+        logger.debug(f"Collected dataframe shape: {collected_df.shape}")
+        if collected_df.height > 0:
+            logger.debug(f"Available columns: {collected_df.columns}")
+            logger.debug(f"Sample of data:\n{collected_df.head(3)}")
+        
+    partitions = collected_df.partition_by(partition_cols, as_dict=True)
+    if logger:
+        logger.info(f"Found {len(partitions)} partitions to process")
+    
+    for partition_key, queries in partitions.items():
         # Handle both single value (when partitioning by 2 cols) and tuple (when partitioning by 3 cols)
         if len(partition_cols) == 2:
             intBC, mod = partition_key
@@ -122,8 +139,20 @@ def plug_cassiopeia(
                 pl.DataFrame(allele_table).with_columns(mod=pl.lit(mod), mols=allele_table.shape[0])
                 )
 
+    if logger:
+        logger.info(f"Processed partitions: {len(res)} successful, {nones} with None mod")
+    
+    if not res:
+        # Return empty results if no valid allele tables were generated
+        logger.warning("No valid allele tables generated - returning empty results")
+        return StepResults(
+            results={"alleles_pl": pl.DataFrame(), "alleles_pd": []},
+            metrics={"processed_partitions": 0, "none_partitions": nones}
+        )
+    
     return StepResults(
-            results={"alleles_pl" : pl.concat(res), "alleles_pd" : umi_tables}
+            results={"alleles_pl" : pl.concat(res), "alleles_pd" : umi_tables},
+            metrics={"processed_partitions": len(res), "none_partitions": nones}
     )
 
 def save_ref_to_fasta(refs, out_dir='.', field='mod') -> None : 
@@ -168,13 +197,14 @@ def parse_contigs(
         ldf: pl.LazyFrame,
         int_anchor1: str,
         int_anchor2 : str,
+        modality: str = 'single-molecule',
         sbc_dict: Optional[Dict] = None,
         annotation:str = 'sbc',
         ) ->StepResults:
     """Extracts integration barcodes (intBC) and sample barcodes (sbc)."""
     
-    # 1. Extract/use sbcs
-    if sbc_dict is not None:
+    # 1. Extract/use sbcs (only for single-molecule data)
+    if modality == 'single-molecule' and sbc_dict is not None:
         ldf = ldf.with_columns(pl.col('sbc').replace(sbc_dict).alias(annotation))
     
     # 2. Extract intBC
@@ -219,6 +249,7 @@ class CassiopeiaConfig(ExtensionConfig):
     # Optional fields with defaults
     modality: str = 'single-molecule'  # 'single-cell' or 'single-molecule'
     cbc_len: int = 16                  # Cell barcode length (for single-cell)
+    force: bool = False                # Force re-processing of existing files
     sbc_dict: Optional[Dict] = None
     annotation: str = 'sbc'
     refs_fasta_path: Optional[str] = None
@@ -363,7 +394,6 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         return kmer_classify_cassettes(
                 ldf=self.ldf, 
                 refs=self.refs,
-                modality=self.config.modality,
                 **self.config.get_function_config(kmer_classify_cassettes)
                 )
 
@@ -517,174 +547,6 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         pass
 
 
-def generate_mask_PEtracer_expression(features_csv,
-                                      column_name="seq",
-                                      fuzzy_pattern:bool = True,
-                                      fuzzy_kwargs:dict = None,
-                                      logger: None|CustomLogger = None
-                                      ) -> pl.Expr:
-    """
-    Generate a Polars expression to replace TARGET sequences with scrambled versions
-    based on preceding META sequences.
-
-    Example of usage:
-        expr = generate_mask_PEtracer_expression(
-            'features.csv',
-            fuzzy_pattern=True,
-            fuzzy_kwargs={
-                'wildcard': '.{0,2}',      # Allow up to 2 character variations
-                'include_original': False,  # Don't include exact match
-                'sep': '|',                # Use pipe separator
-                'max_length': 150          # Only fuzzify sequences up to 150 chars
-            }
-        )
-    
-    Expected csv format:
-        feature,seq,kind
-        META01,AGAAGCCGTGTGCCGGTCTA,META
-        META02,ATCGTGCGGACGAGACAGCA,META
-        RNF2,TGGCAGTCATCTTAGTCATTACGACAGGTGTTCGTTGTAACTCATATA,TARGET
-        HEK3,CTTGGGGCCCAGACTGAGCACGACTTGGCAGAGGAAAGGAAGCCCTGCTTCCTCCAGAGGGCGTCGCA,TARGET
-        EMX1,GGCCTGAGTCCGAGCAGAAGAACTTGGGCTCCCATCACATCAACCGGTGG,TARGET
-    
-    Args:
-        features_csv: Path to CSV file containing feature definitions
-        column_name: Name of the column to apply replacements to (default: "seq")
-        fuzzy_pattern: Whether to perform fuzzy string matching to account for sequencing errors
-        fuzzy_kwargs: Dictionary of keyword arguments to pass to fuzzy_match_str function
-                     Supported keys: wildcard, include_original, sep, max_length
-                     
-    Returns:
-        pl.Expr: Polars expression with chained replacements
-       
-    Usage:
-        # Basic usage
-        expr = generate_mask_PEtracer_expression('features.csv')
-        
-        # With custom fuzzy matching parameters
-        expr = generate_mask_PEtracer_expression(
-            'features.csv',
-            fuzzy_pattern=True,
-            fuzzy_kwargs={
-                'wildcard': '.{0,2}',  # Allow up to 2 character variations
-                'include_original': False,  # Don't include exact match
-                'max_length': 100  # Only fuzzify sequences up to 100 chars
-            }
-        )
-        
-        result = (
-            df.lazy()
-            .with_columns(expr.alias("result"))
-            .collect()
-        )
-    """
-    import polars as pl
-    import random
-    
-    if fuzzy_kwargs is None:
-        fuzzy_kwargs = {}
-    
-    def fuzzy_match_str(string, wildcard=".{0,1}", include_original=True, sep='|', max_length=200):
-        """Generate fuzzy regex pattern allowing single character variations.
-        
-        Args:
-            string: Input string to fuzzify
-            wildcard: Regex pattern for character substitution
-            include_original: Whether to include exact match
-            sep: Separator for alternatives
-            max_length: Skip fuzzy variants for strings longer than this
-            
-        Returns:
-            Regex pattern string for fuzzy matching
-        """
-        if not string:
-            return string
-            
-        fuzz = []
-        if include_original:
-            fuzz.append(string)
-            
-        # Skip fuzzy generation for very long strings to avoid performance issues
-        if len(string) <= max_length:
-            for i in range(len(string)):
-                # Use list comprehension + join instead of character-by-character building
-                variant = ''.join(wildcard if j == i else c for j, c in enumerate(string))
-                fuzz.append(variant)
-                
-        return sep.join(fuzz)
-    
-    def scramble_dna_sequence(seed_string, sequence, fuzzy_pattern):
-        """
-        Scramble a DNA sequence using a deterministic seed.
-        """
-        seed = hash(seed_string) % (2**32)  # Ensure positive 32-bit integer
-        random.seed(seed)
-        seq_list = list(sequence.upper())
-        random.shuffle(seq_list)
-        scrambled_seq = ''.join(seq_list)
-        if fuzzy_pattern:
-            return fuzzy_match_str(scrambled_seq, **fuzzy_kwargs)
-        return scrambled_seq 
-    
-    meta = pl.read_csv(features_csv)
-    
-    patterns_df = (
-        meta
-        .filter(pl.col('kind') == 'META')
-        .join(
-            meta.filter(pl.col('kind') == 'TARGET'),
-            suffix="_target",
-            how='cross'
-        )
-        .with_columns(
-            # Generate scrambled sequence for each META-TARGET combination
-            # Original version (META-specific): 
-            # lambda x: scramble_dna_sequence(x['feature'], x['seq_target'])
-            pl.struct(['feature', 'feature_target']).map_elements(
-                lambda x: scramble_dna_sequence(
-                    seed_string = f"{x['feature']}_{x['feature_target']}", 
-                    sequence  = meta.filter(pl.col('feature') == x['feature_target']).get_column('seq')[0],
-                    fuzzy_pattern = fuzzy_pattern),
-                return_dtype=pl.Utf8
-                ).alias("scrambled_seq")
-            )
-        .with_columns(
-            # pattern = rf"("+pl.col('seq')+")(.*?)("+pl.col('seq_target')+")(.*$)",
-            # replacement = rf"$1${{2}}"+pl.col('scrambled_seq')+"$4"
-            pattern=pl.concat_str([
-                pl.lit("("),
-                pl.col('seq'),  # META sequence
-                pl.lit(")(.*?)("),
-                pl.col('seq_target'),  # TARGET sequence
-                pl.lit(")(.*$)")
-            ]),
-            replacement=pl.concat_str([
-                pl.lit("$1${2}"),
-                pl.col('scrambled_seq'),
-                pl.lit("$4")
-            ])
-        )
-    )
-    
-    if logger is not None:
-        logger.debug(f"Generated {len(patterns_df)} replacement patterns")
-        if len(patterns_df) > 0:
-            logger.debug("Sample patterns:")
-            sample = patterns_df.head(3).select(['feature', 'feature_target', 'pattern', 'replacement'])
-            for row in sample.iter_rows(named=True):
-                logger.debug(f"  {row['feature']} + {row['feature_target']}: {row['pattern'][:60]}...")
-                logger.debug(f"    -> {row['replacement'][:60]}...")
-    
-    # Build the chained expression
-    expr = pl.col(column_name)
-    
-    for row in patterns_df.iter_rows(named=True):
-        pattern = row['pattern']
-        replacement = row['replacement']
-        expr = expr.str.replace(pattern, replacement)
-    
-    print(f"Built expression with {len(patterns_df)} chained replacements")
-    return expr
 # Register the extension
 extension_registry.register(CassiopeiaLineageExtension)
 
