@@ -4,6 +4,7 @@ import rogtk
 
 from ogtk.utils.log import Rlogger, call
 from ogtk.utils.general import fuzzy_match_str
+from .masking import generate_mask_PEtracer_expression
 
 __all__ = [
         'PlDNA',
@@ -598,6 +599,76 @@ class PllPipeline:
             #.select(['read_id', 'r1_seq', 'r1_qual', 'r2_seq', 'r2_qual', 'normalized_sequence', 'trim_pos'])
             .select(['read_id', 'r1_seq', 'r1_qual', 'r2_seq', 'r2_qual', 'trim_pos'])
         )
+
+    def mask_repeats(self,
+                     features_csv: str,
+                     column_name: str = 'r2_seq',
+                     fuzzy_pattern: bool = True,
+                     fuzzy_kwargs: dict = None) -> pl.LazyFrame:
+        """
+        Mask repetitive sequences based on META-TARGET pairs.
+
+        This is useful for very long cassettes with direct repeats that exceed
+        the kmer length limit (typically 64 bases in rogtk). By replacing
+        repetitive TARGET sequences with deterministic scrambled versions based
+        on their preceding META context, the kmer-based assembler can work on
+        unique/variable regions while preserving structural information.
+
+        Args:
+            features_csv: Path to CSV file with META and TARGET sequences
+
+                         Expected CSV format (3 columns: feature, seq, kind):
+
+                         feature,seq,kind
+                         META01,AGAAGCCGTGTGCCGGTCTA,META
+                         META02,ATCGTGCGGACGAGACAGCA,META
+                         RNF2,TGGCAGTCATCTTAGTCATTACGACAGGTGTTCGTTGTAACTCATATA,TARGET
+                         HEK3,CTTGGGGCCCAGACTGAGCACGACTTGGCAGAGGAAAGGAAGCCCTGCTTCCTCCAGAGGGCGTCGCA,TARGET
+
+                         - META sequences are anchors that precede TARGET sequences
+                         - TARGET sequences will be replaced with scrambled versions when preceded by a META
+                         - Scrambling is deterministic: same META+TARGET pair always produces same result
+
+            column_name: Column containing sequences to mask (default: 'r2_seq')
+            fuzzy_pattern: Whether to use fuzzy matching for sequencing errors (default: True)
+            fuzzy_kwargs: Optional dict with fuzzy matching parameters:
+                         - wildcard: Regex for character substitution (default: '.{0,1}')
+                         - include_original: Include exact match (default: True)
+                         - sep: Separator for alternatives (default: '|')
+                         - max_length: Only fuzzify sequences up to this length (default: 200)
+
+        Returns:
+            LazyFrame with masked sequences
+
+        Example:
+            # Basic usage
+            df = (
+                pl.scan_parquet('parsed_reads.parquet')
+                .pp.mask_repeats('features.csv', column_name='r2_seq')
+                .pp.assemble_umis(k=15, min_coverage=20)
+            )
+
+            # With custom fuzzy matching
+            df = (
+                pl.scan_parquet('parsed_reads.parquet')
+                .pp.mask_repeats(
+                    'features.csv',
+                    fuzzy_kwargs={'wildcard': '.{0,2}', 'max_length': 150}
+                )
+                .pp.assemble_umis(k=15, min_coverage=20)
+            )
+
+        See Also:
+            ogtk.ltr.fracture.pipeline.masking.generate_mask_PEtracer_expression
+        """
+        mask_expr = generate_mask_PEtracer_expression(
+            features_csv=features_csv,
+            column_name=column_name,
+            fuzzy_pattern=fuzzy_pattern,
+            fuzzy_kwargs=fuzzy_kwargs,
+            logger=self.logger
+        )
+        return self._ldf.with_columns(mask_expr.alias(column_name))
 
 
 # TODO

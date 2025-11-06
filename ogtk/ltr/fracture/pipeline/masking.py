@@ -54,13 +54,22 @@ def generate_mask_PEtracer_expression(features_csv: str,
     deterministic scrambled versions based on their preceding META context, the
     assembler can work on unique/variable regions while preserving the structure.
 
-    Expected CSV format:
+    Expected CSV format (3 columns: feature, seq, kind):
         feature,seq,kind
         META01,AGAAGCCGTGTGCCGGTCTA,META
         META02,ATCGTGCGGACGAGACAGCA,META
         RNF2,TGGCAGTCATCTTAGTCATTACGACAGGTGTTCGTTGTAACTCATATA,TARGET
         HEK3,CTTGGGGCCCAGACTGAGCACGACTTGGCAGAGGAAAGGAAGCCCTGCTTCCTCCAGAGGGCGTCGCA,TARGET
         EMX1,GGCCTGAGTCCGAGCAGAAGAACTTGGGCTCCCATCACATCAACCGGTGG,TARGET
+
+    How it works:
+        - META sequences are anchors that identify context
+        - TARGET sequences are the repetitive elements to be masked
+        - When pattern (META)(.*?)(TARGET) is found, TARGET is replaced with a
+          scrambled version unique to that META+TARGET combination
+        - Example: If sequence contains META01 followed by RNF2, the RNF2 portion
+          will be replaced with a scrambled sequence deterministically generated
+          from hash("META01_RNF2")
 
     Args:
         features_csv: Path to CSV file containing feature definitions
