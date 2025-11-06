@@ -152,9 +152,17 @@ def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
         dorado_template[k] = dorado_conf[k]
         logger.debug(f'setting {k}\t-->\t{dorado_template[k]}')
 
-    # Sanitize types
+    # Sanitize types (preserve booleans for certain keys)
+    boolean_keys = {'wait_for_completion', 'use_lsf', 'dry_run'}
     for k, v in dorado_template.items():
-        dorado_template[k] = str(v)
+        if k in boolean_keys:
+            # Handle boolean strings properly
+            if isinstance(v, str):
+                dorado_template[k] = v.lower() in ('true', '1', 'yes', 'on')
+            else:
+                dorado_template[k] = bool(v)
+        else:
+            dorado_template[k] = str(v)
 
     logger.debug(f"Dorado config: {dorado_conf}")
     logger.debug(f"Dorado template: {dorado_template}")
@@ -306,7 +314,7 @@ def _submit_dorado_lsf_jobs(xp, commands, dorado_template, done_token):
             '-R', f"rusage[mem={dorado_template.get('lsf_mem', '64GB')}]",
             '-o', f"{xp.sample_logs}/dorado_{barcode}.lsf.out",
             '-e', f"{xp.sample_logs}/dorado_{barcode}.lsf.err",
-            '-J', f"dorado_{barcode}_{xp.target_sample}",
+            '-J', f"dorado_{barcode}",
             cmd
         ]
         
