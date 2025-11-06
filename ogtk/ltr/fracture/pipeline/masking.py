@@ -176,3 +176,107 @@ def generate_mask_PEtracer_expression(features_csv: str,
 
     print(f"Built expression with {len(patterns_df)} chained replacements")
     return expr
+
+
+def generate_unmask_PEtracer_expression(features_csv: str,
+                                        column_name: str = "contig",
+                                        fuzzy_pattern: bool = True,
+                                        fuzzy_kwargs: Optional[dict] = None,
+                                        logger: Optional[CustomLogger] = None
+                                        ) -> pl.Expr:
+    """
+    Generate a Polars expression to restore original TARGET sequences from scrambled versions.
+
+    This reverses the masking operation performed by generate_mask_PEtracer_expression().
+    After assembly, contigs contain scrambled TARGET sequences which need to be restored
+    to their original form for downstream analysis.
+
+    Args:
+        features_csv: Path to CSV file containing feature definitions (same as used for masking)
+        column_name: Name of the column to apply replacements to (default: "contig")
+        fuzzy_pattern: Whether fuzzy matching was used during masking
+        fuzzy_kwargs: Dictionary of keyword arguments used during masking
+                     Must match the parameters used in generate_mask_PEtracer_expression
+
+    Returns:
+        pl.Expr: Polars expression with chained replacements to restore original sequences
+
+    Usage:
+        # Unmask assembled contigs
+        df_contigs = (
+            df_contigs
+            .with_columns(
+                generate_unmask_PEtracer_expression('features.csv').alias('contig')
+            )
+        )
+
+    Note:
+        The fuzzy_pattern and fuzzy_kwargs parameters must match what was used during
+        masking, otherwise the scrambled sequences won't be recognized.
+    """
+    if fuzzy_kwargs is None:
+        fuzzy_kwargs = {}
+
+    # Read features CSV
+    meta = pl.read_csv(features_csv)
+
+    # Create all META-TARGET combinations and generate scrambled sequences
+    # This must match exactly what was done during masking
+    patterns_df = (
+        meta
+        .filter(pl.col('kind') == 'META')
+        .join(
+            meta.filter(pl.col('kind') == 'TARGET'),
+            suffix="_target",
+            how='cross'
+        )
+        .with_columns(
+            # Generate the same scrambled sequence used during masking
+            pl.struct(['feature', 'feature_target']).map_elements(
+                lambda x: scramble_dna_sequence(
+                    seed_string=f"{x['feature']}_{x['feature_target']}",
+                    sequence=meta.filter(pl.col('feature') == x['feature_target']).get_column('seq')[0],
+                    fuzzy_pattern=fuzzy_pattern,
+                    fuzzy_kwargs=fuzzy_kwargs),
+                return_dtype=pl.Utf8
+            ).alias("scrambled_seq")
+        )
+        .with_columns(
+            # Build regex pattern: (META)(.*?)(SCRAMBLED_TARGET)(.*$)
+            # This finds the scrambled sequences in assembled contigs
+            pattern=pl.concat_str([
+                pl.lit("("),
+                pl.col('seq'),  # META sequence
+                pl.lit(")(.*?)("),
+                pl.col('scrambled_seq'),  # SCRAMBLED TARGET sequence
+                pl.lit(")(.*$)")
+            ]),
+            # Build replacement: $1${2}<ORIGINAL_TARGET>$4
+            # This restores META, content between META and TARGET, original TARGET, and the rest
+            replacement=pl.concat_str([
+                pl.lit("$1${2}"),
+                pl.col('seq_target'),  # Original TARGET sequence
+                pl.lit("$4")
+            ])
+        )
+    )
+
+    # Log pattern generation if logger provided
+    if logger is not None:
+        logger.debug(f"Generated {len(patterns_df)} unmasking patterns")
+        if len(patterns_df) > 0:
+            logger.debug("Sample unmasking patterns:")
+            sample = patterns_df.head(3).select(['feature', 'feature_target'])
+            for row in sample.iter_rows(named=True):
+                logger.debug(f"  {row['feature']} + {row['feature_target']}: restoring original TARGET")
+
+    # Build the chained expression by applying all pattern replacements
+    expr = pl.col(column_name)
+
+    for row in patterns_df.iter_rows(named=True):
+        pattern = row['pattern']
+        replacement = row['replacement']
+        expr = expr.str.replace(pattern, replacement)
+
+    print(f"Built unmasking expression with {len(patterns_df)} chained replacements")
+    return expr

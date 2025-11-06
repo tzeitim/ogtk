@@ -4,7 +4,7 @@ import rogtk
 
 from ogtk.utils.log import Rlogger, call
 from ogtk.utils.general import fuzzy_match_str
-from .masking import generate_mask_PEtracer_expression
+from .masking import generate_mask_PEtracer_expression, generate_unmask_PEtracer_expression
 
 __all__ = [
         'PlDNA',
@@ -669,6 +669,52 @@ class PllPipeline:
             logger=self.logger
         )
         return self._ldf.with_columns(mask_expr.alias(column_name))
+
+    def unmask_repeats(self,
+                       features_csv: str,
+                       column_name: str = 'contig',
+                       fuzzy_pattern: bool = True,
+                       fuzzy_kwargs: dict = None) -> pl.LazyFrame:
+        """
+        Restore original TARGET sequences from scrambled versions after assembly.
+
+        This reverses the masking operation performed by mask_repeats(). After assembly,
+        contigs contain scrambled TARGET sequences which need to be restored to their
+        original form for downstream analysis.
+
+        Args:
+            features_csv: Path to CSV file with META and TARGET sequences
+                         (same file used during masking)
+            column_name: Column containing sequences to unmask (default: 'contig')
+            fuzzy_pattern: Whether fuzzy matching was used during masking (default: True)
+            fuzzy_kwargs: Optional dict with fuzzy matching parameters used during masking
+                         Must match the parameters used in mask_repeats()
+
+        Returns:
+            LazyFrame with restored original sequences
+
+        Example:
+            # After assembly, restore original sequences
+            df_contigs = (
+                assembled_contigs
+                .pp.unmask_repeats('features.csv', column_name='contig')
+            )
+
+        Note:
+            The fuzzy_pattern and fuzzy_kwargs parameters must match what was used
+            during masking, otherwise the scrambled sequences won't be recognized.
+
+        See Also:
+            ogtk.ltr.fracture.pipeline.masking.generate_unmask_PEtracer_expression
+        """
+        unmask_expr = generate_unmask_PEtracer_expression(
+            features_csv=features_csv,
+            column_name=column_name,
+            fuzzy_pattern=fuzzy_pattern,
+            fuzzy_kwargs=fuzzy_kwargs,
+            logger=self.logger
+        )
+        return self._ldf.with_columns(unmask_expr.alias(column_name))
 
 
 # TODO

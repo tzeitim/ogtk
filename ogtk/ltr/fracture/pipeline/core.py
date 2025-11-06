@@ -813,7 +813,7 @@ class Pipeline:
                             ldf
                             .filter(filter_expr)
                             .pp.assemble_umis( #pyright: ignore
-                              k=self.xp.fracture['start_k'], 
+                              k=self.xp.fracture['start_k'],
                               min_coverage=self.xp.fracture['start_min_coverage'],
                               start_anchor=self.xp.start_anchor,
                               end_anchor=self.xp.end_anchor,
@@ -831,9 +831,23 @@ class Pipeline:
                                   .select('umi','reads')
                                   .filter(filter_expr)
                                   .unique(),
-                                  #.collect(), 
+                                  #.collect(),
                                left_on='umi', right_on='umi', how='left')
                             )
+
+                    # Unmask contigs if masking was applied
+                    if hasattr(self.xp, 'features_csv') and self.xp.features_csv:
+                        self.logger.info("Restoring original sequences (unmasking contigs)")
+                        df_contigs = df_contigs.pp.unmask_repeats(
+                            features_csv=self.xp.features_csv,
+                            column_name='contig',
+                            fuzzy_pattern=getattr(self.xp, 'mask_fuzzy_pattern', True),
+                            fuzzy_kwargs=getattr(self.xp, 'mask_fuzzy_kwargs', None)
+                        )
+                        # Recalculate length after unmasking
+                        df_contigs = df_contigs.with_columns(
+                            pl.col('contig').str.len_chars().alias('length')
+                        )
 
                     df_contigs.sink_parquet(out_file)
 
