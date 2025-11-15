@@ -196,7 +196,7 @@ class PlPipeline:
                     start_anchor: str | None = None,
                     end_anchor: str | None = None,
                     min_length: int | None = None,
-                    auto_k: bool = True,
+                    auto_k: bool = False,
                     export_graphs: bool = False,
                     only_largest: bool = True,
                     prefix: str | None = None) -> pl.DataFrame:
@@ -245,48 +245,36 @@ class PlPipeline:
 
     def assemble_umis(self,
                     k: int = 15,
-                    min_coverage: int = 20, 
+                    min_coverage: int = 20,
                     method: str = "shortest_path",
                     start_anchor: str | None = None,
                     end_anchor: str | None = None,
                     min_length: int | None = None,
-                    auto_k: bool = True,
+                    auto_k: bool = False,
                     export_graphs: bool = False,
                     groups = ['umi', 'sbc'],
+                    modality: str = 'single-molecule',
                     do_trim: bool = True,
                     only_largest: bool = True) -> pl.DataFrame:
-
-        
-        trim_expr = pl.col("r2_seq")
-
-        match method:
-            case "compression":
-                start_anchor = None
-                end_anchor = None
-            case "shortest_path":
-                if do_trim:
-                    trim_expr = (
-                        pl.col("r2_seq")
-                        .str.replace(f'^.*{start_anchor}', start_anchor)
-                        .str.replace(f'{end_anchor}.*$', end_anchor)
-                    )
-        
+        """Assemble UMI sequences (DataFrame wrapper)"""
         return (
             self._df
-            .group_by(groups).agg(
-                rogtk.assemble_sequences(
-                    expr=trim_expr,
-                    k=k,
-                    min_coverage=min_coverage,
-                    method=method,
-                    start_anchor=start_anchor,
-                    end_anchor=end_anchor,
-                    min_length=min_length,
-                    auto_k=auto_k,
-                    only_largest=only_largest,
-                    export_graphs=export_graphs,
-                ).alias('contig')
+            .lazy()
+            .pp.assemble_umis(
+                k=k,
+                min_coverage=min_coverage,
+                method=method,
+                start_anchor=start_anchor,
+                end_anchor=end_anchor,
+                min_length=min_length,
+                auto_k=auto_k,
+                export_graphs=export_graphs,
+                groups=groups,
+                modality=modality,
+                do_trim=do_trim,
+                only_largest=only_largest
             )
+            .collect()
         )
 
     def sweep_assembly_params(self,
@@ -364,6 +352,32 @@ class PlPipeline:
             .collect()
         )
 
+    def mask_repeats(self,
+                     features_csv: str,
+                     column_name: str = 'r2_seq',
+                     fuzzy_pattern: bool = True,
+                     fuzzy_kwargs: dict = None) -> pl.DataFrame:
+        """Mask repetitive sequences based on META-TARGET pairs (DataFrame wrapper)"""
+        return (
+            self._df
+            .lazy()
+            .pp.mask_repeats(features_csv=features_csv, column_name=column_name, fuzzy_pattern=fuzzy_pattern, fuzzy_kwargs=fuzzy_kwargs)
+            .collect()
+        )
+
+    def unmask_repeats(self,
+                       features_csv: str,
+                       column_name: str = 'contig',
+                       fuzzy_pattern: bool = True,
+                       fuzzy_kwargs: dict = None) -> pl.DataFrame:
+        """Restore original TARGET sequences from scrambled versions (DataFrame wrapper)"""
+        return (
+            self._df
+            .lazy()
+            .pp.unmask_repeats(features_csv=features_csv, column_name=column_name, fuzzy_pattern=fuzzy_pattern, fuzzy_kwargs=fuzzy_kwargs)
+            .collect()
+        )
+
 @pl.api.register_lazyframe_namespace("pp")
 class PllPipeline:
     def __init__(self, ldf: pl.LazyFrame) -> None:
@@ -372,19 +386,20 @@ class PllPipeline:
 
     def assemble_umis(self,
                     k: int = 15,
-                    min_coverage: int = 20, 
+                    min_coverage: int = 20,
                     method: str = "shortest_path",
                     start_anchor: str | None = None,
                     end_anchor: str | None = None,
                     min_length: int | None = None,
-                    auto_k: bool = True,
+                    auto_k: bool = False,
                     export_graphs: bool = False,
                     groups = ['umi', 'sbc'],
                     modality: str = 'single-molecule',
+                    do_trim: bool = True,
                     only_largest: bool = True) -> pl.LazyFrame:
         """
         Assemble UMI sequences with modality-aware grouping.
-        
+
         For single-cell: groups by 'umi' only (compound cbc+umi)
         For single-molecule: groups by 'umi' and 'sbc'
         """
@@ -395,19 +410,35 @@ class PllPipeline:
         else:
             # Use provided groups or default for single-molecule
             effective_groups = groups
-        
+
+        # Handle anchor trimming based on method and anchor availability
+        ldf = self._ldf
+
+        # Set anchors to None for compression method
+        assembly_start_anchor = start_anchor
+        assembly_end_anchor = end_anchor
+
+        if method == "compression":
+            assembly_start_anchor = None
+            assembly_end_anchor = None
+        elif method == "shortest_path" and do_trim and start_anchor and end_anchor:
+            # Only trim if method requires it AND anchors are provided
+            ldf = (
+                ldf
+                .with_columns(pl.col('r2_seq').str.replace(f'^.*{start_anchor}', start_anchor))
+                .with_columns(pl.col('r2_seq').str.replace(f'{end_anchor}.*$', end_anchor))
+            )
+
         return (
-            self._ldf
-             .with_columns(pl.col('r2_seq').str.replace(f'^.*{start_anchor}', start_anchor))
-             .with_columns(pl.col('r2_seq').str.replace(f'{end_anchor}.*$', end_anchor))
+            ldf
             .group_by(effective_groups).agg(
                 rogtk.assemble_sequences(
                     expr=pl.col("r2_seq"),
                     k=k,
                     min_coverage=min_coverage,
                     method=method,
-                    start_anchor=start_anchor,
-                    end_anchor=end_anchor,
+                    start_anchor=assembly_start_anchor,
+                    end_anchor=assembly_end_anchor,
                     min_length=min_length,
                     auto_k=auto_k,
                     only_largest=only_largest,
@@ -645,7 +676,12 @@ class PllPipeline:
             df = (
                 pl.scan_parquet('parsed_reads.parquet')
                 .pp.mask_repeats('features.csv', column_name='r2_seq')
-                .pp.assemble_umis(k=15, min_coverage=20)
+                .pp.assemble_umis(
+                    k=15,
+                    min_coverage=20,
+                    start_anchor='AAGGTTAAAGAACGACTTCC',
+                    end_anchor='GCCTAAAACTGCTCACCTAT'
+                )
             )
 
             # With custom fuzzy matching
@@ -655,7 +691,12 @@ class PllPipeline:
                     'features.csv',
                     fuzzy_kwargs={'wildcard': '.{0,2}', 'max_length': 150}
                 )
-                .pp.assemble_umis(k=15, min_coverage=20)
+                .pp.assemble_umis(
+                    k=15,
+                    min_coverage=20,
+                    start_anchor='AAGGTTAAAGAACGACTTCC',
+                    end_anchor='GCCTAAAACTGCTCACCTAT'
+                )
             )
 
         See Also:
