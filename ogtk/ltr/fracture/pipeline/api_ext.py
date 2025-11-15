@@ -356,12 +356,13 @@ class PlPipeline:
                      features_csv: str,
                      column_name: str = 'r2_seq',
                      fuzzy_pattern: bool = True,
-                     fuzzy_kwargs: dict = None) -> pl.DataFrame:
+                     fuzzy_kwargs: dict = None,
+                     alias: str | None = None) -> pl.DataFrame:
         """Mask repetitive sequences based on META-TARGET pairs (DataFrame wrapper)"""
         return (
             self._df
             .lazy()
-            .pp.mask_repeats(features_csv=features_csv, column_name=column_name, fuzzy_pattern=fuzzy_pattern, fuzzy_kwargs=fuzzy_kwargs)
+            .pp.mask_repeats(features_csv=features_csv, column_name=column_name, fuzzy_pattern=fuzzy_pattern, fuzzy_kwargs=fuzzy_kwargs, alias=alias)
             .collect()
         )
 
@@ -369,12 +370,13 @@ class PlPipeline:
                        features_csv: str,
                        column_name: str = 'contig',
                        fuzzy_pattern: bool = True,
-                       fuzzy_kwargs: dict = None) -> pl.DataFrame:
+                       fuzzy_kwargs: dict = None,
+                       alias: str | None = None) -> pl.DataFrame:
         """Restore original TARGET sequences from scrambled versions (DataFrame wrapper)"""
         return (
             self._df
             .lazy()
-            .pp.unmask_repeats(features_csv=features_csv, column_name=column_name, fuzzy_pattern=fuzzy_pattern, fuzzy_kwargs=fuzzy_kwargs)
+            .pp.unmask_repeats(features_csv=features_csv, column_name=column_name, fuzzy_pattern=fuzzy_pattern, fuzzy_kwargs=fuzzy_kwargs, alias=alias)
             .collect()
         )
 
@@ -635,7 +637,8 @@ class PllPipeline:
                      features_csv: str,
                      column_name: str = 'r2_seq',
                      fuzzy_pattern: bool = True,
-                     fuzzy_kwargs: dict = None) -> pl.LazyFrame:
+                     fuzzy_kwargs: dict = None,
+                     alias: str | None = None) -> pl.LazyFrame:
         """
         Mask repetitive sequences based on META-TARGET pairs.
 
@@ -667,12 +670,13 @@ class PllPipeline:
                          - include_original: Include exact match (default: True)
                          - sep: Separator for alternatives (default: '|')
                          - max_length: Only fuzzify sequences up to this length (default: 200)
+            alias: Optional output column name. If None, replaces column_name in place (default: None)
 
         Returns:
             LazyFrame with masked sequences
 
         Example:
-            # Basic usage
+            # Basic usage - replaces r2_seq in place
             df = (
                 pl.scan_parquet('parsed_reads.parquet')
                 .pp.mask_repeats('features.csv', column_name='r2_seq')
@@ -684,13 +688,11 @@ class PllPipeline:
                 )
             )
 
-            # With custom fuzzy matching
+            # Create new column - preserves original
             df = (
                 pl.scan_parquet('parsed_reads.parquet')
-                .pp.mask_repeats(
-                    'features.csv',
-                    fuzzy_kwargs={'wildcard': '.{0,2}', 'max_length': 150}
-                )
+                .pp.mask_repeats('features.csv', column_name='r2_seq', alias='masked')
+                .with_columns(r2_seq=pl.col('masked'))  # Use masked for assembly
                 .pp.assemble_umis(
                     k=15,
                     min_coverage=20,
@@ -709,13 +711,15 @@ class PllPipeline:
             fuzzy_kwargs=fuzzy_kwargs,
             logger=self.logger
         )
-        return self._ldf.with_columns(mask_expr.alias(column_name))
+        output_name = alias if alias is not None else column_name
+        return self._ldf.with_columns(mask_expr.alias(output_name))
 
     def unmask_repeats(self,
                        features_csv: str,
                        column_name: str = 'contig',
                        fuzzy_pattern: bool = True,
-                       fuzzy_kwargs: dict = None) -> pl.LazyFrame:
+                       fuzzy_kwargs: dict = None,
+                       alias: str | None = None) -> pl.LazyFrame:
         """
         Restore original TARGET sequences from scrambled versions after assembly.
 
@@ -730,15 +734,22 @@ class PllPipeline:
             fuzzy_pattern: Whether fuzzy matching was used during masking (default: True)
             fuzzy_kwargs: Optional dict with fuzzy matching parameters used during masking
                          Must match the parameters used in mask_repeats()
+            alias: Optional output column name. If None, replaces column_name in place (default: None)
 
         Returns:
             LazyFrame with restored original sequences
 
         Example:
-            # After assembly, restore original sequences
+            # After assembly, restore original sequences in place
             df_contigs = (
                 assembled_contigs
                 .pp.unmask_repeats('features.csv', column_name='contig')
+            )
+
+            # Create new column preserving scrambled version
+            df_contigs = (
+                assembled_contigs
+                .pp.unmask_repeats('features.csv', column_name='contig', alias='unmasked')
             )
 
         Note:
@@ -755,7 +766,8 @@ class PllPipeline:
             fuzzy_kwargs=fuzzy_kwargs,
             logger=self.logger
         )
-        return self._ldf.with_columns(unmask_expr.alias(column_name))
+        output_name = alias if alias is not None else column_name
+        return self._ldf.with_columns(unmask_expr.alias(output_name))
 
 
 # TODO
