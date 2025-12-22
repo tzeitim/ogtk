@@ -35,7 +35,7 @@ def compute_anchor_stats(ifn, sample_n = 50, reps=1, start_anchor = "GAGACTGCATG
     return [
         pl.scan_parquet(ifn)
         .filter(pl.col('ont'))
-        .filter(pl.col('umi').is_in(pl.col('umi').sample(sample_n)))
+        .filter(pl.col('umi').is_in(pl.col('umi').sample(sample_n, with_replacement=True)))
         .group_by('umi')
             .agg(start=pl.col('r2_seq').str.contains(start_anchor).sum()/pl.len(), 
                    end=pl.col('r2_seq').str.contains(end_anchor).sum()/pl.len(),

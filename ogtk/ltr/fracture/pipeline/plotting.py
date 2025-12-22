@@ -84,8 +84,10 @@ class PlotDB():
 
             out_path = f'{xp.sample_figs}/{xp.target_sample}_{key}_anchors.png'
             from . import qc
+            reps = 10
+            sample_n=50
             anchor_stats_df = (
-                    pl.concat(qc.compute_anchor_stats(ifn, sample_n=100, reps=16))
+                    pl.concat(qc.compute_anchor_stats(ifn, sample_n=sample_n, reps=reps))
                         .with_columns(ifn=pl.lit(xp.target_sample))
                     )
             fig = sns.displot(data=anchor_stats_df, x='start', y='end',hue='ifn', col='ifn', bins=25)
@@ -100,11 +102,12 @@ class PlotDB():
             out_path = f'{xp.sample_figs}/{xp.target_sample}_{key}_feasible.png'
 
             from . import qc
+            reps = 30
             fig = sns.catplot([
-             qc.compute_double_anchor(ifn, 10, 30),
-             qc.compute_double_anchor(ifn, 50,  30),
-             qc.compute_double_anchor(ifn, 100,  30),
-             qc.compute_double_anchor(ifn, 500,  30),
+             qc.compute_double_anchor(ifn, 10, reps),
+             qc.compute_double_anchor(ifn, 50, reps),
+             qc.compute_double_anchor(ifn, 100, reps),
+             qc.compute_double_anchor(ifn, 500, reps),
             ], kind='box')
 
             plt.ylim(0,1)

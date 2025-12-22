@@ -352,6 +352,9 @@ class PlPipeline:
             .collect()
         )
 
+    # TODO: Consider using **kwargs instead of explicit parameters to avoid duplication.
+    # Tradeoff: **kwargs is DRYer but loses IDE autocomplete and type hints.
+    # Current approach: Explicit parameters provide better developer experience.
     def mask_repeats(self,
                      features_csv: str,
                      column_name: str = 'r2_seq',
@@ -387,6 +390,7 @@ class PllPipeline:
         self.logger = Rlogger().get_logger()
 
     def assemble_umis(self,
+                    col_name: str = "r2_seq",
                     k: int = 15,
                     min_coverage: int = 20,
                     method: str = "shortest_path",
@@ -427,15 +431,15 @@ class PllPipeline:
             # Only trim if method requires it AND anchors are provided
             ldf = (
                 ldf
-                .with_columns(pl.col('r2_seq').str.replace(f'^.*{start_anchor}', start_anchor))
-                .with_columns(pl.col('r2_seq').str.replace(f'{end_anchor}.*$', end_anchor))
+                .with_columns(pl.col(col_name).str.replace(f'^.*{start_anchor}', start_anchor))
+                .with_columns(pl.col(col_name).str.replace(f'{end_anchor}.*$', end_anchor))
             )
 
         return (
             ldf
             .group_by(effective_groups).agg(
                 rogtk.assemble_sequences(
-                    expr=pl.col("r2_seq"),
+                    expr=pl.col(col_name),
                     k=k,
                     min_coverage=min_coverage,
                     method=method,

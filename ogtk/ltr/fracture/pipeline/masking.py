@@ -8,6 +8,7 @@ long cassettes with direct repeats that exceed the 64-base kmer limit.
 
 import polars as pl
 import random
+import hashlib
 from typing import Optional
 from ogtk.utils.log import CustomLogger
 from ogtk.utils.general import fuzzy_match_str
@@ -27,7 +28,8 @@ def scramble_dna_sequence(seed_string: str, sequence: str, fuzzy_pattern: bool,
     Returns:
         Scrambled DNA sequence (optionally with fuzzy pattern)
     """
-    seed = hash(seed_string) % (2**32)  # Ensure positive 32-bit integer
+    # Use deterministic hash (Python's hash() is randomized for security)
+    seed = int(hashlib.md5(seed_string.encode()).hexdigest()[:8], 16)
     random.seed(seed)
     seq_list = list(sequence.upper())
     random.shuffle(seq_list)
@@ -127,31 +129,41 @@ def generate_mask_PEtracer_expression(features_csv: str,
         )
         .with_columns(
             # Generate scrambled sequence for each META-TARGET combination
+            # IMPORTANT: Don't apply fuzzy pattern to replacement - it should be plain DNA
             pl.struct(['feature', 'feature_target']).map_elements(
                 lambda x: scramble_dna_sequence(
                     seed_string=f"{x['feature']}_{x['feature_target']}",
                     sequence=meta.filter(pl.col('feature') == x['feature_target']).get_column('seq')[0],
-                    fuzzy_pattern=fuzzy_pattern,
+                    fuzzy_pattern=False,  # Replacement must be plain DNA, not regex
                     fuzzy_kwargs=fuzzy_kwargs),
                 return_dtype=pl.Utf8
             ).alias("scrambled_seq")
         )
         .with_columns(
             # Build regex pattern: (META)(.*?)(TARGET)(.*$)
+            # Apply fuzzy matching to META and TARGET for better matching
             pattern=pl.concat_str([
                 pl.lit("("),
-                pl.col('seq'),  # META sequence
+                pl.when(fuzzy_pattern)
+                .then(pl.col('seq').map_elements(
+                    lambda x: fuzzy_match_str(x, **fuzzy_kwargs),
+                    return_dtype=pl.Utf8))
+                .otherwise(pl.col('seq')),  # META sequence (optionally fuzzified)
                 pl.lit(")(.*?)("),
-                pl.col('seq_target'),  # TARGET sequence
+                pl.when(fuzzy_pattern)
+                .then(pl.col('seq_target').map_elements(
+                    lambda x: fuzzy_match_str(x, **fuzzy_kwargs),
+                    return_dtype=pl.Utf8))
+                .otherwise(pl.col('seq_target')),  # TARGET sequence (optionally fuzzified)
                 pl.lit(")(.*$)")
             ]),
             # Build replacement: $1${2}<scrambled>$4
             # This preserves META, the content between META and TARGET,
             # replaces TARGET with scrambled version, and preserves the rest
             replacement=pl.concat_str([
-                pl.lit("$1${2}"),
-                pl.col('scrambled_seq'),
-                pl.lit("$4")
+                pl.lit("${1}${2}"),
+                pl.col('scrambled_seq'),  # Plain scrambled DNA sequence
+                pl.lit("${4}")
             ])
         )
     )
@@ -174,7 +186,8 @@ def generate_mask_PEtracer_expression(features_csv: str,
         replacement = row['replacement']
         expr = expr.str.replace(pattern, replacement)
 
-    print(f"Built expression with {len(patterns_df)} chained replacements")
+    if logger is not None:
+        logger.debug(f"Built expression with {len(patterns_df)} chained replacements")
     return expr
 
 
@@ -232,11 +245,12 @@ def generate_unmask_PEtracer_expression(features_csv: str,
         )
         .with_columns(
             # Generate the same scrambled sequence used during masking
+            # MUST use fuzzy_pattern=False to get plain DNA (matching mask behavior)
             pl.struct(['feature', 'feature_target']).map_elements(
                 lambda x: scramble_dna_sequence(
                     seed_string=f"{x['feature']}_{x['feature_target']}",
                     sequence=meta.filter(pl.col('feature') == x['feature_target']).get_column('seq')[0],
-                    fuzzy_pattern=fuzzy_pattern,
+                    fuzzy_pattern=False,  # Must match masking - plain DNA only
                     fuzzy_kwargs=fuzzy_kwargs),
                 return_dtype=pl.Utf8
             ).alias("scrambled_seq")
@@ -244,19 +258,28 @@ def generate_unmask_PEtracer_expression(features_csv: str,
         .with_columns(
             # Build regex pattern: (META)(.*?)(SCRAMBLED_TARGET)(.*$)
             # This finds the scrambled sequences in assembled contigs
+            # Apply fuzzy matching to META and scrambled sequence for better matching
             pattern=pl.concat_str([
                 pl.lit("("),
-                pl.col('seq'),  # META sequence
+                pl.when(fuzzy_pattern)
+                .then(pl.col('seq').map_elements(
+                    lambda x: fuzzy_match_str(x, **fuzzy_kwargs),
+                    return_dtype=pl.Utf8))
+                .otherwise(pl.col('seq')),  # META sequence (optionally fuzzified)
                 pl.lit(")(.*?)("),
-                pl.col('scrambled_seq'),  # SCRAMBLED TARGET sequence
+                pl.when(fuzzy_pattern)
+                .then(pl.col('scrambled_seq').map_elements(
+                    lambda x: fuzzy_match_str(x, **fuzzy_kwargs),
+                    return_dtype=pl.Utf8))
+                .otherwise(pl.col('scrambled_seq')),  # Scrambled TARGET (optionally fuzzified)
                 pl.lit(")(.*$)")
             ]),
             # Build replacement: $1${2}<ORIGINAL_TARGET>$4
             # This restores META, content between META and TARGET, original TARGET, and the rest
             replacement=pl.concat_str([
-                pl.lit("$1${2}"),
+                pl.lit("${1}${2}"),
                 pl.col('seq_target'),  # Original TARGET sequence
-                pl.lit("$4")
+                pl.lit("${4}")
             ])
         )
     )
@@ -278,5 +301,6 @@ def generate_unmask_PEtracer_expression(features_csv: str,
         replacement = row['replacement']
         expr = expr.str.replace(pattern, replacement)
 
-    print(f"Built unmasking expression with {len(patterns_df)} chained replacements")
+    if logger is not None:
+        logger.debug(f"Built unmasking expression with {len(patterns_df)} chained replacements")
     return expr

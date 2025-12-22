@@ -787,6 +787,13 @@ class Pipeline:
                         self.logger.info(f"Masking repetitive sequences using {self.xp.features_csv}")
                         n_reads = ldf.select(pl.len()).collect().item()
 
+                        # Apply reverse complement if configured
+                        if getattr(self.xp, 'mask_reverse_complement', False):
+                            self.logger.info("Applying reverse complement to r2_seq before masking")
+                            ldf = ldf.with_columns(
+                                pl.col('r2_seq').dna.reverse_complement().alias('r2_seq') #pyright:ignore
+                            )
+
                         ldf = ldf.pp.mask_repeats(
                             features_csv=self.xp.features_csv,
                             column_name='r2_seq',
@@ -817,7 +824,7 @@ class Pipeline:
                               min_coverage=self.xp.fracture['start_min_coverage'],
                               start_anchor=self.xp.start_anchor,
                               end_anchor=self.xp.end_anchor,
-                              min_length=None,
+                              min_length=getattr(self.xp, 'min_contig_length', None),
                               auto_k=False,
                               export_graphs=False,
                               only_largest=True,

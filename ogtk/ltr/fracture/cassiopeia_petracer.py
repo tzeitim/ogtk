@@ -9,7 +9,6 @@ from ..pipeline.types import StepResults,FractureXp
 from dataclasses import dataclass, field
 from ogtk.utils.log import CustomLogger
 
-def mask
 def plug_cassiopeia(
         ldf: pl.LazyFrame,
         ann_intbc_mod: pl.DataFrame,
