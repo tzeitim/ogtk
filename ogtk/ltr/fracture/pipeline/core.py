@@ -748,11 +748,11 @@ class Pipeline:
             self.logger.error(f"Failed to preprocess data: {str(e)}", with_traceback=True)
             raise
             
-    @call  
+    @call
     @pipeline_step(PipelineStep.FRACTURE)
     def fracture(self) -> StepResults|None:
         """Asseble short reads into contigs"""
-            
+
         try:
             self.logger.step("Assemblying molecules")
 
@@ -768,8 +768,18 @@ class Pipeline:
                 self.xp.fracture['start_k'] = 17
                 self.xp.fracture['min_reads'] = 10 #qc.find_read_count_threshold(in_file, method="kmeans")
             #else:
-            #    self.xp.fracture['min_reads'] = 10 #qc.find_read_count_threshold(in_file, 
+            #    self.xp.fracture['min_reads'] = 10 #qc.find_read_count_threshold(in_file,
                                                    #              method=self.xp.fracture['method_th'])
+
+            # Check if segmented assembly should be used
+            use_segmentation = self.xp.fracture.get('use_segmentation', False)
+            if use_segmentation:
+                # Load METAs from features CSV or dedicated metas file
+                metas_csv = self.xp.fracture.get('metas_csv') or getattr(self.xp, 'features_csv', None)
+                if not metas_csv:
+                    raise ValueError("Segmented assembly requires 'metas_csv' or 'features_csv' configuration")
+                self.logger.info(f"Segmented assembly enabled, loading METAs from {metas_csv}")
+                metas_df = pl.read_csv(metas_csv)
 
             in_files = {
                     'valid': f"{self.xp.sample_wd}/parsed_reads.parquet", #pyright:ignore
@@ -782,8 +792,8 @@ class Pipeline:
 
                     ldf = pl.scan_parquet(in_file)
 
-                    # Apply masking if configured
-                    if hasattr(self.xp, 'features_csv') and self.xp.features_csv:
+                    # Apply masking if configured (skip if using segmentation - they're alternative strategies)
+                    if hasattr(self.xp, 'features_csv') and self.xp.features_csv and not use_segmentation:
                         self.logger.info(f"Masking repetitive sequences using {self.xp.features_csv}")
                         n_reads = ldf.select(pl.len()).collect().item()
 
@@ -794,7 +804,8 @@ class Pipeline:
                                 pl.col('r2_seq').dna.reverse_complement().alias('r2_seq') #pyright:ignore
                             )
 
-                        ldf = ldf.pp.mask_repeats(
+                        # Flank-based masking works for both edited and unedited cassettes
+                        ldf = ldf.pp.mask_flanks(
                             features_csv=self.xp.features_csv,
                             column_name='r2_seq',
                             fuzzy_pattern=getattr(self.xp, 'mask_fuzzy_pattern', True),
@@ -816,21 +827,22 @@ class Pipeline:
 
                     filter_expr= pl.col('reads')>=self.xp.fracture['min_reads']
 
-                    df_contigs = (
+                    # Choose assembly strategy
+                    if use_segmentation:
+                        # Segmented assembly for long cassettes
+                        # TODO remove: debug_path for saving segments before assembly
+                        debug_path = f"{self.xp.sample_wd}/segments_debug.parquet"
+                        df_contigs = (
                             ldf
                             .filter(filter_expr)
-                            .pp.assemble_umis( #pyright: ignore
-                              k=self.xp.fracture['start_k'],
-                              min_coverage=self.xp.fracture['start_min_coverage'],
-                              start_anchor=self.xp.start_anchor,
-                              end_anchor=self.xp.end_anchor,
-                              min_length=getattr(self.xp, 'min_contig_length', None),
-                              auto_k=False,
-                              export_graphs=False,
-                              only_largest=True,
-                              method=self.xp.fracture['assembly_method'],
-                              modality=self.xp.modality,
-                              )
+                            .pp.assemble_segmented(
+                                metas=metas_df,
+                                k=self.xp.fracture['start_k'],
+                                min_coverage=self.xp.fracture['start_min_coverage'],
+                                cassette_start_anchor=self.xp.start_anchor,
+                                cassette_end_anchor=self.xp.end_anchor,
+                                debug_path=debug_path,
+                            )
                             .with_columns(pl.col('contig').str.len_chars().alias('length'))
                             .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                             .join(
@@ -838,14 +850,40 @@ class Pipeline:
                                   .select('umi','reads')
                                   .filter(filter_expr)
                                   .unique(),
-                                  #.collect(),
                                left_on='umi', right_on='umi', how='left')
-                            )
+                        )
+                    else:
+                        # Standard assembly
+                        df_contigs = (
+                                ldf
+                                .filter(filter_expr)
+                                .pp.assemble_umis( #pyright: ignore
+                                  k=self.xp.fracture['start_k'],
+                                  min_coverage=self.xp.fracture['start_min_coverage'],
+                                  start_anchor=self.xp.start_anchor,
+                                  end_anchor=self.xp.end_anchor,
+                                  min_length=getattr(self.xp, 'min_contig_length', None),
+                                  auto_k=False,
+                                  export_graphs=False,
+                                  only_largest=True,
+                                  method=self.xp.fracture['assembly_method'],
+                                  modality=self.xp.modality,
+                                  )
+                                .with_columns(pl.col('contig').str.len_chars().alias('length'))
+                                .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
+                                .join(
+                                    pl.scan_parquet(in_file)
+                                      .select('umi','reads')
+                                      .filter(filter_expr)
+                                      .unique(),
+                                      #.collect(),
+                                   left_on='umi', right_on='umi', how='left')
+                                )
 
-                    # Unmask contigs if masking was applied
-                    if hasattr(self.xp, 'features_csv') and self.xp.features_csv:
+                    # Unmask contigs if masking was applied (skip if using segmentation)
+                    if hasattr(self.xp, 'features_csv') and self.xp.features_csv and not use_segmentation:
                         self.logger.info("Restoring original sequences (unmasking contigs)")
-                        df_contigs = df_contigs.pp.unmask_repeats(
+                        df_contigs = df_contigs.pp.unmask_flanks(
                             features_csv=self.xp.features_csv,
                             column_name='contig',
                             fuzzy_pattern=getattr(self.xp, 'mask_fuzzy_pattern', True),

@@ -4,7 +4,23 @@ import rogtk
 
 from ogtk.utils.log import Rlogger, call
 from ogtk.utils.general import fuzzy_match_str
-from .masking import generate_mask_PEtracer_expression, generate_unmask_PEtracer_expression
+from .masking import (
+    generate_mask_PEtracer_expression,
+    generate_unmask_PEtracer_expression,
+    generate_mask_flanks_expression,
+    generate_unmask_flanks_expression,
+)
+from .segmentation import (
+    sanitize_metas,
+    segment_by_metas,
+    extract_edge_segments,
+    stitch_segments,
+    flag_aberrant_molecules,
+    generate_segmentation_report,
+    format_segmentation_report,
+    CASSETTE_START_MARKER,
+    CASSETTE_END_MARKER,
+)
 
 __all__ = [
         'PlDNA',
@@ -361,7 +377,7 @@ class PlPipeline:
                      fuzzy_pattern: bool = True,
                      fuzzy_kwargs: dict = None,
                      alias: str | None = None) -> pl.DataFrame:
-        """Mask repetitive sequences based on META-TARGET pairs (DataFrame wrapper)"""
+        """Deprecated: Use mask_flanks() instead. Masks whole TARGET sequences."""
         return (
             self._df
             .lazy()
@@ -375,11 +391,87 @@ class PlPipeline:
                        fuzzy_pattern: bool = True,
                        fuzzy_kwargs: dict = None,
                        alias: str | None = None) -> pl.DataFrame:
-        """Restore original TARGET sequences from scrambled versions (DataFrame wrapper)"""
+        """Deprecated: Use unmask_flanks() instead. Restores whole TARGET sequences."""
         return (
             self._df
             .lazy()
             .pp.unmask_repeats(features_csv=features_csv, column_name=column_name, fuzzy_pattern=fuzzy_pattern, fuzzy_kwargs=fuzzy_kwargs, alias=alias)
+            .collect()
+        )
+
+    def mask_flanks(self,
+                    features_csv: str,
+                    column_name: str = 'r2_seq',
+                    fuzzy_pattern: bool = True,
+                    fuzzy_kwargs: dict = None,
+                    alias: str | None = None) -> pl.DataFrame:
+        """Mask TARGET flanks based on META context (DataFrame wrapper)"""
+        return (
+            self._df
+            .lazy()
+            .pp.mask_flanks(features_csv=features_csv, column_name=column_name, fuzzy_pattern=fuzzy_pattern, fuzzy_kwargs=fuzzy_kwargs, alias=alias)
+            .collect()
+        )
+
+    def unmask_flanks(self,
+                      features_csv: str,
+                      column_name: str = 'contig',
+                      fuzzy_pattern: bool = True,
+                      fuzzy_kwargs: dict = None,
+                      alias: str | None = None) -> pl.DataFrame:
+        """Restore original TARGET flanks from scrambled versions (DataFrame wrapper)"""
+        return (
+            self._df
+            .lazy()
+            .pp.unmask_flanks(features_csv=features_csv, column_name=column_name, fuzzy_pattern=fuzzy_pattern, fuzzy_kwargs=fuzzy_kwargs, alias=alias)
+            .collect()
+        )
+
+    def sanitize_metas(self,
+                       metas: pl.DataFrame,
+                       seq_col: str = 'r2_seq',
+                       wildcard: str = ".{0,1}") -> pl.DataFrame:
+        """Replace fuzzy META matches with canonical sequences (DataFrame wrapper)"""
+        return (
+            self._df
+            .lazy()
+            .pp.sanitize_metas(metas=metas, seq_col=seq_col, wildcard=wildcard)
+            .collect()
+        )
+
+    def segment_by_metas(self,
+                         metas: pl.DataFrame,
+                         seq_col: str = 'r2_seq',
+                         keep_cols: list | None = None) -> pl.DataFrame:
+        """Split reads at META boundaries into overlapping segments (DataFrame wrapper)"""
+        return (
+            self._df
+            .lazy()
+            .pp.segment_by_metas(metas=metas, seq_col=seq_col, keep_cols=keep_cols)
+            .collect()
+        )
+
+    def stitch_segments(self,
+                        metas: pl.DataFrame,
+                        seq_col: str = 'consensus_seq',
+                        cassette_start_anchor_len: int | None = None,
+                        group_cols: list[str] | None = None) -> pl.DataFrame:
+        """Rejoin assembled segments into full sequences (DataFrame wrapper)"""
+        return (
+            self._df
+            .lazy()
+            .pp.stitch_segments(metas=metas, seq_col=seq_col, cassette_start_anchor_len=cassette_start_anchor_len, group_cols=group_cols)
+            .collect()
+        )
+
+    def flag_aberrant_molecules(self,
+                                metas: pl.DataFrame,
+                                seq_col: str = 'r2_seq') -> pl.DataFrame:
+        """Flag molecules with tandem duplications (DataFrame wrapper)"""
+        return (
+            self._df
+            .lazy()
+            .pp.flag_aberrant_molecules(metas=metas, seq_col=seq_col)
             .collect()
         )
 
@@ -456,14 +548,17 @@ class PllPipeline:
     # [12N][6N]
     # [  18N  ]
     def parse_reads(self, umi_len, anchor_ont, sbc_len, modality='single-molecule', cbc_len=16):
-        ''' 
+        '''
         Parse reads from merged R1/R2 format, extracting UMI and barcode information.
-        
+
         Args:
             umi_len: UMI length
             anchor_ont: ONT anchor sequence
             sbc_len: Sample barcode length (0 for single-cell)
-            modality: 'single-cell' or 'single-molecule' 
+            modality: 'single-cell', 'single-molecule', or 'single-molecule-v2'
+                - single-cell: [CBC][UMI][anchor_ont] - compound UMI = CBC + UMI
+                - single-molecule: [UMI][SBC][anchor_ont]
+                - single-molecule-v2: [SBC][UMI][anchor_ont]
             cbc_len: Cell barcode length (for single-cell data)
         '''
         # metric_field_name represent QC columns
@@ -493,6 +588,29 @@ class PllPipeline:
                     .with_columns((pl.col('valid_umi')==expected_len).alias('valid_umi'))
                     .with_columns(pl.len().over('umi').alias('reads'))
             )
+        elif modality == 'single-molecule-v2':
+            # For single-molecule-v2: r1_seq structure is sbc + umi (reversed order)
+            expected_len = sbc_len + umi_len
+            return(
+                self._ldf
+                    .with_columns(pl.col('r1_seq').str.slice(0, sbc_len).alias('sbc'))
+                    .with_columns(pl.col('r1_seq').str.slice(sbc_len, umi_len).alias('umi'))
+                    .with_columns(pl.col('r1_seq').str.contains(anchor_ont).alias('ont'))
+                    # read level metrics
+                    .with_columns(metric_reads_ont = pl.col('ont').sum())
+                    .with_columns(metric_reads_offt = pl.col('ont').not_().sum())
+                    .with_columns(metric_fraction_ont = pl.col('ont').mean())
+                    .with_columns(metric_fraction_offt = pl.col('ont').not_().mean())
+                    # UMI validation
+                    .with_columns(pl.col('r1_seq')
+                                  .str.extract(f'(.*?){anchor_ont}$',1)
+                                  .str.len_chars()
+                                  .fill_null(0)
+                                  .alias('valid_umi')
+                                  )
+                    .with_columns((pl.col('valid_umi')==expected_len).alias('valid_umi'))
+                    .with_columns(pl.len().over('umi').alias('reads'))
+            )
         else:
             # For single-molecule: r1_seq structure is umi + sbc
             expected_len = umi_len + sbc_len
@@ -508,7 +626,7 @@ class PllPipeline:
                     .with_columns(metric_fraction_offt = pl.col('ont').not_().mean())
                     # UMI validation
                     .with_columns(pl.col('r1_seq')
-                                  .str.extract(f'(.*?){anchor_ont}$',1) 
+                                  .str.extract(f'(.*?){anchor_ont}$',1)
                                   .str.len_chars()
                                   .fill_null(0)
                                   .alias('valid_umi')
@@ -536,13 +654,13 @@ class PllPipeline:
 
     def ont_to_paired_format(self, umi_len: int, sbc_len: int, anchor_orient: str, anchor_ont:str, modality: str = 'single-molecule', cbc_len: int = 16, wildcard= '.{0,4}', do_rev_comp: bool = False) -> pl.LazyFrame:
         """Convert ONT BAM data to FRACTURE's expected R1/R2 format (LazyFrame)
-        
+
         Args:
             umi_len: Length of UMI sequence
             sbc_len: Length of sample barcode (set to 0 for single-cell data)
             anchor_orient: Anchor sequence for read orientation
             anchor_ont: ONT anchor sequence for trimming
-            modality: 'single-cell' or 'single-molecule'
+            modality: 'single-cell', 'single-molecule', or 'single-molecule-v2'
             cbc_len: Length of cell barcode (only used for single-cell data)
             wildcard: Regex wildcard pattern for fuzzy matching
             do_rev_comp: Apply reverse complement to R2 sequence
@@ -644,6 +762,10 @@ class PllPipeline:
                      fuzzy_kwargs: dict = None,
                      alias: str | None = None) -> pl.LazyFrame:
         """
+        .. deprecated::
+            Use `mask_flanks()` instead, which handles both edited and unedited
+            cassettes universally.
+
         Mask repetitive sequences based on META-TARGET pairs.
 
         This is useful for very long cassettes with direct repeats that exceed
@@ -725,6 +847,10 @@ class PllPipeline:
                        fuzzy_kwargs: dict = None,
                        alias: str | None = None) -> pl.LazyFrame:
         """
+        .. deprecated::
+            Use `unmask_flanks()` instead, which handles both edited and unedited
+            cassettes universally.
+
         Restore original TARGET sequences from scrambled versions after assembly.
 
         This reverses the masking operation performed by mask_repeats(). After assembly,
@@ -772,6 +898,347 @@ class PllPipeline:
         )
         output_name = alias if alias is not None else column_name
         return self._ldf.with_columns(unmask_expr.alias(output_name))
+
+    def mask_flanks(self,
+                    features_csv: str,
+                    column_name: str = 'r2_seq',
+                    fuzzy_pattern: bool = True,
+                    fuzzy_kwargs: dict = None,
+                    alias: str | None = None) -> pl.LazyFrame:
+        """
+        Mask TARGET flanks based on META context for edited and unedited cassettes.
+
+        This function handles both edited (with lineage marks) and unedited cassettes
+        by masking the flanking sequences around potential insertion points. Unlike
+        mask_repeats() which masks whole TARGETs, this function:
+        - Splits TARGETs into LEFT_FLANK and RIGHT_FLANK
+        - Scrambles each flank independently based on META context
+        - Preserves any inserted lineage marks (0-5bp between flanks)
+
+        Args:
+            features_csv: Path to CSV file with META and EDITED_TARGET sequences
+
+                         Expected CSV format (6 columns):
+
+                         feature,seq,left_flank,right_flank,marks,kind
+                         META01,AGAAGCCGTGTGCCGGTCTA,,,META
+                         RNF2,CATCTTAGTCATTACGACAGGTGTTCGTTG,CATCTTAGTCATTAC,GACAGGTGTTCGTTG,ACTGT|TAAGT|...,EDITED_TARGET
+
+                         - META sequences are anchors that precede TARGET flanks
+                         - left_flank and right_flank define the target boundaries
+                         - marks column is informational (pattern uses .{0,5}? to match any mark)
+
+            column_name: Column containing sequences to mask (default: 'r2_seq')
+            fuzzy_pattern: Whether to use fuzzy matching for sequencing errors (default: True)
+            fuzzy_kwargs: Optional dict with fuzzy matching parameters
+            alias: Optional output column name. If None, replaces column_name in place
+
+        Returns:
+            LazyFrame with masked flank sequences
+
+        Example:
+            df = (
+                pl.scan_parquet('parsed_reads.parquet')
+                .pp.mask_flanks('features_edited.csv', column_name='r2_seq')
+                .pp.assemble_umis(k=15, min_coverage=20)
+            )
+
+        See Also:
+            ogtk.ltr.fracture.pipeline.masking.generate_mask_flanks_expression
+        """
+        mask_expr = generate_mask_flanks_expression(
+            features_csv=features_csv,
+            column_name=column_name,
+            fuzzy_pattern=fuzzy_pattern,
+            fuzzy_kwargs=fuzzy_kwargs,
+            logger=self.logger
+        )
+        output_name = alias if alias is not None else column_name
+        return self._ldf.with_columns(mask_expr.alias(output_name))
+
+    def unmask_flanks(self,
+                      features_csv: str,
+                      column_name: str = 'contig',
+                      fuzzy_pattern: bool = True,
+                      fuzzy_kwargs: dict = None,
+                      alias: str | None = None) -> pl.LazyFrame:
+        """
+        Restore original TARGET flanks from scrambled versions after assembly.
+
+        This reverses the masking operation performed by mask_flanks(). After assembly,
+        contigs contain scrambled flank sequences which need to be restored to their
+        original form for downstream analysis. Lineage marks are preserved.
+
+        Args:
+            features_csv: Path to CSV file with META and EDITED_TARGET sequences
+                         (same file used during masking)
+            column_name: Column containing sequences to unmask (default: 'contig')
+            fuzzy_pattern: Whether fuzzy matching was used during masking (default: True)
+            fuzzy_kwargs: Optional dict with fuzzy matching parameters used during masking
+            alias: Optional output column name. If None, replaces column_name in place
+
+        Returns:
+            LazyFrame with restored original flank sequences
+
+        Example:
+            df_contigs = (
+                assembled_contigs
+                .pp.unmask_flanks('features_edited.csv', column_name='contig')
+            )
+
+        See Also:
+            ogtk.ltr.fracture.pipeline.masking.generate_unmask_flanks_expression
+        """
+        unmask_expr = generate_unmask_flanks_expression(
+            features_csv=features_csv,
+            column_name=column_name,
+            fuzzy_pattern=fuzzy_pattern,
+            fuzzy_kwargs=fuzzy_kwargs,
+            logger=self.logger
+        )
+        output_name = alias if alias is not None else column_name
+        return self._ldf.with_columns(unmask_expr.alias(output_name))
+
+    def sanitize_metas(self,
+                       metas: pl.DataFrame,
+                       seq_col: str = 'r2_seq',
+                       wildcard: str = ".{0,1}") -> pl.LazyFrame:
+        """
+        Replace fuzzy META matches with canonical sequences to handle sequencing errors.
+
+        This normalizes METAs with sequencing errors to their canonical form before
+        exact matching in segmentation.
+
+        Args:
+            metas: DataFrame with 'feature', 'seq', and optionally 'kind' columns
+            seq_col: Name of the column containing sequences (default: 'r2_seq')
+            wildcard: Regex pattern for fuzzy matching (default: '.{0,1}' allows 1 error)
+
+        Returns:
+            LazyFrame with sanitized sequences
+        """
+        return sanitize_metas(
+            ldf=self._ldf,
+            metas=metas,
+            seq_col=seq_col,
+            wildcard=wildcard,
+            logger=self.logger
+        )
+
+    def segment_by_metas(self,
+                         metas: pl.DataFrame,
+                         seq_col: str = 'r2_seq',
+                         keep_cols: list | None = None) -> pl.LazyFrame:
+        """
+        Split reads at META boundaries into overlapping segments.
+
+        Each segment includes both boundary METAs for overlap-based stitching.
+        Segments are suitable for independent assembly.
+
+        Args:
+            metas: DataFrame with 'feature', 'seq', and optionally 'kind' columns
+            seq_col: Name of the column containing sequences (default: 'r2_seq')
+            keep_cols: Additional columns to preserve (default: ['umi'])
+
+        Returns:
+            LazyFrame with columns: umi, start_meta, end_meta, segment_seq
+        """
+        return segment_by_metas(
+            ldf=self._ldf,
+            metas=metas,
+            seq_col=seq_col,
+            keep_cols=keep_cols,
+            logger=self.logger
+        )
+
+    def stitch_segments(self,
+                        metas: pl.DataFrame,
+                        seq_col: str = 'consensus_seq',
+                        cassette_start_anchor_len: int | None = None,
+                        group_cols: list[str] | None = None) -> pl.LazyFrame:
+        """
+        Rejoin assembled segments into full sequences.
+
+        Uses META order to sort segments and trims overlapping META boundaries.
+
+        Args:
+            metas: DataFrame with 'feature' for ordering
+            seq_col: Name of the column containing consensus sequences (default: 'consensus_seq')
+            cassette_start_anchor_len: Length of cassette start anchor (for edge segment handling)
+            group_cols: Columns to group by for stitching (default: ['umi'], can include 'sbc')
+
+        Returns:
+            LazyFrame with columns: [group_cols], stitched_seq
+        """
+        return stitch_segments(
+            ldf=self._ldf,
+            metas=metas,
+            seq_col=seq_col,
+            cassette_start_anchor_len=cassette_start_anchor_len,
+            group_cols=group_cols,
+            logger=self.logger
+        )
+
+    def flag_aberrant_molecules(self,
+                                metas: pl.DataFrame,
+                                seq_col: str = 'r2_seq') -> pl.LazyFrame:
+        """
+        Flag molecules with tandem duplications (any META appearing > 1 time).
+
+        Useful for pre-filtering before segmentation to exclude aberrant reads.
+
+        Args:
+            metas: DataFrame with 'feature' and 'seq' columns
+            seq_col: Name of the column containing sequences (default: 'r2_seq')
+
+        Returns:
+            LazyFrame with added 'is_aberrant' boolean column
+        """
+        return flag_aberrant_molecules(
+            ldf=self._ldf,
+            metas=metas,
+            seq_col=seq_col
+        )
+
+    def assemble_segmented(self,
+                           metas: pl.DataFrame,
+                           k: int = 15,
+                           min_coverage: int = 20,
+                           cassette_start_anchor: str | None = None,
+                           cassette_end_anchor: str | None = None,
+                           seq_col: str = 'r2_seq',
+                           debug_path: str | None = None,
+                           method: str = 'compression',
+                           ) -> pl.LazyFrame:
+        """
+        Assemble reads using segmentation strategy for long cassettes.
+
+        Segments reads at META boundaries, assembles each segment independently,
+        then stitches results.
+
+        Args:
+            metas: DataFrame with META sequences ('feature', 'seq', 'kind' columns)
+            k: K-mer size for assembly (default: 15)
+            min_coverage: Minimum coverage for k-mers (default: 20)
+            cassette_start_anchor: Anchor for the very first segment (cassette start)
+            cassette_end_anchor: Anchor for the very last segment (cassette end)
+            seq_col: Name of the column containing sequences (default: 'r2_seq')
+            debug_path: If provided, save segments to this path before assembly
+            method: Assembly method - 'compression' (default, recommended for segments)
+                    or 'shortest_path'. Note: shortest_path often fails on short
+                    segments (<300bp) because the de Bruijn graph may not have a
+                    unique path between anchors.
+
+        Returns:
+            LazyFrame with assembled contigs (umi, contig columns)
+        """
+        import rogtk
+
+        self.logger.info("Using segmented assembly strategy")
+
+        # Step 1: Sanitize METAs (handle sequencing errors)
+        self.logger.debug("Sanitizing META sequences")
+        ldf = self._ldf.pp.sanitize_metas(metas=metas, seq_col=seq_col)
+
+        # Step 2: Flag and filter aberrant molecules (tandem duplications)
+        self.logger.debug("Flagging aberrant molecules")
+        ldf = ldf.pp.flag_aberrant_molecules(metas=metas, seq_col=seq_col)
+        n_aberrant = ldf.filter(pl.col('is_aberrant')).select(pl.col('umi').n_unique()).collect().item()
+        self.logger.info(f"Found {n_aberrant} UMIs with tandem duplications (will be skipped)")
+        ldf = ldf.filter(~pl.col('is_aberrant')).drop('is_aberrant')
+
+        # Step 3: Segment by METAs (META→META segments)
+        # Include 'sbc' in keep_cols to prevent UMI collisions across samples
+        self.logger.debug("Segmenting reads at META boundaries")
+        keep_cols = ['umi', 'sbc'] if 'sbc' in ldf.collect_schema().names() else ['umi']
+        meta_segments_ldf = ldf.pp.segment_by_metas(metas=metas, seq_col=seq_col, keep_cols=keep_cols)
+
+        # Step 3b: Extract edge segments (cassette anchors → first/last META)
+        if cassette_start_anchor or cassette_end_anchor:
+            self.logger.debug("Extracting cassette edge segments")
+            edge_segments_ldf = extract_edge_segments(
+                ldf=ldf,
+                metas=metas,
+                cassette_start_anchor=cassette_start_anchor,
+                cassette_end_anchor=cassette_end_anchor,
+                seq_col=seq_col,
+                keep_cols=keep_cols,  # Use same keep_cols with sbc
+                logger=self.logger,
+            )
+            # Combine META→META and edge segments
+            segments_ldf = pl.concat([meta_segments_ldf, edge_segments_ldf])
+        else:
+            segments_ldf = meta_segments_ldf
+
+        # TODO remove: optional checkpoint to save segments before assembly
+        if debug_path:
+            self.logger.info(f"Saving segments to {debug_path}")
+            segments_ldf.collect().write_parquet(debug_path)
+            segments_ldf = pl.scan_parquet(debug_path)
+        # END TODO remove
+
+        # Log segment type count
+        segment_types = segments_ldf.select('start_meta', 'end_meta').unique().collect()
+        self.logger.info(f"Found {len(segment_types)} unique segment types to assemble")
+
+        # Step 4: Assemble each segment type
+        # Note: We use compression method by default because:
+        # - Segments are already bounded by META sequences (no need for anchor path-finding)
+        # - shortest_path often fails on short segments (<300bp)
+        # - compression produces better consensus for bounded segments
+        self.logger.debug(f"Assembling segments with method={method}")
+        # Group by sbc+umi to prevent collisions across samples
+        group_cols = ['sbc', 'umi', 'start_meta', 'end_meta'] if 'sbc' in keep_cols else ['umi', 'start_meta', 'end_meta']
+        assembled = (
+            segments_ldf
+            .group_by(group_cols)
+            .agg(
+                rogtk.assemble_sequences(
+                    expr=pl.col('segment_seq'),
+                    k=k,
+                    min_coverage=min_coverage,
+                    method=method,
+                ).alias('consensus_seq')
+            )
+            # Filter out failed assemblies before stitching
+            .filter(pl.col('consensus_seq').str.len_chars() > 0)
+        )
+
+        # Collect intermediate data for reporting
+        self.logger.debug("Collecting data for report generation")
+        segments_df = segments_ldf.collect()
+        assembled_df = assembled.collect()
+
+        # Step 5: Stitch segments back together
+        self.logger.debug("Stitching assembled segments")
+        cassette_start_anchor_len = len(cassette_start_anchor) if cassette_start_anchor else None
+        # Use same grouping columns (with sbc if present) for stitching
+        stitch_group_cols = ['sbc', 'umi'] if 'sbc' in keep_cols else ['umi']
+        stitched = assembled_df.lazy().pp.stitch_segments(
+            metas=metas,
+            seq_col='consensus_seq',
+            cassette_start_anchor_len=cassette_start_anchor_len,
+            group_cols=stitch_group_cols,
+        )
+
+        # Collect contigs for reporting
+        contigs_df = stitched.rename({'stitched_seq': 'contig'}).collect()
+
+        # Generate and log diagnostic report
+        self.logger.debug("Generating segmentation report")
+        report = generate_segmentation_report(
+            segments_df=segments_df,
+            assembled_df=assembled_df,
+            contigs_df=contigs_df,
+            metas=metas,
+            cassette_start_anchor=cassette_start_anchor,
+            cassette_end_anchor=cassette_end_anchor,
+        )
+        report_str = format_segmentation_report(report)
+        self.logger.info(f"\n{report_str}")
+
+        # Return as LazyFrame for consistency
+        return contigs_df.lazy()
 
 
 # TODO

@@ -47,6 +47,10 @@ def generate_mask_PEtracer_expression(features_csv: str,
                                       logger: Optional[CustomLogger] = None
                                       ) -> pl.Expr:
     """
+    .. deprecated::
+        Use `generate_mask_flanks_expression()` instead, which handles both
+        edited and unedited cassettes universally.
+
     Generate a Polars expression to replace TARGET sequences with scrambled versions
     based on preceding META sequences.
 
@@ -198,6 +202,10 @@ def generate_unmask_PEtracer_expression(features_csv: str,
                                         logger: Optional[CustomLogger] = None
                                         ) -> pl.Expr:
     """
+    .. deprecated::
+        Use `generate_unmask_flanks_expression()` instead, which handles both
+        edited and unedited cassettes universally.
+
     Generate a Polars expression to restore original TARGET sequences from scrambled versions.
 
     This reverses the masking operation performed by generate_mask_PEtracer_expression().
@@ -303,4 +311,259 @@ def generate_unmask_PEtracer_expression(features_csv: str,
 
     if logger is not None:
         logger.debug(f"Built unmasking expression with {len(patterns_df)} chained replacements")
+    return expr
+
+
+def generate_mask_flanks_expression(features_csv: str,
+                                     column_name: str = "seq",
+                                     fuzzy_pattern: bool = True,
+                                     fuzzy_kwargs: Optional[dict] = None,
+                                     logger: Optional[CustomLogger] = None
+                                     ) -> pl.Expr:
+    """
+    Generate a Polars expression to mask TARGET flanks based on preceding META sequences.
+
+    This function handles both edited and unedited cassettes by masking the flanking
+    sequences around potential lineage mark insertion points. Unlike the original
+    generate_mask_PEtracer_expression() which masks whole TARGETs, this function:
+    - Splits TARGETs into LEFT_FLANK and RIGHT_FLANK
+    - Scrambles each flank independently based on META context
+    - Preserves any inserted lineage marks (0-5bp between flanks)
+
+    Expected CSV format (6 columns: feature, seq, left_flank, right_flank, marks, kind):
+        feature,seq,left_flank,right_flank,marks,kind
+        META01,AGAAGCCGTGTGCCGGTCTA,,,META
+        META02,ATCGTGCGGACGAGACAGCA,,,META
+        RNF2,CATCTTAGTCATTACGACAGGTGTTCGTTG,CATCTTAGTCATTAC,GACAGGTGTTCGTTG,ACTGT|TAAGT|...,EDITED_TARGET
+        HEK3,CAGACTGAGCACGACTTGGCAGAGG...,CAGACTGAGCACG,ACTTGGCAGAGG...,CTATC|CGATT|...,EDITED_TARGET
+
+    How it works:
+        - META sequences are anchors that identify context
+        - LEFT_FLANK and RIGHT_FLANK define the target boundaries
+        - Pattern: (META)(.*?)(LEFT_FLANK)(.{0,5}?)(RIGHT_FLANK)(.*$)
+        - Group 4 captures: empty (unedited) or 5bp mark (edited)
+        - Flanks are scrambled based on META+TARGET combination
+        - Marks are preserved (group 4 passes through unchanged)
+
+    Args:
+        features_csv: Path to CSV file containing feature definitions
+        column_name: Name of the column to apply replacements to (default: "seq")
+        fuzzy_pattern: Whether to perform fuzzy string matching to account for sequencing errors
+        fuzzy_kwargs: Dictionary of keyword arguments to pass to fuzzy_match_str function
+
+    Returns:
+        pl.Expr: Polars expression with chained replacements
+
+    Usage:
+        expr = generate_mask_flanks_expression('features_edited.csv')
+        result = df.lazy().with_columns(expr.alias("masked_seq")).collect()
+    """
+    if fuzzy_kwargs is None:
+        fuzzy_kwargs = {}
+
+    # Read features CSV
+    meta = pl.read_csv(features_csv)
+
+    # Create all META-EDITED_TARGET combinations
+    patterns_df = (
+        meta
+        .filter(pl.col('kind') == 'META')
+        .join(
+            meta.filter(pl.col('kind') == 'EDITED_TARGET'),
+            suffix="_target",
+            how='cross'
+        )
+        .with_columns([
+            # Generate scrambled sequence for LEFT_FLANK
+            pl.struct(['feature', 'feature_target', 'left_flank_target']).map_elements(
+                lambda x: scramble_dna_sequence(
+                    seed_string=f"{x['feature']}_{x['feature_target']}_L",
+                    sequence=x['left_flank_target'],
+                    fuzzy_pattern=False,  # Replacement must be plain DNA
+                    fuzzy_kwargs=fuzzy_kwargs),
+                return_dtype=pl.Utf8
+            ).alias("scrambled_left"),
+            # Generate scrambled sequence for RIGHT_FLANK
+            pl.struct(['feature', 'feature_target', 'right_flank_target']).map_elements(
+                lambda x: scramble_dna_sequence(
+                    seed_string=f"{x['feature']}_{x['feature_target']}_R",
+                    sequence=x['right_flank_target'],
+                    fuzzy_pattern=False,  # Replacement must be plain DNA
+                    fuzzy_kwargs=fuzzy_kwargs),
+                return_dtype=pl.Utf8
+            ).alias("scrambled_right")
+        ])
+        .with_columns([
+            # Build regex pattern: (META)(.*?)(LEFT_FLANK)(.{0,5}?)(RIGHT_FLANK)(.*$)
+            # Groups: 1=META, 2=between, 3=LEFT, 4=MARK(0-5bp), 5=RIGHT, 6=rest
+            pl.concat_str([
+                pl.lit("("),
+                pl.when(fuzzy_pattern)
+                .then(pl.col('seq').map_elements(
+                    lambda x: fuzzy_match_str(x, **fuzzy_kwargs),
+                    return_dtype=pl.Utf8))
+                .otherwise(pl.col('seq')),  # META sequence
+                pl.lit(")(.*?)("),
+                pl.when(fuzzy_pattern)
+                .then(pl.col('left_flank_target').map_elements(
+                    lambda x: fuzzy_match_str(x, **fuzzy_kwargs),
+                    return_dtype=pl.Utf8))
+                .otherwise(pl.col('left_flank_target')),  # LEFT_FLANK
+                pl.lit(")(.{0,5}?)("),  # MARK capture (0-5 bases)
+                pl.when(fuzzy_pattern)
+                .then(pl.col('right_flank_target').map_elements(
+                    lambda x: fuzzy_match_str(x, **fuzzy_kwargs),
+                    return_dtype=pl.Utf8))
+                .otherwise(pl.col('right_flank_target')),  # RIGHT_FLANK
+                pl.lit(")(.*$)")
+            ]).alias("pattern"),
+            # Build replacement: ${1}${2}<scrambled_left>${4}<scrambled_right>${6}
+            # Preserves META, between content, MARK, and rest
+            pl.concat_str([
+                pl.lit("${1}${2}"),
+                pl.col('scrambled_left'),
+                pl.lit("${4}"),
+                pl.col('scrambled_right'),
+                pl.lit("${6}")
+            ]).alias("replacement")
+        ])
+    )
+
+    # Log pattern generation if logger provided
+    if logger is not None:
+        logger.debug(f"Generated {len(patterns_df)} flank replacement patterns")
+        if len(patterns_df) > 0:
+            logger.debug("Sample flank patterns:")
+            sample = patterns_df.head(3).select(['feature', 'feature_target', 'pattern', 'replacement'])
+            for row in sample.iter_rows(named=True):
+                logger.debug(f"  {row['feature']} + {row['feature_target']}: {row['pattern'][:60]}...")
+                logger.debug(f"    -> {row['replacement'][:60]}...")
+
+    # Build the chained expression by applying all pattern replacements
+    expr = pl.col(column_name)
+
+    for row in patterns_df.iter_rows(named=True):
+        pattern = row['pattern']
+        replacement = row['replacement']
+        expr = expr.str.replace(pattern, replacement)
+
+    if logger is not None:
+        logger.debug(f"Built expression with {len(patterns_df)} chained flank replacements")
+    return expr
+
+
+def generate_unmask_flanks_expression(features_csv: str,
+                                       column_name: str = "contig",
+                                       fuzzy_pattern: bool = True,
+                                       fuzzy_kwargs: Optional[dict] = None,
+                                       logger: Optional[CustomLogger] = None
+                                       ) -> pl.Expr:
+    """
+    Generate a Polars expression to restore original TARGET flanks from scrambled versions.
+
+    This reverses the masking operation performed by generate_mask_flanks_expression().
+    After assembly, contigs contain scrambled flank sequences which need to be restored
+    to their original form for downstream analysis. Lineage marks are preserved.
+
+    Args:
+        features_csv: Path to CSV file containing feature definitions (same as used for masking)
+        column_name: Name of the column to apply replacements to (default: "contig")
+        fuzzy_pattern: Whether fuzzy matching was used during masking
+        fuzzy_kwargs: Dictionary of keyword arguments used during masking
+
+    Returns:
+        pl.Expr: Polars expression with chained replacements to restore original sequences
+
+    Usage:
+        df_contigs = df_contigs.with_columns(
+            generate_unmask_flanks_expression('features_edited.csv').alias('contig')
+        )
+    """
+    if fuzzy_kwargs is None:
+        fuzzy_kwargs = {}
+
+    # Read features CSV
+    meta = pl.read_csv(features_csv)
+
+    # Create all META-EDITED_TARGET combinations (must match masking exactly)
+    patterns_df = (
+        meta
+        .filter(pl.col('kind') == 'META')
+        .join(
+            meta.filter(pl.col('kind') == 'EDITED_TARGET'),
+            suffix="_target",
+            how='cross'
+        )
+        .with_columns([
+            # Generate the same scrambled sequences used during masking
+            pl.struct(['feature', 'feature_target', 'left_flank_target']).map_elements(
+                lambda x: scramble_dna_sequence(
+                    seed_string=f"{x['feature']}_{x['feature_target']}_L",
+                    sequence=x['left_flank_target'],
+                    fuzzy_pattern=False,
+                    fuzzy_kwargs=fuzzy_kwargs),
+                return_dtype=pl.Utf8
+            ).alias("scrambled_left"),
+            pl.struct(['feature', 'feature_target', 'right_flank_target']).map_elements(
+                lambda x: scramble_dna_sequence(
+                    seed_string=f"{x['feature']}_{x['feature_target']}_R",
+                    sequence=x['right_flank_target'],
+                    fuzzy_pattern=False,
+                    fuzzy_kwargs=fuzzy_kwargs),
+                return_dtype=pl.Utf8
+            ).alias("scrambled_right")
+        ])
+        .with_columns([
+            # Build regex pattern: (META)(.*?)(SCRAMBLED_LEFT)(.{0,5}?)(SCRAMBLED_RIGHT)(.*$)
+            pl.concat_str([
+                pl.lit("("),
+                pl.when(fuzzy_pattern)
+                .then(pl.col('seq').map_elements(
+                    lambda x: fuzzy_match_str(x, **fuzzy_kwargs),
+                    return_dtype=pl.Utf8))
+                .otherwise(pl.col('seq')),  # META sequence
+                pl.lit(")(.*?)("),
+                pl.when(fuzzy_pattern)
+                .then(pl.col('scrambled_left').map_elements(
+                    lambda x: fuzzy_match_str(x, **fuzzy_kwargs),
+                    return_dtype=pl.Utf8))
+                .otherwise(pl.col('scrambled_left')),  # SCRAMBLED_LEFT
+                pl.lit(")(.{0,5}?)("),  # MARK capture (preserved)
+                pl.when(fuzzy_pattern)
+                .then(pl.col('scrambled_right').map_elements(
+                    lambda x: fuzzy_match_str(x, **fuzzy_kwargs),
+                    return_dtype=pl.Utf8))
+                .otherwise(pl.col('scrambled_right')),  # SCRAMBLED_RIGHT
+                pl.lit(")(.*$)")
+            ]).alias("pattern"),
+            # Build replacement: ${1}${2}<original_left>${4}<original_right>${6}
+            pl.concat_str([
+                pl.lit("${1}${2}"),
+                pl.col('left_flank_target'),  # Original LEFT_FLANK
+                pl.lit("${4}"),  # Preserve MARK
+                pl.col('right_flank_target'),  # Original RIGHT_FLANK
+                pl.lit("${6}")
+            ]).alias("replacement")
+        ])
+    )
+
+    # Log pattern generation if logger provided
+    if logger is not None:
+        logger.debug(f"Generated {len(patterns_df)} flank unmasking patterns")
+        if len(patterns_df) > 0:
+            logger.debug("Sample unmasking patterns:")
+            sample = patterns_df.head(3).select(['feature', 'feature_target'])
+            for row in sample.iter_rows(named=True):
+                logger.debug(f"  {row['feature']} + {row['feature_target']}: restoring original flanks")
+
+    # Build the chained expression by applying all pattern replacements
+    expr = pl.col(column_name)
+
+    for row in patterns_df.iter_rows(named=True):
+        pattern = row['pattern']
+        replacement = row['replacement']
+        expr = expr.str.replace(pattern, replacement)
+
+    if logger is not None:
+        logger.debug(f"Built unmasking expression with {len(patterns_df)} chained flank replacements")
     return expr
