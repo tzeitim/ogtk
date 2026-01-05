@@ -11,7 +11,6 @@ from .masking import (
     generate_unmask_flanks_expression,
 )
 from .segmentation import (
-    sanitize_metas,
     segment_by_metas,
     stitch_segments,
     flag_aberrant_molecules,
@@ -423,18 +422,6 @@ class PlPipeline:
             self._df
             .lazy()
             .pp.unmask_flanks(features_csv=features_csv, column_name=column_name, fuzzy_pattern=fuzzy_pattern, fuzzy_kwargs=fuzzy_kwargs, alias=alias)
-            .collect()
-        )
-
-    def sanitize_metas(self,
-                       metas: pl.DataFrame,
-                       seq_col: str = 'r2_seq',
-                       wildcard: str = ".{0,1}") -> pl.DataFrame:
-        """Replace fuzzy META matches with canonical sequences (DataFrame wrapper)"""
-        return (
-            self._df
-            .lazy()
-            .pp.sanitize_metas(metas=metas, seq_col=seq_col, wildcard=wildcard)
             .collect()
         )
 
@@ -998,32 +985,6 @@ class PllPipeline:
         output_name = alias if alias is not None else column_name
         return self._ldf.with_columns(unmask_expr.alias(output_name))
 
-    def sanitize_metas(self,
-                       metas: pl.DataFrame,
-                       seq_col: str = 'r2_seq',
-                       wildcard: str = ".{0,1}") -> pl.LazyFrame:
-        """
-        Replace fuzzy META matches with canonical sequences to handle sequencing errors.
-
-        This normalizes METAs with sequencing errors to their canonical form before
-        exact matching in segmentation.
-
-        Args:
-            metas: DataFrame with 'feature', 'seq', and optionally 'kind' columns
-            seq_col: Name of the column containing sequences (default: 'r2_seq')
-            wildcard: Regex pattern for fuzzy matching (default: '.{0,1}' allows 1 error)
-
-        Returns:
-            LazyFrame with sanitized sequences
-        """
-        return sanitize_metas(
-            ldf=self._ldf,
-            metas=metas,
-            seq_col=seq_col,
-            wildcard=wildcard,
-            logger=self.logger
-        )
-
     def segment_by_metas(self,
                          metas: pl.DataFrame,
                          seq_col: str = 'r2_seq',
@@ -1135,20 +1096,15 @@ class PllPipeline:
 
         self.logger.info("Using segmented assembly strategy")
 
-        # Step 1: Sanitize METAs (handle sequencing errors)
-        self.logger.debug("Sanitizing META sequences")
-        ldf = self._ldf.pp.sanitize_metas(metas=metas, seq_col=seq_col)
-
-        # Step 2: Flag and filter aberrant molecules (tandem duplications)
+        # Flag and filter aberrant molecules (tandem duplications)
         self.logger.debug("Flagging aberrant molecules")
-        ldf = ldf.pp.flag_aberrant_molecules(metas=metas, seq_col=seq_col)
+        ldf = self._ldf.pp.flag_aberrant_molecules(metas=metas, seq_col=seq_col)
         n_aberrant = ldf.filter(pl.col('is_aberrant')).select(pl.col('umi').n_unique()).collect().item()
         self.logger.info(f"Found {n_aberrant} UMIs with tandem duplications (will be skipped)")
         ldf = ldf.filter(~pl.col('is_aberrant')).drop('is_aberrant')
 
-        # Step 3: Segment by METAs (META→META segments + edge segments)
+        # Segment by METAs (sanitize + META→META segments + edge segments)
         # Include 'sbc' in keep_cols to prevent UMI collisions across samples
-        # Note: TARGET insertion extraction is done after assembly (Step 4b)
         self.logger.debug("Segmenting reads at META boundaries")
         keep_cols = ['umi', 'sbc'] if 'sbc' in ldf.collect_schema().names() else ['umi']
         segments_ldf = segment_by_metas(
@@ -1172,7 +1128,7 @@ class PllPipeline:
         segment_types = segments_ldf.select('start_meta', 'end_meta').unique().collect()
         self.logger.info(f"Found {len(segment_types)} unique segment types to assemble")
 
-        # Step 4: Assemble each segment type
+        # Assemble each segment type
         # Note: We use compression method by default because:
         # - Segments are already bounded by META sequences (no need for anchor path-finding)
         # - shortest_path often fails on short segments (<300bp)
@@ -1200,24 +1156,44 @@ class PllPipeline:
         segments_df = segments_ldf.collect()
         assembled_df = assembled.collect()
 
-        # Step 4b: Extract TARGET insertions from assembled consensus sequences
+        # Extract TARGET insertions from assembled consensus sequences
         # Done after assembly to use clean consensus (removes sequencing noise)
+        #
+        # Strategy: Use shorter anchor portions (last/first N chars of flanks) to handle
+        # indels that may delete part of the flank.
         if 'left_flank' in metas.columns and 'right_flank' in metas.columns:
             self.logger.debug("Extracting TARGET insertions from assembled segments")
             targets_df = metas.filter(pl.col('kind') == 'EDITED_TARGET')
+            anchor_len = 8  # Use last/first 8bp of flanks as anchors
+            max_insertion = 6  # Max insertion length to capture (PE marks are 5bp)
+
             for row in targets_df.iter_rows(named=True):
                 target_name = row['feature']
                 left_flank = row['left_flank']
                 right_flank = row['right_flank']
                 if left_flank and right_flank:
-                    # Use exact flanks with length constraint (0-6bp for PE marks)
-                    pattern = f'{left_flank}(.{{0,6}}){right_flank}'
+                    # Use partial anchors: last N chars of left_flank, first N chars of right_flank
+                    # This allows detection even when part of the flank is deleted at cut site
+                    left_anchor = left_flank[-anchor_len:] if len(left_flank) > anchor_len else left_flank
+                    right_anchor = right_flank[:anchor_len] if len(right_flank) > anchor_len else right_flank
+
+                    # Pattern: left_anchor + (0 to max_insertion bp) + right_anchor
+                    # The captured group contains the insertion (empty string = wild-type)
+                    pattern = f'{left_anchor}(.{{0,{max_insertion}}}){right_anchor}'
                     col_name = f'{target_name}_ins'
                     assembled_df = assembled_df.with_columns(
                         pl.col('consensus_seq').str.extract(pattern, 1).alias(col_name)
                     )
 
-        # Step 5: Stitch segments back together
+        # Save assembled segments with insertions
+        if debug_path:
+            from pathlib import Path
+            debug_path_obj = Path(debug_path)
+            assembled_path = debug_path_obj.with_stem(debug_path_obj.stem.replace('segments', 'assembled'))
+            self.logger.info(f"Saving assembled segments with insertions to {assembled_path}")
+            assembled_df.write_parquet(assembled_path)
+
+        # Stitch segments back together
         self.logger.debug("Stitching assembled segments")
         cassette_start_anchor_len = len(cassette_start_anchor) if cassette_start_anchor else None
         # Use same grouping columns (with sbc if present) for stitching
