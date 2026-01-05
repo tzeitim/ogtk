@@ -13,7 +13,6 @@ from .masking import (
 from .segmentation import (
     sanitize_metas,
     segment_by_metas,
-    extract_edge_segments,
     stitch_segments,
     flag_aberrant_molecules,
     generate_segmentation_report,
@@ -1147,28 +1146,20 @@ class PllPipeline:
         self.logger.info(f"Found {n_aberrant} UMIs with tandem duplications (will be skipped)")
         ldf = ldf.filter(~pl.col('is_aberrant')).drop('is_aberrant')
 
-        # Step 3: Segment by METAs (META→META segments)
+        # Step 3: Segment by METAs (META→META segments + edge segments)
         # Include 'sbc' in keep_cols to prevent UMI collisions across samples
+        # Note: TARGET insertion extraction is done after assembly (Step 4b)
         self.logger.debug("Segmenting reads at META boundaries")
         keep_cols = ['umi', 'sbc'] if 'sbc' in ldf.collect_schema().names() else ['umi']
-        meta_segments_ldf = ldf.pp.segment_by_metas(metas=metas, seq_col=seq_col, keep_cols=keep_cols)
-
-        # Step 3b: Extract edge segments (cassette anchors → first/last META)
-        if cassette_start_anchor or cassette_end_anchor:
-            self.logger.debug("Extracting cassette edge segments")
-            edge_segments_ldf = extract_edge_segments(
-                ldf=ldf,
-                metas=metas,
-                cassette_start_anchor=cassette_start_anchor,
-                cassette_end_anchor=cassette_end_anchor,
-                seq_col=seq_col,
-                keep_cols=keep_cols,  # Use same keep_cols with sbc
-                logger=self.logger,
-            )
-            # Combine META→META and edge segments
-            segments_ldf = pl.concat([meta_segments_ldf, edge_segments_ldf])
-        else:
-            segments_ldf = meta_segments_ldf
+        segments_ldf = segment_by_metas(
+            ldf=ldf,
+            metas=metas,
+            seq_col=seq_col,
+            keep_cols=keep_cols,
+            cassette_start_anchor=cassette_start_anchor,
+            cassette_end_anchor=cassette_end_anchor,
+            logger=self.logger,
+        )
 
         # TODO remove: optional checkpoint to save segments before assembly
         if debug_path:
@@ -1208,6 +1199,23 @@ class PllPipeline:
         self.logger.debug("Collecting data for report generation")
         segments_df = segments_ldf.collect()
         assembled_df = assembled.collect()
+
+        # Step 4b: Extract TARGET insertions from assembled consensus sequences
+        # Done after assembly to use clean consensus (removes sequencing noise)
+        if 'left_flank' in metas.columns and 'right_flank' in metas.columns:
+            self.logger.debug("Extracting TARGET insertions from assembled segments")
+            targets_df = metas.filter(pl.col('kind') == 'EDITED_TARGET')
+            for row in targets_df.iter_rows(named=True):
+                target_name = row['feature']
+                left_flank = row['left_flank']
+                right_flank = row['right_flank']
+                if left_flank and right_flank:
+                    # Use exact flanks with length constraint (0-6bp for PE marks)
+                    pattern = f'{left_flank}(.{{0,6}}){right_flank}'
+                    col_name = f'{target_name}_ins'
+                    assembled_df = assembled_df.with_columns(
+                        pl.col('consensus_seq').str.extract(pattern, 1).alias(col_name)
+                    )
 
         # Step 5: Stitch segments back together
         self.logger.debug("Stitching assembled segments")

@@ -51,30 +51,46 @@ def sanitize_metas(
     return ldf
 
 
+# Special markers for cassette edge segments
+CASSETTE_START_MARKER = "_CASSETTE_START_"
+CASSETTE_END_MARKER = "_CASSETTE_END_"
+
+
 def segment_by_metas(
     ldf: pl.LazyFrame,
     metas: pl.DataFrame,
     seq_col: str = 'r2_seq',
     keep_cols: Optional[list] = None,
+    cassette_start_anchor: Optional[str] = None,
+    cassette_end_anchor: Optional[str] = None,
     logger: Optional[CustomLogger] = None
 ) -> pl.LazyFrame:
     """
     Split reads at META boundaries into overlapping segments.
 
     Each segment includes both boundary METAs for overlap-based stitching.
+    Optionally extracts edge segments (cassette start/end).
+
+    Note: TARGET insertion extraction should be done AFTER assembly (on consensus_seq)
+    to benefit from noise reduction. See api_ext.py Step 4b.
 
     Args:
         ldf: LazyFrame with sequence data (should be sanitized first)
         metas: DataFrame with 'feature' and 'seq' columns
         seq_col: Name of the column containing sequences
         keep_cols: Additional columns to preserve (default: ['umi'])
+        cassette_start_anchor: Sequence marking cassette start (for edge segment extraction)
+        cassette_end_anchor: Sequence marking cassette end (for edge segment extraction)
         logger: Optional logger for debugging
 
     Returns:
-        LazyFrame with columns: umi, start_meta, end_meta, segment_seq
+        LazyFrame with columns: [keep_cols], start_meta, end_meta, segment_seq
     """
     if keep_cols is None:
         keep_cols = ['umi']
+
+    # Keep reference to original ldf for edge segment extraction
+    original_ldf = ldf
 
     # Filter to only META sequences
     meta_only = metas.filter(pl.col('kind') == 'META') if 'kind' in metas.columns else metas
@@ -163,7 +179,8 @@ def segment_by_metas(
 
     # Get positions and extract segments
     pos_cols = [f'_pos_{name}' for name in meta_names]
-    return (
+
+    ldf = (
         ldf
         .with_columns(
             start_pos_expr.alias('start_pos'),
@@ -176,13 +193,26 @@ def segment_by_metas(
                 pl.col('end_pos') - pl.col('start_pos') + META_LEN
             ).alias('segment_seq')
         )
-        .select(keep_cols + ['start_meta', 'end_meta', 'segment_seq'])
     )
 
+    meta_segments = ldf.select(keep_cols + ['start_meta', 'end_meta', 'segment_seq'])
 
-# Special markers for cassette edge segments
-CASSETTE_START_MARKER = "_CASSETTE_START_"
-CASSETTE_END_MARKER = "_CASSETTE_END_"
+    # Extract edge segments if cassette anchors are provided
+    if not cassette_start_anchor and not cassette_end_anchor:
+        return meta_segments
+
+    # Use original_ldf for edge extraction (before META processing modified it)
+    edge_segments = extract_edge_segments(
+        ldf=original_ldf,
+        metas=metas,
+        cassette_start_anchor=cassette_start_anchor,
+        cassette_end_anchor=cassette_end_anchor,
+        seq_col=seq_col,
+        keep_cols=keep_cols,
+        logger=logger,
+    )
+
+    return pl.concat([meta_segments, edge_segments])
 
 
 def extract_edge_segments(
@@ -201,6 +231,9 @@ def extract_edge_segments(
     - [cassette_start_anchor]...[first_META]
     - [last_META]...[cassette_end_anchor]
 
+    Note: TARGET insertion extraction should be done AFTER assembly (on consensus_seq)
+    to benefit from noise reduction. See api_ext.py Step 4b.
+
     Args:
         ldf: LazyFrame with sequence data (should be sanitized first)
         metas: DataFrame with 'feature' and 'seq' columns
@@ -211,7 +244,7 @@ def extract_edge_segments(
         logger: Optional logger for debugging
 
     Returns:
-        LazyFrame with columns: umi, start_meta, end_meta, segment_seq
+        LazyFrame with columns: [keep_cols], start_meta, end_meta, segment_seq
         Uses special markers CASSETTE_START_MARKER and CASSETTE_END_MARKER
     """
     if keep_cols is None:
@@ -246,7 +279,6 @@ def extract_edge_segments(
 
     # Extract start edge segment: cassette_start_anchor -> first_META
     if cassette_start_anchor:
-        start_anchor_len = len(cassette_start_anchor)
         start_edge = (
             ldf
             .with_columns([

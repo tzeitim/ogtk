@@ -8,6 +8,7 @@ from .config import ExtensionConfig
 from ..pipeline.types import StepResults,FractureXp
 from dataclasses import dataclass, field
 from ogtk.utils.log import CustomLogger
+from ogtk.utils.general import fuzzy_match_str
 
 def plug_cassiopeia(
         ldf: pl.LazyFrame,
@@ -171,12 +172,82 @@ def generate_refs_from_fasta(refs_fasta_path: str|Path, anchor1: str, anchor2: s
 
     return refs
 
+
+# ============================================================================
+# Segment-based allele table generation
+# ============================================================================
+
+CASSETTE_START_MARKER = "_CASSETTE_START_"
+TARGET_ORDER = ["RNF2", "HEK3", "EMX1"]  # Order within each triplet
+
+CASSETTE_CONFIGS = {
+    "5mer": {"n_metas": 4, "n_targets": 12},
+    "10mer": {"n_metas": 9, "n_targets": 27},
+    "20mer": {"n_metas": 19, "n_targets": 57},
+}
+
+
+def build_target_position_map(
+    metas_df: pl.DataFrame,
+    cassette_type: str = "5mer",
+) -> Dict[Tuple[str, str], List[Tuple[str, int]]]:
+    """
+    Build mapping from (start_meta, end_meta) segment boundaries to TARGET positions.
+
+    Logic:
+    - For 5mer: 4 METAs (META01-META04), creating 4 segments each with 3 TARGETs = 12 positions
+    - Segment (_CASSETTE_START_, META01) → positions r1, r2, r3 (RNF2, HEK3, EMX1)
+    - Segment (META01, META02) → positions r4, r5, r6
+    - etc.
+
+    Returns:
+        Dict mapping (start_meta, end_meta) -> [(target_name, position_index), ...]
+    """
+    raise NotImplementedError("TODO: implement with polars")
+
+
+def segments_to_allele_table(
+    segments_df: pl.DataFrame,
+    metas_df: pl.DataFrame,
+    int_anchor1: str,
+    int_anchor2: str,
+    cassette_type: str = "5mer",
+    min_consensus_support: float = 0.5,
+    logger: Optional[CustomLogger] = None,
+) -> pl.DataFrame:
+    """
+    Transform segmentation table to cassiopeia allele table format.
+
+    Input columns: [sbc, umi, start_meta, end_meta, segment_seq]
+
+    Output columns:
+    - cellBC, UMI, readCount, intBC, sbc, mod
+    - r1, r2, r3, ... rN (one per TARGET position)
+
+    Logic:
+    1. Extract intBC using: pl.col('segment_seq').str.extract(f'{int_anchor1}(.+?){int_anchor2}', 1)
+    2. Map (start_meta, end_meta) to TARGET positions using build_target_position_map()
+    3. For each TARGET in segment, extract insertion using flanks from metas_df
+       - left_flank and right_flank columns identify TARGET boundaries
+       - Insertion = sequence between left_flank and right_flank
+       - Empty string = wild-type, None = flanks not found
+    4. Group by (sbc, umi) and consensus across multiple observations
+    5. Pivot to wide format: r1, r2, r3, ...
+
+    Values in rN columns:
+    - "" (empty): Wild-type, no insertion
+    - "ACTGT": Insertion sequence (lineage mark)
+    - None: Missing data
+    """
+    raise NotImplementedError("TODO: implement with polars")
+
+
 @dataclass
 class CassiopeiaConfig(ExtensionConfig):
     # Required fields
     int_anchor1: str
     int_anchor2: str
-    
+
     # Optional fields with defaults
     sbc_dict: Optional[Dict] = None
     annotation: str = 'sbc'
@@ -189,16 +260,22 @@ class CassiopeiaConfig(ExtensionConfig):
     cutsite_width: int = 12
     context: bool = True
     context_size: int = 50
+
+    # Segmented allele extraction fields
+    metas_flanks_csv: Optional[str] = None  # Path to PEtracer_metas_flanks.csv
+    cassette_type: str = "5mer"  # Options: 5mer, 10mer, 20mer
+    min_consensus_support: float = 0.5  # Minimum support for consensus calls
     
 
 class CassiopeiaStep(Enum):
     """Steps within the Cassiopeia lineage extension"""
     PARSE_CONTIGS = 'parse_contigs'
-    CLASSIFY_CASSETTES = "classify_cassettes" 
+    CLASSIFY_CASSETTES = "classify_cassettes"
     PLUG_CASSIOPEIA = "plug_cassiopeia"
     EXTRACT_BARCODES = "extract_barcodes"
     GENERATE_MATRIX = "generate_matrix"
     GENERATE_METADATA = "generate_metadata"
+    SEGMENTED_ALLELE = "segmented_allele"  # Direct allele table from segments
 
 class CassiopeiaLineageExtension(PostProcessorExtension):
     xp: FractureXp
@@ -288,7 +365,13 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
             self.xp.logger.io(f"Saving cassiopeia allele tables to {cass_allele_path}")
             self.ldf.sink_parquet(cass_allele_path)
 
-            
+        if self.should_run_step(CassiopeiaStep.SEGMENTED_ALLELE.value):
+            self.xp.logger.info("Running segmented_allele step")
+            result = self._segmented_allele()
+            self.alleles_segmented = result.results['allele_table_segmented']
+            final_results.update(result.results)
+            final_metrics.update(result.metrics)
+
         if self.should_run_step(CassiopeiaStep.GENERATE_MATRIX.value):
             self.xp.logger.info("Running generate_matrix step")
             result = self._generate_matrix()
@@ -331,7 +414,7 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         )
     
     def _plug_cassiopeia(self) -> StepResults:
-        """ 
+        """
         readName - A unique identifier for each row/sequence
         cellBC - The cell barcode
         UMI - The UMI (Unique Molecular Identifier)
@@ -341,12 +424,55 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         """
         config = self.config.get_function_config(plug_cassiopeia)
 
-        return plug_cassiopeia(ldf=self.ldf, 
+        return plug_cassiopeia(ldf=self.ldf,
                                ann_intbc_mod=self.ann_intbc_mod,
                                workdir=self.workdir,
                                logger=self.xp.logger,
                                **config)
-    
+
+    def _segmented_allele(self) -> StepResults:
+        """
+        Generate allele table directly from segments (no assembly needed).
+
+        Reads segments_debug.parquet from workdir and generates allele_table_segmented.parquet.
+        """
+        segments_path = self.workdir / "segments_debug.parquet"
+
+        if not segments_path.exists():
+            raise FileNotFoundError(
+                f"Segments file not found: {segments_path}. "
+                "Run fracture with use_segmentation=True first."
+            )
+
+        segments_df = pl.read_parquet(segments_path)
+
+        if self.config.metas_flanks_csv is None:
+            raise ValueError("metas_flanks_csv must be set in config for segmented_allele step")
+
+        metas_df = pl.read_csv(self.config.metas_flanks_csv)
+
+        allele_table = segments_to_allele_table(
+            segments_df=segments_df,
+            metas_df=metas_df,
+            int_anchor1=self.config.int_anchor1,
+            int_anchor2=self.config.int_anchor2,
+            cassette_type=self.config.cassette_type,
+            min_consensus_support=self.config.min_consensus_support,
+            logger=self.xp.logger,
+        )
+
+        output_path = self.workdir / "allele_table_segmented.parquet"
+        allele_table.write_parquet(output_path)
+        self.xp.logger.io(f"Saved segmented allele table to {output_path}")
+
+        return StepResults(
+            results={'allele_table_segmented': allele_table},
+            metrics={
+                'total_molecules': allele_table.height,
+                'unique_intbcs': allele_table['intBC'].n_unique() if allele_table.height > 0 else 0,
+            }
+        )
+
     def _pycea_explore(self):
         
        """ """ 
