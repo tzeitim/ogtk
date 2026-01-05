@@ -830,8 +830,13 @@ class Pipeline:
                     # Choose assembly strategy
                     if use_segmentation:
                         # Segmented assembly for long cassettes
-                        # TODO remove: debug_path for saving segments before assembly
-                        debug_path = f"{self.xp.sample_wd}/segments_debug.parquet"
+                        # Save intermediate files if configured
+                        debug_path = None
+                        if getattr(self.xp, 'save_intermediate_files', False):
+                            intermediate_dir = Path(self.xp.sample_wd) / 'intermediate'
+                            intermediate_dir.mkdir(exist_ok=True)
+                            debug_path = str(intermediate_dir / "segments_debug.parquet")
+
                         df_contigs = (
                             ldf
                             .filter(filter_expr)
