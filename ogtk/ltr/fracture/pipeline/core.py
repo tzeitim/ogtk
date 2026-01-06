@@ -311,7 +311,7 @@ class Pipeline:
                 temp_merged_fn = f'{sample_dir}/temp_merged_reads_{i}.parquet'
                 
                 self.logger.info(f"Processing {input_format.upper()} file {i+1}/{len(files)}: {file}")
-                
+
                 self._par_process_single_file(file, temp_out_fn, temp_merged_fn, sample_dir, input_format, force_tab, limit)
                 
                 temp_parsed_files.append(temp_out_fn)
@@ -348,8 +348,11 @@ class Pipeline:
             )
             
         elif input_format == 'bam':
-            raw_bam_fn = f'{sample_dir}/temp_raw_bam_{Path(file).stem}.parquet'
-            
+            # Store raw BAM parquet in intermediate directory
+            intermediate_dir = Path(sample_dir) / 'intermediate'
+            intermediate_dir.mkdir(exist_ok=True)
+            raw_bam_fn = str(intermediate_dir / 'raw_bam.parquet')
+
             import rogtk
 
             if not Path(raw_bam_fn).exists() or force_tab:
@@ -374,13 +377,14 @@ class Pipeline:
                 )
                 .sink_parquet(merged_fn)
             )
-            
+
             # For BAM, parsed = merged (no additional processing)
             import shutil
             shutil.copy2(merged_fn, out_fn)
-            
-            # Clean up intermediate file
-            #Path(raw_bam_fn).unlink(missing_ok=True)
+
+            # Clean up intermediate file unless save_intermediate_files is set
+            if not getattr(self.xp, 'save_intermediate_files', False):
+                Path(raw_bam_fn).unlink(missing_ok=True)
 
     def _par_combine_parquet_files(self, file_list, output_file):
         """Combine multiple parquet files into one"""
@@ -822,10 +826,18 @@ class Pipeline:
                             ldf.sink_parquet(str(masked_file))
                             ldf = pl.scan_parquet(str(masked_file))
 
-                    out_file = f"{self.xp.sample_wd}/contigs_pl_direct_{key}.parquet" #pyright:ignore
-                    self.logger.info(f"exporting assembled contigs to {out_file}")
-
                     filter_expr= pl.col('reads')>=self.xp.fracture['min_reads']
+
+                    # Determine strategy name for output file
+                    if use_segmentation:
+                        strategy = 'segmented'
+                    elif hasattr(self.xp, 'features_csv') and self.xp.features_csv:
+                        strategy = 'masked'
+                    else:
+                        strategy = 'direct'
+
+                    out_file = f"{self.xp.sample_wd}/contigs_{strategy}_{key}.parquet"
+                    self.logger.info(f"Exporting assembled contigs ({strategy}) to {out_file}")
 
                     # Choose assembly strategy
                     if use_segmentation:
@@ -935,11 +947,18 @@ class Pipeline:
             self.logger.warning("Extensions module not available")
             return True
         
-        # Look for contigs file
+        # Look for contigs file (check all strategy variants)
         # on valid reads only
         key = 'valid'
-        contigs_path = Path(f"{self.xp.sample_wd}/contigs_pl_direct_{key}.parquet")
-        if not contigs_path.exists():
+        contigs_path = None
+        for strategy in ['segmented', 'masked', 'direct']:
+            candidate = Path(f"{self.xp.sample_wd}/contigs_{strategy}_{key}.parquet")
+            if candidate.exists():
+                contigs_path = candidate
+                self.logger.info(f"Found contigs file: {contigs_path.name}")
+                break
+
+        if not contigs_path:
             self.logger.error("No contigs found for post-processing. Run fracture step first.")
             return False
         
