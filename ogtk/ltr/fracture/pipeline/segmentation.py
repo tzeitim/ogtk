@@ -25,10 +25,10 @@ CASSETTE_END_MARKER = "_CASSETTE_END_"
 def segment_by_metas(
     ldf: pl.LazyFrame,
     metas: pl.DataFrame,
+    cassette_start_anchor: str,
+    cassette_end_anchor: str,
     seq_col: str = 'r2_seq',
     keep_cols: Optional[list] = None,
-    cassette_start_anchor: Optional[str] = None,
-    cassette_end_anchor: Optional[str] = None,
     wildcard: str | None = ".{0,1}",
     sanitize: bool = True,
     logger: Optional[CustomLogger] = None
@@ -37,19 +37,19 @@ def segment_by_metas(
     Split reads at META boundaries into overlapping segments.
 
     This function performs the complete segmentation pipeline:
-    1. Sanitize METAs (normalize fuzzy matches to canonical sequences)
+    1. Sanitize METAs and cassette anchors (normalize fuzzy matches to canonical sequences)
     2. Extract META-to-META segments
-    3. Extract edge segments (cassette start/end) if anchors provided
+    3. Extract edge segments (cassette start/end)
 
     Each segment includes both boundary METAs for overlap-based stitching.
 
     Args:
         ldf: LazyFrame with sequence data
         metas: DataFrame with 'feature', 'seq', and optionally 'kind' columns
+        cassette_start_anchor: Sequence marking cassette start (required)
+        cassette_end_anchor: Sequence marking cassette end (required)
         seq_col: Name of the column containing sequences
         keep_cols: Additional columns to preserve (default: ['umi'])
-        cassette_start_anchor: Sequence marking cassette start (for edge segments)
-        cassette_end_anchor: Sequence marking cassette end (for edge segments)
         wildcard: Regex pattern for fuzzy matching (default: ".{0,1}" allows 1 error).
                   Set to None for exact matching only.
         sanitize: Whether to sanitize META sequences first (default: True)
@@ -66,16 +66,24 @@ def segment_by_metas(
     meta_seqs = meta_only['seq'].to_list()
     meta_names = meta_only['feature'].to_list()
 
-    # ==================== STEP 1: SANITIZE ====================
-    # Replace fuzzy META matches with canonical sequences
+    # ==================== SANITIZE ====================
+    # Replace fuzzy matches with canonical sequences for METAs and cassette anchors
     if sanitize and wildcard:
         if logger:
-            logger.debug(f"Sanitizing {len(meta_seqs)} META sequences with wildcard: {wildcard}")
+            logger.debug(f"Sanitizing {len(meta_seqs)} META sequences + 2 cassette anchors with wildcard: {wildcard}")
+
+        # Sanitize METAs
         for seq, name in zip(meta_seqs, meta_names):
             fuzzy_pattern = fuzzy_match_str(seq, wildcard=wildcard, include_original=True)
             ldf = ldf.with_columns(pl.col(seq_col).str.replace_all(fuzzy_pattern, seq))
 
-    # Keep reference for edge extraction (after META sanitization)
+        # Sanitize cassette anchors
+        fuzzy_start = fuzzy_match_str(cassette_start_anchor, wildcard=wildcard, include_original=True)
+        ldf = ldf.with_columns(pl.col(seq_col).str.replace_all(fuzzy_start, cassette_start_anchor))
+        fuzzy_end = fuzzy_match_str(cassette_end_anchor, wildcard=wildcard, include_original=True)
+        ldf = ldf.with_columns(pl.col(seq_col).str.replace_all(fuzzy_end, cassette_end_anchor))
+
+    # Keep reference for edge extraction (after sanitization)
     sanitized_ldf = ldf
 
     if logger:
@@ -162,87 +170,98 @@ def segment_by_metas(
 
     meta_segments = ldf.select(keep_cols + ['start_meta', 'end_meta', 'segment_seq'])
 
-    # ==================== STEP 3: EDGE SEGMENTS ====================
-    if not cassette_start_anchor and not cassette_end_anchor:
-        return meta_segments
-
-    first_meta_name, last_meta_name = meta_names[0], meta_names[-1]
-    first_meta_seq, last_meta_seq = meta_seqs[0], meta_seqs[-1]
-
+    # ==================== EDGE SEGMENTS ====================
+    # Empirically determine first/last META for each read (handles variable cassette structures)
     if logger:
-        if cassette_start_anchor:
-            logger.debug(f"Extracting start edge: {cassette_start_anchor[:20]}... -> {first_meta_name}")
-        if cassette_end_anchor:
-            logger.debug(f"Extracting end edge: {last_meta_name} -> ...{cassette_end_anchor[-20:]}")
+        logger.debug(f"Extracting edge segments (empirical META detection)")
 
-    # Sanitize anchors with fuzzy matching
-    edge_ldf = sanitized_ldf
-    if wildcard:
-        if cassette_start_anchor:
-            fuzzy_start = fuzzy_match_str(cassette_start_anchor, wildcard=wildcard, include_original=True)
-            edge_ldf = edge_ldf.with_columns(
-                pl.col(seq_col).str.replace_all(fuzzy_start, cassette_start_anchor)
-            )
-        if cassette_end_anchor:
-            fuzzy_end = fuzzy_match_str(cassette_end_anchor, wildcard=wildcard, include_original=True)
-            edge_ldf = edge_ldf.with_columns(
-                pl.col(seq_col).str.replace_all(fuzzy_end, cassette_end_anchor)
-            )
+    # Build position expressions for all METAs
+    meta_pos_exprs = [
+        pl.col(seq_col).str.find(seq).alias(f'_pos_{name}')
+        for name, seq in zip(meta_names, meta_seqs)
+    ]
 
-    edge_segments = []
+    edge_ldf = sanitized_ldf.with_columns([
+        pl.col(seq_col).str.find(cassette_start_anchor).alias('_start_anchor_pos'),
+        pl.col(seq_col).str.find(cassette_end_anchor).alias('_end_anchor_pos'),
+    ] + meta_pos_exprs)
 
-    # Start edge: cassette_start_anchor -> first_META
-    if cassette_start_anchor:
-        start_edge = (
-            edge_ldf
-            .with_columns([
-                pl.col(seq_col).str.find(cassette_start_anchor).alias('_start_anchor_pos'),
-                pl.col(seq_col).str.find(first_meta_seq).alias('_first_meta_pos'),
-            ])
-            .filter(
-                pl.col('_start_anchor_pos').is_not_null() &
-                pl.col('_first_meta_pos').is_not_null() &
-                (pl.col('_start_anchor_pos') < pl.col('_first_meta_pos'))
-            )
-            .with_columns([
-                pl.lit(CASSETTE_START_MARKER).alias('start_meta'),
-                pl.lit(first_meta_name).alias('end_meta'),
-                pl.col(seq_col).str.slice(
-                    pl.col('_start_anchor_pos'),
-                    pl.col('_first_meta_pos') - pl.col('_start_anchor_pos') + META_LEN
-                ).alias('segment_seq'),
-            ])
-            .select(keep_cols + ['start_meta', 'end_meta', 'segment_seq'])
+    # Start edge: cassette_start_anchor -> first META after it
+    # Find the META with minimum position that is > start_anchor_pos
+    min_meta_after_start = pl.min_horizontal(*[
+        pl.when(pl.col(f'_pos_{name}').is_not_null() & (pl.col(f'_pos_{name}') > pl.col('_start_anchor_pos')))
+        .then(pl.col(f'_pos_{name}'))
+        .otherwise(pl.lit(None).cast(pl.UInt32))
+        for name in meta_names
+    ])
+
+    # Find which META corresponds to that min position
+    first_meta_name_expr = pl.lit(None).cast(pl.Utf8)
+    for name in meta_names:
+        first_meta_name_expr = (
+            pl.when(pl.col(f'_pos_{name}') == pl.col('_first_meta_pos'))
+            .then(pl.lit(name))
+            .otherwise(first_meta_name_expr)
         )
-        edge_segments.append(start_edge)
 
-    # End edge: last_META -> cassette_end_anchor
-    if cassette_end_anchor:
-        end_anchor_len = len(cassette_end_anchor)
-        end_edge = (
-            edge_ldf
-            .with_columns([
-                pl.col(seq_col).str.find(last_meta_seq).alias('_last_meta_pos'),
-                pl.col(seq_col).str.find(cassette_end_anchor).alias('_end_anchor_pos'),
-            ])
-            .filter(
-                pl.col('_last_meta_pos').is_not_null() &
-                pl.col('_end_anchor_pos').is_not_null() &
-                (pl.col('_last_meta_pos') < pl.col('_end_anchor_pos'))
-            )
-            .with_columns([
-                pl.lit(last_meta_name).alias('start_meta'),
-                pl.lit(CASSETTE_END_MARKER).alias('end_meta'),
-                pl.col(seq_col).str.slice(
-                    pl.col('_last_meta_pos'),
-                    pl.col('_end_anchor_pos') - pl.col('_last_meta_pos') + end_anchor_len
-                ).alias('segment_seq'),
-            ])
-            .select(keep_cols + ['start_meta', 'end_meta', 'segment_seq'])
+    start_edge = (
+        edge_ldf
+        .with_columns(min_meta_after_start.alias('_first_meta_pos'))
+        .with_columns(first_meta_name_expr.alias('_first_meta_name'))
+        .filter(
+            pl.col('_start_anchor_pos').is_not_null() &
+            pl.col('_first_meta_pos').is_not_null()
         )
-        edge_segments.append(end_edge)
+        .with_columns([
+            pl.lit(CASSETTE_START_MARKER).alias('start_meta'),
+            pl.col('_first_meta_name').alias('end_meta'),
+            pl.col(seq_col).str.slice(
+                pl.col('_start_anchor_pos'),
+                pl.col('_first_meta_pos') - pl.col('_start_anchor_pos') + META_LEN
+            ).alias('segment_seq'),
+        ])
+        .select(keep_cols + ['start_meta', 'end_meta', 'segment_seq'])
+    )
 
-    return pl.concat([meta_segments] + edge_segments)
+    # End edge: last META before cassette_end_anchor -> end_anchor
+    # Find the META with maximum position that is < end_anchor_pos
+    max_meta_before_end = pl.max_horizontal(*[
+        pl.when(pl.col(f'_pos_{name}').is_not_null() & (pl.col(f'_pos_{name}') < pl.col('_end_anchor_pos')))
+        .then(pl.col(f'_pos_{name}'))
+        .otherwise(pl.lit(None).cast(pl.UInt32))
+        for name in meta_names
+    ])
+
+    # Find which META corresponds to that max position
+    last_meta_name_expr = pl.lit(None).cast(pl.Utf8)
+    for name in meta_names:
+        last_meta_name_expr = (
+            pl.when(pl.col(f'_pos_{name}') == pl.col('_last_meta_pos'))
+            .then(pl.lit(name))
+            .otherwise(last_meta_name_expr)
+        )
+
+    end_anchor_len = len(cassette_end_anchor)
+    end_edge = (
+        edge_ldf
+        .with_columns(max_meta_before_end.alias('_last_meta_pos'))
+        .with_columns(last_meta_name_expr.alias('_last_meta_name'))
+        .filter(
+            pl.col('_end_anchor_pos').is_not_null() &
+            pl.col('_last_meta_pos').is_not_null()
+        )
+        .with_columns([
+            pl.col('_last_meta_name').alias('start_meta'),
+            pl.lit(CASSETTE_END_MARKER).alias('end_meta'),
+            pl.col(seq_col).str.slice(
+                pl.col('_last_meta_pos'),
+                pl.col('_end_anchor_pos') - pl.col('_last_meta_pos') + end_anchor_len
+            ).alias('segment_seq'),
+        ])
+        .select(keep_cols + ['start_meta', 'end_meta', 'segment_seq'])
+    )
+
+    return pl.concat([meta_segments, start_edge, end_edge])
 
 
 def stitch_segments(

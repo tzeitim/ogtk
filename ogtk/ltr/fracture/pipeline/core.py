@@ -849,16 +849,20 @@ class Pipeline:
                             intermediate_dir.mkdir(exist_ok=True)
                             debug_path = str(intermediate_dir / "segments_debug.parquet")
 
+                        # Get assembly method from config (default to 'compression' for segments)
+                        assembly_method = self.xp.fracture.get('assembly_method', 'compression')
+
                         df_contigs = (
                             ldf
                             .filter(filter_expr)
                             .pp.assemble_segmented(
                                 metas=metas_df,
-                                k=self.xp.fracture['start_k'],
-                                min_coverage=self.xp.fracture['start_min_coverage'],
                                 cassette_start_anchor=self.xp.start_anchor,
                                 cassette_end_anchor=self.xp.end_anchor,
+                                k=self.xp.fracture['start_k'],
+                                min_coverage=self.xp.fracture['start_min_coverage'],
                                 debug_path=debug_path,
+                                method=assembly_method,
                             )
                             .with_columns(pl.col('contig').str.len_chars().alias('length'))
                             .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))

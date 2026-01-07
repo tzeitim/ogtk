@@ -427,13 +427,21 @@ class PlPipeline:
 
     def segment_by_metas(self,
                          metas: pl.DataFrame,
+                         cassette_start_anchor: str,
+                         cassette_end_anchor: str,
                          seq_col: str = 'r2_seq',
                          keep_cols: list | None = None) -> pl.DataFrame:
         """Split reads at META boundaries into overlapping segments (DataFrame wrapper)"""
         return (
             self._df
             .lazy()
-            .pp.segment_by_metas(metas=metas, seq_col=seq_col, keep_cols=keep_cols)
+            .pp.segment_by_metas(
+                metas=metas,
+                cassette_start_anchor=cassette_start_anchor,
+                cassette_end_anchor=cassette_end_anchor,
+                seq_col=seq_col,
+                keep_cols=keep_cols
+            )
             .collect()
         )
 
@@ -987,6 +995,8 @@ class PllPipeline:
 
     def segment_by_metas(self,
                          metas: pl.DataFrame,
+                         cassette_start_anchor: str,
+                         cassette_end_anchor: str,
                          seq_col: str = 'r2_seq',
                          keep_cols: list | None = None) -> pl.LazyFrame:
         """
@@ -997,6 +1007,8 @@ class PllPipeline:
 
         Args:
             metas: DataFrame with 'feature', 'seq', and optionally 'kind' columns
+            cassette_start_anchor: Sequence marking cassette start (required)
+            cassette_end_anchor: Sequence marking cassette end (required)
             seq_col: Name of the column containing sequences (default: 'r2_seq')
             keep_cols: Additional columns to preserve (default: ['umi'])
 
@@ -1006,6 +1018,8 @@ class PllPipeline:
         return segment_by_metas(
             ldf=self._ldf,
             metas=metas,
+            cassette_start_anchor=cassette_start_anchor,
+            cassette_end_anchor=cassette_end_anchor,
             seq_col=seq_col,
             keep_cols=keep_cols,
             logger=self.logger
@@ -1062,10 +1076,10 @@ class PllPipeline:
 
     def assemble_segmented(self,
                            metas: pl.DataFrame,
+                           cassette_start_anchor: str,
+                           cassette_end_anchor: str,
                            k: int = 15,
                            min_coverage: int = 20,
-                           cassette_start_anchor: str | None = None,
-                           cassette_end_anchor: str | None = None,
                            seq_col: str = 'r2_seq',
                            debug_path: str | None = None,
                            method: str = 'compression',
@@ -1078,10 +1092,10 @@ class PllPipeline:
 
         Args:
             metas: DataFrame with META sequences ('feature', 'seq', 'kind' columns)
+            cassette_start_anchor: Sequence marking cassette start (required)
+            cassette_end_anchor: Sequence marking cassette end (required)
             k: K-mer size for assembly (default: 15)
             min_coverage: Minimum coverage for k-mers (default: 20)
-            cassette_start_anchor: Anchor for the very first segment (cassette start)
-            cassette_end_anchor: Anchor for the very last segment (cassette end)
             seq_col: Name of the column containing sequences (default: 'r2_seq')
             debug_path: If provided, save segments to this path before assembly
             method: Assembly method - 'compression' (default, recommended for segments)
@@ -1110,10 +1124,10 @@ class PllPipeline:
         segments_ldf = segment_by_metas(
             ldf=ldf,
             metas=metas,
-            seq_col=seq_col,
-            keep_cols=keep_cols,
             cassette_start_anchor=cassette_start_anchor,
             cassette_end_anchor=cassette_end_anchor,
+            seq_col=seq_col,
+            keep_cols=keep_cols,
             logger=self.logger,
         )
 
@@ -1129,32 +1143,169 @@ class PllPipeline:
         self.logger.info(f"Found {len(segment_types)} unique segment types to assemble")
 
         # Assemble each segment type
-        # Note: We use compression method by default because:
-        # - Segments are already bounded by META sequences (no need for anchor path-finding)
-        # - shortest_path often fails on short segments (<300bp)
-        # - compression produces better consensus for bounded segments
         self.logger.debug(f"Assembling segments with method={method}")
         # Group by sbc+umi to prevent collisions across samples
         group_cols = ['sbc', 'umi', 'start_meta', 'end_meta'] if 'sbc' in keep_cols else ['umi', 'start_meta', 'end_meta']
-        assembled = (
-            segments_ldf
-            .group_by(group_cols)
-            .agg(
-                rogtk.assemble_sequences(
-                    expr=pl.col('segment_seq'),
-                    k=k,
-                    min_coverage=min_coverage,
-                    method=method,
-                ).alias('consensus_seq')
+
+        if method == 'shortest_path':
+            # For shortest_path: assemble each segment type with appropriate anchors
+            # Build META sequence lookup (including cassette anchors as pseudo-METAs)
+            meta_seq_map = dict(zip(metas['feature'], metas['seq']))
+            meta_seq_map[CASSETTE_START_MARKER] = cassette_start_anchor
+            meta_seq_map[CASSETTE_END_MARKER] = cassette_end_anchor
+
+            # Get unique segment types
+            segment_types_df = segments_ldf.select('start_meta', 'end_meta').unique().collect()
+            assembled_parts = []
+
+            for row in segment_types_df.iter_rows(named=True):
+                start_meta = row['start_meta']
+                end_meta = row['end_meta']
+
+                # Derive anchors from boundary METAs (use k bp from each end)
+                start_seq = meta_seq_map.get(start_meta, '')
+                end_seq = meta_seq_map.get(end_meta, '')
+                start_anchor = start_seq[-k:] if len(start_seq) >= k else start_seq
+                end_anchor = end_seq[:k] if len(end_seq) >= k else end_seq
+
+                if not start_anchor or not end_anchor:
+                    self.logger.warning(f"Skipping {start_meta}->{end_meta}: missing anchor sequences")
+                    continue
+
+                self.logger.debug(f"Assembling {start_meta}->{end_meta} with anchors: {start_anchor[:10]}.../{end_anchor[:10]}...")
+
+                # Filter to this segment type, trim to anchors, and assemble
+                segment_assembled = (
+                    segments_ldf
+                    .filter((pl.col('start_meta') == start_meta) & (pl.col('end_meta') == end_meta))
+                    # Trim sequences to anchor boundaries
+                    .with_columns(
+                        pl.col('segment_seq')
+                        .str.replace(f'^.*?({start_anchor})', f'{start_anchor}')
+                        .str.replace(f'({end_anchor}).*$', f'{end_anchor}')
+                        .alias('segment_seq_trimmed')
+                    )
+                    .group_by(group_cols)
+                    .agg(
+                        rogtk.assemble_sequences(
+                            expr=pl.col('segment_seq_trimmed'),
+                            k=k,
+                            min_coverage=min_coverage,
+                            method='shortest_path',
+                            start_anchor=start_anchor,
+                            end_anchor=end_anchor,
+                        ).alias('consensus_seq')
+                    )
+                    .filter(pl.col('consensus_seq').str.len_chars() > 0)
+                )
+                assembled_parts.append(segment_assembled)
+
+            # Combine all assembled segments
+            if assembled_parts:
+                assembled = pl.concat(assembled_parts)
+            else:
+                self.logger.error("No segments could be assembled")
+                assembled = pl.LazyFrame(schema={c: pl.Utf8 for c in group_cols} | {'consensus_seq': pl.Utf8})
+        else:
+            # For compression: single pass assembly (original behavior)
+            assembled = (
+                segments_ldf
+                .group_by(group_cols)
+                .agg(
+                    rogtk.assemble_sequences(
+                        expr=pl.col('segment_seq'),
+                        k=k,
+                        min_coverage=min_coverage,
+                        method=method,
+                    ).alias('consensus_seq')
+                )
+                # Filter out failed assemblies before stitching
+                .filter(pl.col('consensus_seq').str.len_chars() > 0)
             )
-            # Filter out failed assemblies before stitching
-            .filter(pl.col('consensus_seq').str.len_chars() > 0)
-        )
 
         # Collect intermediate data for reporting
         self.logger.debug("Collecting data for report generation")
         segments_df = segments_ldf.collect()
         assembled_df = assembled.collect()
+
+        # Validate assemblies: check that consensus contains expected anchors
+        # Build anchor lookup for validation
+        meta_seq_map = dict(zip(metas['feature'], metas['seq']))
+        meta_seq_map[CASSETTE_START_MARKER] = cassette_start_anchor
+        meta_seq_map[CASSETTE_END_MARKER] = cassette_end_anchor
+
+        # Add validation columns: does consensus contain start/end anchors?
+        validation_exprs = []
+        for col_name in ['start_meta', 'end_meta']:
+            # Build a when/then chain for each META
+            anchor_check = pl.lit(False)
+            for meta_name, meta_seq in meta_seq_map.items():
+                if meta_seq:
+                    # Use first/last k bp as the anchor to check
+                    check_seq = meta_seq[-k:] if col_name == 'start_meta' else meta_seq[:k]
+                    anchor_check = (
+                        pl.when(pl.col(col_name) == meta_name)
+                        .then(pl.col('consensus_seq').str.contains(pl.lit(check_seq), literal=True))
+                        .otherwise(anchor_check)
+                    )
+            validation_exprs.append(anchor_check.alias(f'_has_{col_name}_anchor'))
+
+        assembled_df = assembled_df.with_columns(validation_exprs)
+        assembled_df = assembled_df.with_columns(
+            (pl.col('_has_start_meta_anchor') & pl.col('_has_end_meta_anchor')).alias('_is_valid_assembly')
+        )
+
+        # Count invalid assemblies
+        n_invalid = assembled_df.filter(~pl.col('_is_valid_assembly')).height
+        if n_invalid > 0:
+            self.logger.warning(f"Found {n_invalid} truncated assemblies (missing anchors)")
+
+        # Fallback for failed/invalid assemblies: use most common raw segment
+        # Identify UMI groups that have segments but no valid assembly
+        segment_groups = segments_df.select(group_cols).unique()
+        valid_assembled_groups = assembled_df.filter(pl.col('_is_valid_assembly')).select(group_cols).unique()
+        missing_groups = segment_groups.join(valid_assembled_groups, on=group_cols, how='anti')
+
+        if missing_groups.height > 0:
+            self.logger.info(f"Falling back to raw segments for {missing_groups.height} failed/invalid assemblies")
+
+            # For each missing group, select the most common segment sequence
+            # If tied, the first one (effectively random based on data order) is selected
+            fallback_df = (
+                segments_df
+                .join(missing_groups, on=group_cols, how='inner')
+                .group_by(group_cols + ['segment_seq'])
+                .agg(pl.len().alias('_seq_count'))
+                .sort('_seq_count', descending=True)
+                .group_by(group_cols)
+                .first()  # Take most common (or first if tied)
+                .rename({'segment_seq': 'consensus_seq'})
+                .with_columns([
+                    pl.lit(True).alias('_is_fallback'),
+                    pl.lit(True).alias('_has_start_meta_anchor'),  # Raw segments have anchors by construction
+                    pl.lit(True).alias('_has_end_meta_anchor'),
+                    pl.lit(True).alias('_is_valid_assembly'),
+                ])
+                .drop('_seq_count')
+            )
+
+            # Remove invalid assemblies and merge with fallbacks
+            assembled_df = (
+                assembled_df
+                .filter(pl.col('_is_valid_assembly'))
+                .with_columns(pl.lit(False).alias('_is_fallback'))
+            )
+            assembled_df = pl.concat([assembled_df, fallback_df], how='diagonal')
+            self.logger.info(f"Total assembled after fallback: {assembled_df.height}")
+        else:
+            # No fallbacks needed, just add the column
+            assembled_df = assembled_df.with_columns(pl.lit(False).alias('_is_fallback'))
+
+        # Add segment count per molecule (how many segments does this UMI have?)
+        molecule_cols = ['sbc', 'umi'] if 'sbc' in group_cols else ['umi']
+        assembled_df = assembled_df.with_columns(
+            pl.len().over(molecule_cols).alias('_n_segments')
+        )
 
         # Extract TARGET insertions from assembled consensus sequences
         # Done after assembly to use clean consensus (removes sequencing noise)
