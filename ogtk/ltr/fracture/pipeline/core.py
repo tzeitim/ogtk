@@ -974,22 +974,37 @@ class Pipeline:
                 self.logger.error(f"Extension '{ext_name}' not found")
                 self.logger.info(f"Available extensions: {extension_registry.get_available()}")
                 continue
-                
+
+            # Set up extension-specific logging
+            ext_log_dir = Path(self.xp.sample_wd) / "logs"
+            ext_log_dir.mkdir(parents=True, exist_ok=True)
+            ext_log_file = ext_log_dir / f"ext_{ext_name}.log"
+
+            ext_logger = Rlogger()
+            ext_logger.enable_file_logging(
+                filepath=ext_log_file,
+                level=self.xp.log_level if hasattr(self.xp, 'log_level') else "INFO",
+                format_string="%(asctime)s - %(levelname)s - %(message)s",
+            )
+
             try:
                 self.logger.info(f"Running extension: {ext_name}")
+                self.logger.info(f"Extension log file: {ext_log_file}")
                 results = extension.process(contigs_path)
-                
+
                 # Create a synthetic step for the extension summary
                 class ExtStep:
                     def __init__(self, name):
                         self.name = f"EXT_{name.upper()}"
                         self.value = {'required_params': extension.required_params}
-                
+
                 self.update_pipeline_summary(ExtStep(ext_name), results)
                 self.logger.info(f"Extension {ext_name} completed successfully")
-                
+                ext_logger.disable_file_logging()
+
             except Exception as e:
                 self.logger.error(f"Extension {ext_name} failed: {e}", with_traceback=True)
+                ext_logger.disable_file_logging()
                 return False
         
         self.logger.info("Extensions completed successfully!")

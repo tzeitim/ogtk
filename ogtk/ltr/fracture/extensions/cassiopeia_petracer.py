@@ -94,13 +94,30 @@ def plug_cassiopeia(
             results={"alleles_pl" : pl.concat(res), "alleles_pd" : umi_tables}
     )
 
-def save_ref_to_fasta(refs, out_dir='.', field='mod') -> None : 
-    """ write fastas in current dir"""
-    for i in refs.get_column(field):
-        with open(f'{out_dir}/{i}.fasta', 'wt') as out:
-            out.write(
-            refs.filter(pl.col(field)==i).dna.to_fasta(read_id_col=field, read_col='seq').get_column('seq_fasta')[0]
-            )
+def save_ref_to_fasta(refs: pl.DataFrame, out_dir: str|Path = '.', field: str = 'mod') -> None:
+    """Write reference sequences to individual FASTA files.
+
+    Args:
+        refs: DataFrame with 'mod' and 'seq' columns
+        out_dir: Output directory for FASTA files
+        field: Column to use for file naming and filtering
+    """
+    if refs.height == 0:
+        raise ValueError("refs DataFrame is empty - no references to save")
+
+    unique_values = refs.get_column(field).unique()
+    if unique_values.null_count() > 0:
+        raise ValueError(f"refs DataFrame has null values in '{field}' column")
+
+    for i in unique_values:
+        filtered = refs.filter(pl.col(field) == i)
+        if filtered.height == 0:
+            raise ValueError(f"No rows found for {field}={i}")
+
+        fasta_content = filtered.dna.to_fasta(read_id_col=field, read_col='seq').get_column('seq_fasta')[0]
+        out_path = Path(out_dir) / f"{i}.fasta"
+        with open(out_path, 'wt') as out:
+            out.write(fasta_content)
 
 def kmer_classify_cassettes(ldf, refs: pl.DataFrame, K: int = 25) -> StepResults:
     """ Annotates contigs based on the top occurring mod based on kmer matches """
@@ -139,21 +156,30 @@ def parse_contigs(
     if sbc_dict is not None:
         ldf = ldf.with_columns(pl.col('sbc').replace(sbc_dict).alias(annotation))
     
-    # 2. Extract intBC
+    # 2. Extract intBC and trim contig to remove the intBC region
     ldf = (
-        ldf   
+        ldf
         .with_columns(
             pl.col('contig').str
-            .extract(f'{int_anchor1}(.+?){int_anchor2}', 1).alias('intBC')
+            .extract(f'{int_anchor1}(.+?){int_anchor2}', 1).alias('intBC'),
+            pl.col('contig').str.replace(f'.*{int_anchor2}', '').alias('contig')
         )
     )
     
+    # Get count lazily - will be computed when needed
+    n_contigs = ldf.select(pl.len()).collect().item()
     return StepResults(results={'ldf':ldf},
-                       metrics={'n_parsed_contigs':ldf.height})
+                       metrics={'n_parsed_contigs': n_contigs})
 
 
 def generate_refs_from_fasta(refs_fasta_path: str|Path, anchor1: str, anchor2: str) -> pl.DataFrame:
-    """ Given a FASTA file with references it generates a trimmed version of the cassettes for aligment"""
+    """ Given a FASTA file with references it generates a trimmed version of the cassettes for aligment
+
+    Supports FASTA headers in multiple formats:
+    - ">5mer" → mod_5mer
+    - ">v5mer_xxx" → mod_5mer
+    - ">10mer" → mod_10mer
+    """
 
     refs =  (
             pl.read_csv(refs_fasta_path,
@@ -162,13 +188,26 @@ def generate_refs_from_fasta(refs_fasta_path: str|Path, anchor1: str, anchor2: s
             .unstack(step=2, how='horizontal')
             .rename({"column_1_0":"mod", "column_1_1":"seq"})
             .with_columns(
-                pl.col('mod').str.extract(">(v.+?)_",1).str.replace("v","mod_"),
+                # Handle multiple header formats:
+                # ">5mer" -> "5mer" -> "mod_5mer"
+                # ">v5mer_xxx" -> "5mer" -> "mod_5mer"
+                pl.concat_str([
+                    pl.lit("mod_"),
+                    pl.col('mod')
+                        .str.strip_chars(">")  # Remove leading >
+                        .str.extract(r"^v?(\d+mer)", 1)  # Extract Nmer pattern (optional v prefix)
+                ]).alias('mod'),
                 pl.col('seq').str.to_uppercase())
             # trim sequence
             .with_columns(
                 pl.col('seq').str.replace(f".+?({anchor1})", anchor1).str.replace(f"({anchor2}).+?$", anchor2)
                 )
             )
+
+    # Validate we got valid mod values
+    null_mods = refs.filter(pl.col('mod').is_null()).height
+    if null_mods > 0:
+        raise ValueError(f"Failed to parse {null_mods} FASTA headers. Expected format: >5mer, >10mer, or >v5mer_xxx")
 
     return refs
 
@@ -265,6 +304,9 @@ class CassiopeiaConfig(ExtensionConfig):
     metas_flanks_csv: Optional[str] = None  # Path to PEtracer_metas_flanks.csv
     cassette_type: str = "5mer"  # Options: 5mer, 10mer, 20mer
     min_consensus_support: float = 0.5  # Minimum support for consensus calls
+
+    # Runtime fields (populated during processing, not from config file)
+    ann_intbc_mod: Optional[pl.DataFrame] = None  # intBC → mod mapping from classify_cassettes
     
 
 class CassiopeiaStep(Enum):
@@ -293,7 +335,7 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
     
     @property
     def name(self) -> str:
-        return "cassiopeia_lineage"
+        return "cassiopeia_petracer"
     
     def process(self, contigs_path: Path) -> StepResults:
         """Main entry point - orchestrates all sub-steps"""
@@ -422,10 +464,11 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         seq - The actual sequence to be aligned
 
         """
+        # Update config with runtime parameter
+        self.config.ann_intbc_mod = self.ann_intbc_mod
         config = self.config.get_function_config(plug_cassiopeia)
 
         return plug_cassiopeia(ldf=self.ldf,
-                               ann_intbc_mod=self.ann_intbc_mod,
                                workdir=self.workdir,
                                logger=self.xp.logger,
                                **config)
