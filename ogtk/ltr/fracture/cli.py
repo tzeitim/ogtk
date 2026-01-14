@@ -152,7 +152,11 @@ def main():
     Regenerate plots for a specific sample::
 
         $ python pipeline.py --config config.yml --target-sample "sample_id" --regenerate-plots
-        
+
+    Regenerate segmentation QC plots only::
+
+        $ python pipeline.py --config config.yml --target-sample "sample_id" --regenerate-plots segmentation
+
     Regenerate markdown summary from existing JSON data::
     
         $ python pipeline.py --config config.yml --target-sample "sample_id" --regenerate-summary
@@ -225,6 +229,15 @@ def main():
             
             xp.extension_steps = extension_steps
 
+        # Handle target sample override early (needed for all code paths)
+        if args.target_sample:
+            logger.info(f"Overriding target sample from config with: {args.target_sample}")
+            sample_ids = [sample['id'] for sample in xp.samples]
+            if args.target_sample not in sample_ids:
+                raise ValueError(f"Target sample '{args.target_sample}' not found in samples list: {sample_ids}")
+            xp.target_sample = args.target_sample
+            xp.consolidate_conf(update=True)
+
         # Skip the pipeline if we are only regenerating plots or summary
         if args.regenerate_plots is not None or args.regenerate_summary:
             pipeline = Pipeline(xp)
@@ -294,17 +307,6 @@ def main():
                 success = success and sample_success
 
             return 0 if success else 1
-
-        # Handle single sample processing
-        if args.target_sample:
-            logger.info(f"Overriding target sample from config with: {args.target_sample}")
-            # Verify sample exists in samples list
-            sample_ids = [sample['id'] for sample in xp.samples]
-            if args.target_sample not in sample_ids:
-                raise ValueError(f"Target sample '{args.target_sample}' not found in samples list: {sample_ids}")
-
-            xp.target_sample = args.target_sample
-            xp.consolidate_conf(update=True)
 
         pipeline = Pipeline(xp)
 

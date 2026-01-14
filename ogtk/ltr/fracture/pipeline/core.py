@@ -852,6 +852,9 @@ class Pipeline:
                         # Get assembly method from config (default to 'compression' for segments)
                         assembly_method = self.xp.fracture.get('assembly_method', 'compression')
 
+                        # Get heterogeneity threshold from config (default 0.20 = 20% of dominant)
+                        heterogeneity_threshold = self.xp.fracture.get('heterogeneity_threshold', 0.20)
+
                         df_contigs = (
                             ldf
                             .filter(filter_expr)
@@ -863,6 +866,7 @@ class Pipeline:
                                 min_coverage=self.xp.fracture['start_min_coverage'],
                                 debug_path=debug_path,
                                 method=assembly_method,
+                                heterogeneity_threshold=heterogeneity_threshold,
                             )
                             .with_columns(pl.col('contig').str.len_chars().alias('length'))
                             .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))

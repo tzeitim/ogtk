@@ -47,11 +47,11 @@ class PlotRegenerator:
         self.xp = pipeline.xp
         self.logger = pipeline.logger
         
-    def regenerate_plots(self, 
-                        steps: Optional[List[str]] = None, 
+    def regenerate_plots(self,
+                        steps: Optional[List[str]] = None,
                   ) -> None:
         """Regenerate plots for specified steps or all steps if none specified
-        
+
         Args:
             steps: List of step names to regenerate plots for. If None, regenerates all.
             force: If True, regenerates even if output files exist
@@ -59,9 +59,10 @@ class PlotRegenerator:
         if not self.xp.do_plot:
             self.logger.info("Plotting is disabled in configuration")
             return
-            
-        available_steps = [step.name.lower() for step in PipelineStep]
-        
+
+        # Pipeline steps + additional plot-only steps like segmentation
+        available_steps = [step.name.lower() for step in PipelineStep] + ['segmentation']
+
         if steps:
             steps_to_run = [s.lower() for s in steps]
             invalid_steps = [s for s in steps_to_run if s not in available_steps]
@@ -93,18 +94,37 @@ class PlotRegenerator:
                 
     def _load_step_results(self, step_name: str) -> Optional[StepResults]:
         """Load results from previous pipeline run for given step"""
+        # Handle segmentation separately (not a PipelineStep enum member)
+        if step_name.lower() == 'segmentation':
+            segments = f"{self.xp.sample_wd}/intermediate/segments_debug.parquet"
+            assembled = f"{self.xp.sample_wd}/intermediate/assembled_debug.parquet"
+            contigs = f"{self.xp.sample_wd}/contigs_segmented_valid.parquet"
+            if all(Path(f).exists() for f in [segments, assembled, contigs]):
+                return StepResults(results={
+                    'xp': self.xp,
+                    'segments': segments,
+                    'assembled': assembled,
+                    'contigs_segmented_valid': contigs,
+                })
+            return None
+
         step = PipelineStep[step_name.upper()]
-        
+
         # Example for preprocess step
         if step == PipelineStep.PREPROCESS:
             parsed_reads = f"{self.xp.sample_wd}/parsed_reads.parquet"
+            parsed_reads_invalid = f"{self.xp.sample_wd}/parsed_reads_invalid.parquet"
             if Path(parsed_reads).exists():
-                return StepResults(results={'xp': self.xp, 'parsed_reads': parsed_reads})
-                
-        # Example for fracture step    
+                return StepResults(results={
+                    'xp': self.xp,
+                    'parsed_reads': parsed_reads,
+                    'parsed_reads_invalid': parsed_reads_invalid,
+                })
+
+        # Example for fracture step
         elif step == PipelineStep.FRACTURE:
             contigs = f"{self.xp.sample_wd}/contigs.parquet"
             if Path(contigs).exists():
                 return StepResults(results={'xp': self.xp, 'contigs': contigs})
-                
+
         return None

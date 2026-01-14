@@ -16,6 +16,7 @@ from .segmentation import (
     flag_aberrant_molecules,
     generate_segmentation_report,
     format_segmentation_report,
+    plot_segmentation_qc,
     CASSETTE_START_MARKER,
     CASSETTE_END_MARKER,
 )
@@ -1083,6 +1084,9 @@ class PllPipeline:
                            seq_col: str = 'r2_seq',
                            debug_path: str | None = None,
                            method: str = 'compression',
+                           output_dir: str | None = None,
+                           sample_name: str | None = None,
+                           heterogeneity_threshold: float = 0.20,
                            ) -> pl.LazyFrame:
         """
         Assemble reads using segmentation strategy for long cassettes.
@@ -1102,6 +1106,11 @@ class PllPipeline:
                     or 'shortest_path'. Note: shortest_path often fails on short
                     segments (<300bp) because the de Bruijn graph may not have a
                     unique path between anchors.
+            output_dir: If provided, generate segmentation QC plots in this directory
+            sample_name: Sample name for plot titles (required if output_dir is provided)
+            heterogeneity_threshold: For UMI heterogeneity detection, a transition type
+                is considered "real" if its frequency is >= this fraction of the dominant
+                type's frequency. Default 0.20 (20%). Set to 0 for sensitive mode only.
 
         Returns:
             LazyFrame with assembled contigs (umi, contig columns)
@@ -1368,9 +1377,28 @@ class PllPipeline:
             metas=metas,
             cassette_start_anchor=cassette_start_anchor,
             cassette_end_anchor=cassette_end_anchor,
+            heterogeneity_threshold=heterogeneity_threshold,
         )
         report_str = format_segmentation_report(report)
         self.logger.info(f"\n{report_str}")
+
+        # Generate QC plots if output directory provided
+        if output_dir is not None:
+            if sample_name is None:
+                sample_name = "sample"
+            from pathlib import Path
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            plot_segmentation_qc(
+                report=report,
+                contigs_df=contigs_df,
+                metas=metas,
+                output_dir=output_path,
+                sample_name=sample_name,
+                contig_col='contig',
+                logger=self.logger,
+            )
+            self.logger.info(f"Saved segmentation QC plots to {output_path}")
 
         # Return as LazyFrame for consistency
         return contigs_df.lazy()

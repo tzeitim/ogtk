@@ -1,9 +1,100 @@
 
-import os 
+import os
 os.environ['OPENBLAS_NUM_THREADS'] = '4'
 
 import polars as pl
-from ogtk.utils.log import call
+from pathlib import Path
+from ogtk.utils.log import call, Rlogger
+
+logger = Rlogger().get_logger()
+
+
+@call
+def plot_segmentation_qc_standalone(
+    segments_parquet: str,
+    assembled_parquet: str,
+    contigs_parquet: str,
+    metas: pl.DataFrame,
+    output_dir: str,
+    sample_name: str,
+    cassette_start_anchor: str = None,
+    cassette_end_anchor: str = None,
+    contig_col: str = 'contig',
+    heterogeneity_threshold: float = 0.20,
+):
+    """
+    Generate segmentation QC plots from existing parquet files.
+
+    Can be called without running the full pipeline:
+
+    >>> from ogtk.ltr.fracture.pipeline.plotting import plot_segmentation_qc_standalone
+    >>> metas = pl.read_csv("PEtracer_metas.csv")
+    >>> plot_segmentation_qc_standalone(
+    ...     segments_parquet="workdir/sample/intermediate/segments.parquet",
+    ...     assembled_parquet="workdir/sample/intermediate/assembled.parquet",
+    ...     contigs_parquet="workdir/sample/contigs_segmented_valid.parquet",
+    ...     metas=metas,
+    ...     output_dir="workdir/sample/figures",
+    ...     sample_name="group_001",
+    ... )
+
+    Args:
+        segments_parquet: Path to segments parquet file
+        assembled_parquet: Path to assembled segments parquet file
+        contigs_parquet: Path to contigs parquet file
+        metas: DataFrame with feature, seq, and optionally 'kind' columns
+        output_dir: Output directory for plots
+        sample_name: Sample name for file naming
+        cassette_start_anchor: Optional cassette start anchor sequence
+        cassette_end_anchor: Optional cassette end anchor sequence
+        contig_col: Name of column containing contig sequences (default: 'contig')
+        heterogeneity_threshold: For UMI heterogeneity detection, a transition type
+            is considered "real" if its frequency is >= this fraction of the dominant
+            type's frequency. Default 0.20 (20%). Set to 0 for sensitive mode only.
+
+    Returns:
+        dict: The generated segmentation report
+    """
+    from .segmentation import generate_segmentation_report, plot_segmentation_qc
+
+    # Load data from parquet files
+    segments_df = pl.read_parquet(segments_parquet)
+    assembled_df = pl.read_parquet(assembled_parquet)
+    contigs_df = pl.read_parquet(contigs_parquet)
+
+    # Rename contig column if needed (stitched_seq -> contig)
+    if 'stitched_seq' in contigs_df.columns and contig_col not in contigs_df.columns:
+        contigs_df = contigs_df.rename({'stitched_seq': contig_col})
+
+    # Generate report from data
+    report = generate_segmentation_report(
+        segments_df=segments_df,
+        assembled_df=assembled_df,
+        contigs_df=contigs_df,
+        metas=metas,
+        cassette_start_anchor=cassette_start_anchor,
+        cassette_end_anchor=cassette_end_anchor,
+        heterogeneity_threshold=heterogeneity_threshold,
+    )
+
+    # Generate plots
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    plot_segmentation_qc(
+        report=report,
+        contigs_df=contigs_df,
+        metas=metas,
+        output_dir=output_path,
+        sample_name=sample_name,
+        contig_col=contig_col,
+        logger=logger,
+    )
+
+    logger.info(f"Segmentation QC plots saved to {output_path}")
+
+    return report
+
 
 class PlotDB():
     @call
@@ -114,5 +205,47 @@ class PlotDB():
             fig.savefig(out_path)
             xp.logger.info(f"saved {out_path}")
 
+    @call
+    def plot_segmentation(self, ppi, results):
+        """
+        Generate segmentation QC plots from pipeline results.
 
+        Args:
+            ppi: Pipeline instance with xp (experiment) config
+            results: Results object with paths to intermediate files
+        """
+        xp = ppi.xp
 
+        # Get file paths from results
+        segments_parquet = results.results.get('segments')
+        assembled_parquet = results.results.get('assembled')
+        contigs_parquet = results.results.get('contigs_segmented_valid')
+
+        if not all([segments_parquet, assembled_parquet, contigs_parquet]):
+            logger.warning("Missing segmentation results, skipping QC plots")
+            return
+
+        # Load metas from config
+        metas_csv = xp.fracture.get('metas_csv') if hasattr(xp, 'fracture') else None
+        if not metas_csv:
+            metas_csv = getattr(xp, 'features_csv', None)
+        if not metas_csv:
+            logger.warning("No metas_csv or features_csv in config, skipping segmentation plots")
+            return
+
+        metas = pl.read_csv(metas_csv)
+
+        # Determine contig column name
+        contig_col = 'contig'
+
+        plot_segmentation_qc_standalone(
+            segments_parquet=segments_parquet,
+            assembled_parquet=assembled_parquet,
+            contigs_parquet=contigs_parquet,
+            metas=metas,
+            output_dir=xp.sample_figs,
+            sample_name=xp.target_sample,
+            cassette_start_anchor=xp.fracture.get('cassette_start_anchor') if hasattr(xp, 'fracture') else None,
+            cassette_end_anchor=xp.fracture.get('cassette_end_anchor') if hasattr(xp, 'fracture') else None,
+            contig_col=contig_col,
+        )

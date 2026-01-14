@@ -217,6 +217,7 @@ def generate_refs_from_fasta(refs_fasta_path: str|Path, anchor1: str, anchor2: s
 # ============================================================================
 
 CASSETTE_START_MARKER = "_CASSETTE_START_"
+CASSETTE_END_MARKER = "_CASSETTE_END_"
 TARGET_ORDER = ["RNF2", "HEK3", "EMX1"]  # Order within each triplet
 
 CASSETTE_CONFIGS = {
@@ -224,6 +225,100 @@ CASSETTE_CONFIGS = {
     "10mer": {"n_metas": 9, "n_targets": 27},
     "20mer": {"n_metas": 19, "n_targets": 57},
 }
+
+
+def filter_segment_types_for_cassette(
+    segment_types: pl.DataFrame,
+    metas: pl.DataFrame,
+    cassette_type: str,
+    min_freq_threshold: float = 0.7,
+    total_molecules: int | None = None,
+    logger: Optional[CustomLogger] = None,
+) -> pl.DataFrame:
+    """
+    Filter segment_types to only include expected metas for the cassette type.
+
+    For a 5mer cassette, only META01-META04 are expected. Any other metas
+    (META05+) are filtered out UNLESS they appear at high frequency (>min_freq_threshold),
+    which may indicate they are real (e.g., a different cassette version).
+
+    Args:
+        segment_types: DataFrame with start_meta, end_meta, count columns
+        metas: DataFrame with feature column (META01, META02, etc.)
+        cassette_type: One of "5mer", "10mer", "20mer"
+        min_freq_threshold: Minimum frequency (0-1) for an unexpected meta to be kept.
+                           Default 0.7 (70%). Set to 1.0 to strictly filter.
+        total_molecules: Total number of molecules for frequency calculation.
+                        If None, uses sum of counts in segment_types.
+        logger: Optional logger for debugging
+
+    Returns:
+        Filtered segment_types DataFrame
+    """
+    if cassette_type not in CASSETTE_CONFIGS:
+        if logger:
+            logger.warning(f"Unknown cassette type '{cassette_type}', skipping meta filtering")
+        return segment_types
+
+    n_metas = CASSETTE_CONFIGS[cassette_type]["n_metas"]
+
+    # Get ordered meta names from metas DataFrame
+    meta_only = metas.filter(pl.col('kind') == 'META') if 'kind' in metas.columns else metas
+    all_meta_names = meta_only['feature'].to_list()
+
+    # Expected metas for this cassette type (first n_metas)
+    expected_metas = set(all_meta_names[:n_metas])
+    # Add edge markers as always valid
+    expected_metas.add(CASSETTE_START_MARKER)
+    expected_metas.add(CASSETTE_END_MARKER)
+
+    if logger:
+        logger.debug(f"Cassette {cassette_type}: expecting {n_metas} metas: {sorted(expected_metas)}")
+
+    # Calculate frequency of each meta across all transitions
+    if total_molecules is None:
+        total_molecules = segment_types['count'].sum()
+
+    if total_molecules == 0:
+        return segment_types
+
+    # Find all unique metas in segment_types
+    all_starts = set(segment_types['start_meta'].unique().to_list())
+    all_ends = set(segment_types['end_meta'].unique().to_list())
+    all_observed_metas = all_starts | all_ends
+
+    # Check for unexpected metas with high frequency
+    unexpected_metas = all_observed_metas - expected_metas
+    high_freq_unexpected = set()
+
+    for meta in unexpected_metas:
+        # Count molecules with this meta (in either start or end)
+        meta_count = segment_types.filter(
+            (pl.col('start_meta') == meta) | (pl.col('end_meta') == meta)
+        )['count'].sum()
+        freq = meta_count / total_molecules
+
+        if freq >= min_freq_threshold:
+            high_freq_unexpected.add(meta)
+            if logger:
+                logger.info(f"Keeping unexpected meta '{meta}' - appears in {freq:.1%} of molecules (>= {min_freq_threshold:.0%} threshold)")
+        elif logger:
+            logger.debug(f"Filtering out meta '{meta}' - appears in {freq:.1%} of molecules (< {min_freq_threshold:.0%} threshold)")
+
+    # Final whitelist: expected + high-frequency unexpected
+    whitelist = expected_metas | high_freq_unexpected
+
+    # Filter segment_types to only include transitions with whitelisted metas
+    filtered = segment_types.filter(
+        pl.col('start_meta').is_in(list(whitelist)) &
+        pl.col('end_meta').is_in(list(whitelist))
+    )
+
+    n_removed = segment_types.height - filtered.height
+    if n_removed > 0 and logger:
+        logger.info(f"Filtered {n_removed} transitions with unexpected metas (kept {filtered.height})")
+
+    return filtered
 
 
 def build_target_position_map(
@@ -286,6 +381,7 @@ class CassiopeiaConfig(ExtensionConfig):
     # Required fields
     int_anchor1: str
     int_anchor2: str
+    force: bool = False
 
     # Optional fields with defaults
     sbc_dict: Optional[Dict] = None
@@ -313,6 +409,7 @@ class CassiopeiaStep(Enum):
     """Steps within the Cassiopeia lineage extension"""
     PARSE_CONTIGS = 'parse_contigs'
     CLASSIFY_CASSETTES = "classify_cassettes"
+    REGENERATE_FILTERED_QC = "regenerate_filtered_qc"  # Regenerate QC with cassette-type filtering
     PLUG_CASSIOPEIA = "plug_cassiopeia"
     EXTRACT_BARCODES = "extract_barcodes"
     GENERATE_MATRIX = "generate_matrix"
@@ -390,12 +487,18 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
                 result = self._kmer_classify_cassettes()
             else:
                 pass
-                #result = use a given intbc_mod_map 
+                #result = use a given intbc_mod_map
             self.xp.logger.io(f"Saving intBC mod annotations to {ann_intbc_mod_path}")
             # result.results['ann_intbc_mod'] # maps intBC to mod
             self.ann_intbc_mod = result.results['ann_intbc_mod']
-            self.ann_intbc_mod.write_parquet(ann_intbc_mod_path) 
+            self.ann_intbc_mod.write_parquet(ann_intbc_mod_path)
 
+            final_results.update(result.results)
+            final_metrics.update(result.metrics)
+
+        if self.should_run_step(CassiopeiaStep.REGENERATE_FILTERED_QC.value):
+            self.xp.logger.info("Running regenerate_filtered_qc step")
+            result = self._regenerate_filtered_qc()
             final_results.update(result.results)
             final_metrics.update(result.metrics)
 
@@ -442,11 +545,144 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
     def _kmer_classify_cassettes(self) -> StepResults:
         """ Guesses what reference a given intBC corresponds to based on kmer composition analysis"""
         return kmer_classify_cassettes(
-                ldf=self.ldf, 
-                refs=self.refs, 
+                ldf=self.ldf,
+                refs=self.refs,
                 **self.config.get_function_config(kmer_classify_cassettes)
                 )
 
+    def _regenerate_filtered_qc(self) -> StepResults:
+        """
+        Regenerate segmentation QC plots with cassette-type filtering.
+
+        After cassette classification, we know the cassette type (5mer, 10mer, etc.)
+        and can filter out spurious meta matches in the QC plots.
+
+        This step:
+        1. Loads segmentation data from intermediate files
+        2. Determines cassette_type from refs (e.g., mod_5mer -> "5mer")
+        3. Regenerates QC plots with filtered segment_types
+        """
+        from ..pipeline.segmentation import (
+            generate_segmentation_report,
+            plot_segmentation_qc,
+        )
+
+        # Determine cassette_type from refs
+        # refs has 'mod' column like "mod_5mer", "mod_10mer"
+        if not hasattr(self, 'refs') or self.refs is None:
+            self.xp.logger.warning("No refs available, skipping filtered QC regeneration")
+            return StepResults(results={}, metrics={})
+
+        # Get the dominant cassette type from refs (or use config)
+        mods = self.refs['mod'].unique().to_list()
+        # Extract cassette type: "mod_5mer" -> "5mer"
+        cassette_types = [m.replace("mod_", "") for m in mods if m.startswith("mod_")]
+
+        if not cassette_types:
+            self.xp.logger.warning("Could not determine cassette type from refs")
+            return StepResults(results={}, metrics={})
+
+        # Use the first (or only) cassette type
+        cassette_type = cassette_types[0]
+        self.xp.logger.info(f"Regenerating QC with cassette_type={cassette_type} filtering")
+
+        # Load intermediate files
+        intermediate_dir = self.workdir / "intermediate"
+        segments_path = intermediate_dir / "segments.parquet"
+        assembled_path = intermediate_dir / "assembled.parquet"
+
+        # Also try legacy path
+        if not segments_path.exists():
+            segments_path = self.workdir / "segments_debug.parquet"
+
+        if not segments_path.exists():
+            self.xp.logger.warning(f"Segments file not found at {segments_path}, skipping filtered QC")
+            return StepResults(results={}, metrics={})
+
+        # Load metas
+        metas_csv = self.xp.fracture.get('metas_csv') or getattr(self.xp, 'features_csv', None)
+        if not metas_csv:
+            self.xp.logger.warning("No metas_csv configured, skipping filtered QC")
+            return StepResults(results={}, metrics={})
+
+        metas = pl.read_csv(metas_csv)
+        segments_df = pl.read_parquet(segments_path)
+
+        # Load assembled if available
+        if assembled_path.exists():
+            assembled_df = pl.read_parquet(assembled_path)
+        else:
+            # Create minimal assembled_df from segments
+            assembled_df = segments_df.select(['umi', 'start_meta', 'end_meta']).unique()
+
+        # Load contigs
+        contigs_path = list(self.workdir.glob("contigs_segmented_*.parquet"))
+        if contigs_path:
+            contigs_df = pl.read_parquet(contigs_path[0])
+            if 'stitched_seq' in contigs_df.columns and 'contig' not in contigs_df.columns:
+                contigs_df = contigs_df.rename({'stitched_seq': 'contig'})
+        else:
+            # Minimal contigs from ldf
+            contigs_df = self.ldf.select(['umi', 'contig']).collect()
+
+        # Get anchors from config
+        cassette_start_anchor = getattr(self.xp, 'start_anchor', None)
+        cassette_end_anchor = getattr(self.xp, 'end_anchor', None)
+
+        # Get filtering threshold from config (default 70%)
+        min_meta_freq = self.xp.fracture.get('min_meta_freq_threshold', 0.7)
+
+        # Get heterogeneity threshold from config (default 0.20 = 20% of dominant)
+        heterogeneity_threshold = self.xp.fracture.get('heterogeneity_threshold', 0.20)
+
+        # Generate unfiltered report first
+        report = generate_segmentation_report(
+            segments_df=segments_df,
+            assembled_df=assembled_df,
+            contigs_df=contigs_df,
+            metas=metas,
+            cassette_start_anchor=cassette_start_anchor,
+            cassette_end_anchor=cassette_end_anchor,
+            heterogeneity_threshold=heterogeneity_threshold,
+        )
+
+        # Now filter the segment_types in the report
+        segment_types_df = pl.DataFrame(report['segments']['segment_types'])
+        unique_umis = report['segments']['unique_umis']
+
+        filtered_segment_types = filter_segment_types_for_cassette(
+            segment_types=segment_types_df,
+            metas=metas,
+            cassette_type=cassette_type,
+            min_freq_threshold=min_meta_freq,
+            total_molecules=unique_umis,
+            logger=self.xp.logger,
+        )
+
+        # Update the report with filtered segment_types
+        report['segments']['segment_types'] = filtered_segment_types.to_dicts()
+
+        # Generate filtered QC plots - use central figures directory per Xp
+        figures_dir = Path(self.xp.sample_figs)
+        figures_dir.mkdir(parents=True, exist_ok=True)
+
+        sample_name = getattr(self.xp, 'target_sample', 'sample')
+        plot_segmentation_qc(
+            report=report,
+            contigs_df=contigs_df,
+            metas=metas,
+            output_dir=figures_dir,
+            sample_name=f"{sample_name}_filtered",
+            contig_col='contig',
+            logger=self.xp.logger,
+        )
+
+        self.xp.logger.info(f"Saved filtered QC plots to {figures_dir}")
+
+        return StepResults(
+            results={"filtered_qc_dir": str(figures_dir)},
+            metrics={"cassette_type": cassette_type},
+        )
 
     def _convert_to_allele_table(self) -> StepResults:
         """ """
