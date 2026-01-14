@@ -1085,10 +1085,24 @@ def plot_meta_transition_lines(
     import matplotlib.patches as mpatches
     import numpy as np
 
-    # Build ordered meta list
+    # Get metas that actually appear in the segment_types data
+    observed_metas = set(segment_types['start_meta'].unique().to_list() +
+                        segment_types['end_meta'].unique().to_list())
+
+    # Build ordered meta list - only include metas that appear in the data
     meta_only = metas.filter(pl.col('kind') == 'META')
     meta_names = meta_only['feature'].to_list()
-    meta_order = [CASSETTE_START_MARKER] + meta_names + [CASSETTE_END_MARKER]
+
+    # Filter to only include metas that appear in segment_types
+    meta_order = []
+    if CASSETTE_START_MARKER in observed_metas:
+        meta_order.append(CASSETTE_START_MARKER)
+    for m in meta_names:
+        if m in observed_metas:
+            meta_order.append(m)
+    if CASSETTE_END_MARKER in observed_metas:
+        meta_order.append(CASSETTE_END_MARKER)
+
     meta_to_idx = {m: i for i, m in enumerate(meta_order)}
 
     # Filter to valid transitions and add position info
