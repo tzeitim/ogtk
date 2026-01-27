@@ -77,6 +77,17 @@ def plug_cassiopeia(
                             **allele_params,
                         )
 
+            # Enrich allele columns with actual insertion sequences from CIGAR
+            # allele_table already contains Seq and CIGAR columns from umi_table
+            pl_allele = pl.DataFrame(allele_table)
+            rcols = pl_allele.select(pl.col('^r\\d+$')).columns
+            if rcols and 'Seq' in pl_allele.columns and 'CIGAR' in pl_allele.columns:
+                pl_allele = pl_allele.with_columns([
+                    pl.col(col).cigar.enrich_insertions(pl.col('Seq'), pl.col('CIGAR'))
+                    for col in rcols
+                ])
+            allele_table = pl_allele.to_pandas()
+
             #replace intBC for real intBC since Cassiopeia does something I don't understand yet
             # include colums dropped by cass?
             allele_table['intBC'] = intBC

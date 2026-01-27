@@ -391,14 +391,22 @@ def generate_segmentation_report(
 
     # Segment stats
     total_segments = segments_df.height
-    unique_umis_with_segments = segments_df.select('umi').n_unique()
 
-    # Compute segment_types at MOLECULE level (deduplicate by UMI first)
-    # Each UMI contributes at most once per transition type
+    # Determine molecule identity columns - UMIs are only unique within SBC
+    molecule_cols = ['umi']
+    if 'sbc' in segments_df.columns:
+        molecule_cols = ['sbc', 'umi']
+
+    # Count unique molecules (sbc+umi pairs if sbc exists, otherwise just umi)
+    unique_umis_with_segments = segments_df.select(molecule_cols).unique().height
+
+    # Compute segment_types at MOLECULE level (deduplicate by molecule first)
+    # Each molecule contributes at most once per transition type
+    select_cols = molecule_cols + ['start_meta', 'end_meta', 'segment_seq']
     umi_transitions = (
         segments_df
-        .select(['umi', 'start_meta', 'end_meta', 'segment_seq'])
-        .unique(subset=['umi', 'start_meta', 'end_meta'])  # One count per UMI per transition
+        .select(select_cols)
+        .unique(subset=molecule_cols + ['start_meta', 'end_meta'])  # One count per molecule per transition
     )
 
     segment_types = (
@@ -413,23 +421,24 @@ def generate_segmentation_report(
     )
 
     # UMI heterogeneity detection: SENSITIVE vs SMART mode
-    # Sensitive: counts ALL unique transition types per UMI (current behavior)
+    # Sensitive: counts ALL unique transition types per molecule (current behavior)
     # Smart: filters out low-frequency transitions (noise) based on adaptive threshold
+    # Note: molecule_cols defined earlier (uses sbc+umi if sbc exists)
 
-    # 1. Get counts per transition per UMI (how many reads support each transition)
+    # 1. Get counts per transition per molecule (how many reads support each transition)
     umi_transition_counts = (
         segments_df
-        .group_by(['umi', 'start_meta', 'end_meta'])
+        .group_by(molecule_cols + ['start_meta', 'end_meta'])
         .len()
         .rename({'len': 'count'})
     )
 
-    # 2. Add total per UMI, frequency, and dominant type frequency
+    # 2. Add total per molecule, frequency, and dominant type frequency
     umi_transition_counts = (
         umi_transition_counts
         .with_columns(
-            pl.col('count').sum().over('umi').alias('umi_total'),
-            pl.col('count').max().over('umi').alias('umi_max_count'),
+            pl.col('count').sum().over(molecule_cols).alias('umi_total'),
+            pl.col('count').max().over(molecule_cols).alias('umi_max_count'),
         )
         .with_columns(
             (pl.col('count') / pl.col('umi_total')).alias('freq'),
@@ -440,7 +449,7 @@ def generate_segmentation_report(
     # 3. SENSITIVE mode: all transitions (current behavior)
     transitions_per_umi_sensitive = (
         umi_transition_counts
-        .group_by('umi')
+        .group_by(molecule_cols)
         .agg(pl.len().alias('n_transition_types'))
     )
 
@@ -468,7 +477,7 @@ def generate_segmentation_report(
 
     transitions_per_umi_smart = (
         umi_transition_counts_filtered
-        .group_by('umi')
+        .group_by(molecule_cols)
         .agg(pl.len().alias('n_transition_types'))
     )
 
@@ -1380,8 +1389,31 @@ def plot_segmentation_qc(
     # Get segment_types from report
     segment_types = pl.DataFrame(report['segments']['segment_types'])
 
+    # Extract metas that actually appear in segment_types (for filtered plots)
+    observed_metas = set(segment_types['start_meta'].unique().to_list() +
+                        segment_types['end_meta'].unique().to_list())
+    # Remove edge markers from observed set for filtering metas DataFrame
+    observed_metas.discard(CASSETTE_START_MARKER)
+    observed_metas.discard(CASSETTE_END_MARKER)
+
+    # Filter metas DataFrame to only include observed metas
+    meta_col = 'feature'
+    if meta_col in metas.columns and 'kind' in metas.columns:
+        # Keep observed METAs + all non-META entries (anchors, etc.)
+        filtered_metas = metas.filter(
+            (pl.col(meta_col).is_in(list(observed_metas))) | (pl.col('kind') != 'META')
+        )
+    elif meta_col in metas.columns:
+        # No 'kind' column, just filter by feature name
+        filtered_metas = metas.filter(pl.col(meta_col).is_in(list(observed_metas)))
+    else:
+        filtered_metas = metas
+
     if logger:
         logger.info(f"Generating segmentation QC plots for {sample_name}")
+        total_metas = metas.filter(pl.col('kind') == 'META').height if 'kind' in metas.columns else metas.height
+        if len(observed_metas) < total_metas:
+            logger.info(f"Filtering plots to show only observed metas: {sorted(observed_metas)}")
 
     # 1. Heatmap
     try:
@@ -1413,10 +1445,10 @@ def plot_segmentation_qc(
         if logger:
             logger.warning(f"Failed to create bar chart: {e}")
 
-    # 3. Coverage line
+    # 3. Coverage line (use filtered_metas to only show observed metas)
     try:
         fig, ax = plt.subplots(figsize=(12, 5))
-        plot_meta_coverage_line(contigs_df, metas, ax=ax,
+        plot_meta_coverage_line(contigs_df, filtered_metas, ax=ax,
                                 title=f"{sample_name} - Meta Coverage", contig_col=contig_col, logger=logger)
         fig.tight_layout()
         line_path = output_dir / f"{sample_name}_meta_coverage_line.png"

@@ -358,6 +358,43 @@ class PlPipeline:
             .unnest("assembly_results")
         )
 
+    def enrich_allele_insertions(self,
+                                  allele_cols: list[str] | None = None,
+                                  seq_col: str = 'Seq',
+                                  cigar_col: str = 'CIGAR') -> pl.DataFrame:
+        """Enrich allele columns with actual insertion sequences from CIGAR.
+
+        Transforms [pos:NI] notation to [pos:NI:SEQUENCE] by extracting
+        the actual inserted bases from the aligned sequence.
+
+        Args:
+            allele_cols: List of allele columns to enrich. If None, auto-detects
+                         columns matching pattern r1, r2, r3... (works for any cassette type)
+            seq_col: Column containing the aligned sequence
+            cigar_col: Column containing the CIGAR string
+
+        Returns:
+            DataFrame with enriched allele columns
+
+        Example:
+            >>> df = pl.read_parquet("alleles_pl.parquet")
+            >>> enriched = df.pp.enrich_allele_insertions()
+        """
+        if allele_cols is None:
+            # Auto-detect allele columns (r1, r2, r3, etc.) - works for any cassette
+            allele_cols = self._df.select(pl.col('^r\\d+$')).columns
+
+        if not allele_cols:
+            return self._df
+
+        return self._df.with_columns([
+            pl.col(col).cigar.enrich_insertions(
+                pl.col(seq_col),
+                pl.col(cigar_col)
+            )
+            for col in allele_cols
+        ])
+
     def ont_to_paired_format(self, umi_len: int, sbc_len: int, anchor: str, anchor_ont:str, modality: str = 'single-molecule', cbc_len: int = 16) -> pl.DataFrame:
         """Convert ONT BAM data to FRACTURE's expected R1/R2 format (DataFrame wrapper)"""
         return (
@@ -475,6 +512,44 @@ class PllPipeline:
     def __init__(self, ldf: pl.LazyFrame) -> None:
         self._ldf = ldf
         self.logger = Rlogger().get_logger()
+
+    def enrich_allele_insertions(self,
+                                  allele_cols: list[str] | None = None,
+                                  seq_col: str = 'Seq',
+                                  cigar_col: str = 'CIGAR') -> pl.LazyFrame:
+        """Enrich allele columns with actual insertion sequences from CIGAR.
+
+        Transforms [pos:NI] notation to [pos:NI:SEQUENCE] by extracting
+        the actual inserted bases from the aligned sequence.
+
+        Args:
+            allele_cols: List of allele columns to enrich. If None, auto-detects
+                         columns matching pattern r1, r2, r3... (works for any cassette type)
+            seq_col: Column containing the aligned sequence
+            cigar_col: Column containing the CIGAR string
+
+        Returns:
+            LazyFrame with enriched allele columns
+
+        Example:
+            >>> ldf = pl.scan_parquet("alleles_pl.parquet")
+            >>> enriched = ldf.pp.enrich_allele_insertions()
+        """
+        if allele_cols is None:
+            # Auto-detect allele columns - need to collect schema for lazy
+            allele_cols = [c for c in self._ldf.collect_schema().names()
+                          if c.startswith('r') and c[1:].isdigit()]
+
+        if not allele_cols:
+            return self._ldf
+
+        return self._ldf.with_columns([
+            pl.col(col).cigar.enrich_insertions(
+                pl.col(seq_col),
+                pl.col(cigar_col)
+            )
+            for col in allele_cols
+        ])
 
     def assemble_umis(self,
                     col_name: str = "r2_seq",
