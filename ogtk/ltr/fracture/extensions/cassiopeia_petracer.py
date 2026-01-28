@@ -20,6 +20,9 @@ def plug_cassiopeia(
         cutsite_width: int = 12,
         context: bool = True,
         context_size: int = 50,
+        gap_open_penalty: float = 20.0,
+        gap_extend_penalty: float = 1.0,
+        alignment_method: str = 'global',
         ) -> StepResults:
     """ 
     readName - A unique identifier for each row/sequence
@@ -68,7 +71,9 @@ def plug_cassiopeia(
                  queries=queries.to_pandas(),
                  ref_filepath=f'{workdir}/{mod}.fasta',
                  n_threads=1,
-                 method='global'
+                 method=alignment_method,
+                 gap_open_penalty=gap_open_penalty,
+                 gap_extend_penalty=gap_extend_penalty,
              )
     
             allele_table =  cas.pp.call_alleles(
@@ -406,6 +411,11 @@ class CassiopeiaConfig(ExtensionConfig):
     cutsite_width: int = 12
     context: bool = True
     context_size: int = 50
+
+    # Alignment parameters for cas.pp.align_sequences
+    gap_open_penalty: float = 20.0  # Penalty for opening a gap (default: 20)
+    gap_extend_penalty: float = 1.0  # Penalty for extending a gap (default: 1)
+    alignment_method: str = 'global'  # 'local' (Smith-Waterman) or 'global' (Needleman-Wunsch)
 
     # Segmented allele extraction fields
     metas_flanks_csv: Optional[str] = None  # Path to PEtracer_metas_flanks.csv
