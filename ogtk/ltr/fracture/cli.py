@@ -68,6 +68,12 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--basecall",
+        action="store_true",
+        help="Recipe: Run only dorado basecalling step with forced recomputation"
+    )
+
+    parser.add_argument(
 		"--regenerate-plots",
 		nargs="*",
 		help="Regenerate plots for specified steps (or all if no steps provided)"
@@ -174,6 +180,17 @@ def main():
     Multiple extensions with different steps
         $ python pipeline.py --extension-steps cassiopeia_lineage:extract_barcodes transcript_genotyping:all
 
+    Run basecalling only with forced recomputation::
+
+        $ python pipeline.py --config config.yml --basecall
+
+    Basecall a specific sample::
+
+        $ python pipeline.py --config config.yml --basecall --target-sample group_011
+
+    Basecall all samples::
+
+        $ python pipeline.py --config config.yml --basecall --all-samples
 
     Returns
     -------
@@ -307,6 +324,29 @@ def main():
                 success = success and sample_success
 
             return 0 if success else 1
+
+        # Handle --basecall recipe (from CLI or config file)
+        elif args.basecall or getattr(xp, 'basecall', False):
+            logger.info("Running basecall recipe: dorado step with forced recomputation")
+            xp.steps = ['dorado']
+            xp.force_dorado = True
+
+            if args.all_samples:
+                # Process all samples
+                success = True
+                for sample in xp.samples:
+                    logger.info(f"\nBasecalling sample: {sample['id']}")
+                    xp.target_sample = sample['id']
+                    xp.consolidate_conf(update=True)
+                    pipeline = Pipeline(xp)
+                    sample_success = pipeline.run()
+                    success = success and sample_success
+                return 0 if success else 1
+            else:
+                # Process target sample only
+                pipeline = Pipeline(xp)
+                success = pipeline.run()
+                return 0 if success else 1
 
         pipeline = Pipeline(xp)
 
