@@ -94,14 +94,17 @@ def run_bcl2fq(xp, force=False, dry=False, **args):
        return(0)
 
 
-def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
+def run_dorado(xp, force=False, dry=False, bam_output_dir=None, incremental=True, **args):
     '''ONT basecalling using dorado following the bcl2fastq pattern
-    
+
     Args:
         xp: Experiment configuration object
         force: Force re-run even if done token exists
         dry: Dry run - only show commands without executing
         bam_output_dir: Directory to save BAM files (if None, uses wd_bam or wd_fastq)
+        incremental: If True (default), use per-pod5 checkpointing for incremental basecalling.
+                     Each pod5 file is basecalled to an individual BAM, allowing resume after
+                     interruption and incremental processing of new reads.
         **args: Additional arguments to override configuration
     '''
     import subprocess
@@ -112,17 +115,17 @@ def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
 
     # Extract pre-processing config
     pp = xp.pp
-    
+
     # Extract dorado config
     dorado_conf = pp['dorado']
-    
+
     # Populate xp-specific information
     if bam_output_dir:
         dorado_conf['outdir'] = bam_output_dir
     else:
         dorado_conf['outdir'] = getattr(xp, 'wd_bam', xp.wd_fastq)
     dorado_conf['input_dir'] = dorado_conf.get('pod5_dir', xp.pro_datain)
-    
+
     # Resolve ${prefix} placeholders in sample_barcode_dirs
     if 'sample_barcode_dirs' in dorado_conf:
         for sample_id, paths in dorado_conf['sample_barcode_dirs'].items():
@@ -136,24 +139,24 @@ def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
     # Load template and merge configurations
     template_path = dorado_conf['template'].replace('${prefix}', xp.prefix)
     template_data = yaml.load(open(template_path), Loader=yaml.FullLoader)
-    
+
     # Extract dorado section from template (if it exists)
     if 'pp' in template_data and 'dorado' in template_data['pp']:
         dorado_template = template_data['pp']['dorado'].copy()
     else:
         dorado_template = {}
-    
+
     # Override template with experiment-specific args
     if args is not None:
         for k in args.keys():
             dorado_conf[k] = args[k]
-            
+
     for k in dorado_conf.keys():
         dorado_template[k] = dorado_conf[k]
         logger.debug(f'setting {k}\t-->\t{dorado_template[k]}')
 
     # Sanitize types (preserve booleans for certain keys)
-    boolean_keys = {'wait_for_completion', 'use_lsf', 'dry_run'}
+    boolean_keys = {'wait_for_completion', 'use_lsf', 'dry_run', 'incremental', 'continue_on_failure'}
     for k, v in dorado_template.items():
         if k in boolean_keys:
             # Handle boolean strings properly
@@ -166,6 +169,36 @@ def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
 
     logger.debug(f"Dorado config: {dorado_conf}")
     logger.debug(f"Dorado template: {dorado_template}")
+
+    # Determine if incremental mode should be used
+    # Priority: function argument > template config > default (True)
+    use_incremental = incremental
+    if 'incremental' in dorado_template:
+        template_incremental = dorado_template['incremental']
+        if isinstance(template_incremental, str):
+            template_incremental = template_incremental.lower() in ('true', '1', 'yes', 'on')
+        # Only use template setting if function argument is default (True)
+        if incremental is True:
+            use_incremental = template_incremental
+
+    # Route to incremental or legacy mode
+    if use_incremental:
+        logger.info("Using incremental basecalling mode (per-pod5 checkpointing)")
+        # Handle sample-specific barcode directories for input
+        consolidated_input_dir = _prepare_sample_specific_input(xp, dorado_conf, dorado_template, logger)
+        output_dir = Path(dorado_template['outdir'])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return _run_dorado_incremental(
+            xp=xp,
+            dorado_template=dorado_template,
+            output_dir=str(output_dir),
+            force=force,
+            dry=dry,
+            input_dir=consolidated_input_dir
+        )
+
+    # Legacy mode: single BAM per sample directory
+    logger.info("Using legacy basecalling mode (single BAM output)")
 
     # Handle sample-specific barcode directories
     consolidated_input_dir = _prepare_sample_specific_input(xp, dorado_conf, dorado_template, logger)
@@ -241,57 +274,58 @@ def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
         if dorado_template.get('use_lsf', False):
             return _submit_dorado_lsf_jobs(xp, commands, dorado_template, done_token)
         else:
-            return _run_dorado_sequential(xp, commands, done_token)
+            return _run_dorado_sequential(xp, commands, done_token, dorado_template)
     else:
         logger.info("DRY RUN - Commands that would be executed:")
-        for cmd, barcode, output in commands:
+        for cmd, barcode, _ in commands:
             logger.info(f"  Barcode {barcode}: {cmd}")
         return 0
 
 
-def _run_dorado_sequential(xp, commands, done_token):
+def _run_dorado_sequential(xp, commands, done_token, dorado_template=None):
     '''Run dorado commands sequentially'''
     import subprocess
-    
+    from pathlib import Path
+
     all_success = True
-    
+
     for i, (cmd, barcode, output_file) in enumerate(commands):
         logger.info(f"Processing barcode {barcode} ({i+1}/{len(commands)})")
         logger.debug(f"Command: {cmd}")
-        
+
         log_out = f'{xp.sample_logs}/dorado_{barcode}.out'
         log_err = f'{xp.sample_logs}/dorado_{barcode}.err'
-        
+
         try:
             result = subprocess.run(cmd, shell=True,
                                   stdout=open(log_out, 'w'),
                                   stderr=open(log_err, 'w'))
-            
+
             if result.returncode == 0:
                 logger.info(f"Successfully processed {barcode} -> {output_file}")
             else:
                 logger.error(f"Failed to process {barcode} (exit code: {result.returncode})")
                 all_success = False
-                
+
         except Exception as e:
             logger.error(f"Error processing {barcode}: {str(e)}")
             all_success = False
-    
+
     if all_success:
         # Done token already created by the last command in LSF mode
         # For sequential mode, create it here
         if not any('touch' in cmd for cmd, _, _ in commands):
             subprocess.run(f'touch {done_token}'.split())
-        
+
         logger.info("All dorado basecalling completed successfully")
-        
+
         # Cleanup temporary symlink directory if it was created
-        if 'temp_symlink_dir' in dorado_template:
+        if dorado_template and 'temp_symlink_dir' in dorado_template:
             temp_dir = Path(dorado_template['temp_symlink_dir'])
             if temp_dir.exists() and 'consolidated' in str(temp_dir):
                 logger.info(f"Cleaning up temporary symlink directory: {temp_dir}")
                 _cleanup_symlink_dir(temp_dir, logger)
-        
+
         return 0
     else:
         logger.error("Some dorado basecalling jobs failed")
@@ -502,6 +536,357 @@ def _cleanup_symlink_dir(symlink_dir, logger):
     # Safe to remove - contains only symlinks and directories
     shutil.rmtree(symlink_path)
     logger.debug(f"Cleaned up symlink directory: {symlink_path}")
+
+
+def _generate_incremental_basecall_script(
+    pod5_files: List,
+    output_dir: str,
+    marker_dir: str,
+    sample_name: str,
+    dorado_template: dict,
+    force: bool = False,
+    continue_on_failure: bool = False
+) -> str:
+    """Generate bash script that processes each pod5 with checkpointing.
+
+    Args:
+        pod5_files: List of Path objects to pod5 files
+        output_dir: Directory to write output BAM files
+        marker_dir: Directory to store completion markers
+        sample_name: Sample name for output file naming
+        dorado_template: Dict with dorado configuration
+        force: If True, reprocess all files ignoring markers
+        continue_on_failure: If True, continue after single pod5 failures
+
+    Returns:
+        Generated bash script as a string
+    """
+    from pathlib import Path
+    import os
+
+    dorado_bin = dorado_template.get('bin_path', 'dorado')
+    # Expand ~ to full home path (tilde doesn't expand in quoted bash variables)
+    dorado_bin = os.path.expanduser(dorado_bin)
+    model = dorado_template.get('model', 'sup')
+    device = dorado_template.get('device', 'cuda:0')
+    options = dorado_template.get('options', '')
+
+    # Build script header
+    script_lines = [
+        "#!/bin/bash",
+        "",
+        "# Incremental dorado basecalling script",
+        f"# Sample: {sample_name}",
+        f"# Generated for {len(pod5_files)} pod5 files",
+        "",
+        f"DORADO_BIN=\"{dorado_bin}\"",
+        f"MODEL=\"{model}\"",
+        f"DEVICE=\"{device}\"",
+        f"OPTIONS=\"{options}\"",
+        f"OUTPUT_DIR=\"{output_dir}\"",
+        f"MARKER_DIR=\"{marker_dir}\"",
+        "",
+        "FAILED_COUNT=0",
+        "PROCESSED_COUNT=0",
+        "SKIPPED_COUNT=0",
+        "",
+    ]
+
+    if not continue_on_failure:
+        script_lines.append("set -e  # Exit on first error")
+        script_lines.append("")
+
+    # Process each pod5 file
+    for pod5_file in pod5_files:
+        pod5_path = Path(pod5_file)
+        pod5_stem = pod5_path.stem
+
+        # Output BAM naming: {sample}_{pod5_stem}.bam
+        output_bam = f"$OUTPUT_DIR/{sample_name}_{pod5_stem}.bam"
+        marker_file = f"$MARKER_DIR/.{pod5_stem}.dorado_done"
+
+        script_lines.extend([
+            f"# --- Processing {pod5_path.name} ---",
+            f"MARKER=\"{marker_file}\"",
+            f"OUT_BAM=\"{output_bam}\"",
+            f"POD5_FILE=\"{pod5_path}\"",
+            "",
+        ])
+
+        if force:
+            # Force mode: always process, remove marker first
+            script_lines.extend([
+                "rm -f \"$MARKER\" 2>/dev/null || true",
+                "echo \"Processing $POD5_FILE (force mode)...\"",
+                "$DORADO_BIN basecaller $MODEL \"$POD5_FILE\" --device $DEVICE $OPTIONS > \"$OUT_BAM\"",
+                "if [ $? -eq 0 ]; then",
+                "    touch \"$MARKER\"",
+                "    PROCESSED_COUNT=$((PROCESSED_COUNT + 1))",
+                "    echo \"SUCCESS: $POD5_FILE\"",
+                "else",
+                "    echo \"FAILED: $POD5_FILE\"",
+            ])
+            if continue_on_failure:
+                script_lines.extend([
+                    "    FAILED_COUNT=$((FAILED_COUNT + 1))",
+                ])
+            else:
+                script_lines.extend([
+                    "    exit 1",
+                ])
+            script_lines.extend([
+                "fi",
+                "",
+            ])
+        else:
+            # Normal mode: skip if marker exists
+            script_lines.extend([
+                "if [ -f \"$MARKER\" ]; then",
+                f"    echo \"Skipping {pod5_path.name} (already completed)\"",
+                "    SKIPPED_COUNT=$((SKIPPED_COUNT + 1))",
+                "else",
+                f"    echo \"Processing {pod5_path.name}...\"",
+                "    $DORADO_BIN basecaller $MODEL \"$POD5_FILE\" --device $DEVICE $OPTIONS > \"$OUT_BAM\"",
+                "    if [ $? -eq 0 ]; then",
+                "        touch \"$MARKER\"",
+                "        PROCESSED_COUNT=$((PROCESSED_COUNT + 1))",
+                f"        echo \"SUCCESS: {pod5_path.name}\"",
+                "    else",
+                f"        echo \"FAILED: {pod5_path.name}\"",
+            ])
+            if continue_on_failure:
+                script_lines.extend([
+                    "        FAILED_COUNT=$((FAILED_COUNT + 1))",
+                ])
+            else:
+                script_lines.extend([
+                    "        exit 1",
+                ])
+            script_lines.extend([
+                "    fi",
+                "fi",
+                "",
+            ])
+
+    # Script footer
+    final_marker = f"$MARKER_DIR/.dorado_done"
+    script_lines.extend([
+        "# --- Summary ---",
+        "echo \"\"",
+        "echo \"=== Basecalling Summary ===\"",
+        "echo \"Processed: $PROCESSED_COUNT files\"",
+        "echo \"Skipped: $SKIPPED_COUNT files\"",
+        "echo \"Failed: $FAILED_COUNT files\"",
+        "",
+    ])
+
+    if continue_on_failure:
+        script_lines.extend([
+            "if [ $FAILED_COUNT -eq 0 ]; then",
+            f"    touch \"{final_marker}\"",
+            "    echo \"All pod5 files basecalled successfully\"",
+            "    exit 0",
+            "else",
+            "    echo \"WARNING: $FAILED_COUNT files failed to basecall\"",
+            "    exit 1",
+            "fi",
+        ])
+    else:
+        script_lines.extend([
+            f"touch \"{final_marker}\"",
+            "echo \"All pod5 files basecalled successfully\"",
+        ])
+
+    return "\n".join(script_lines)
+
+
+def _run_dorado_incremental(xp, dorado_template: dict, output_dir, force: bool, dry: bool, input_dir: str):
+    """Run dorado with per-pod5 checkpointing for incremental basecalling.
+
+    Args:
+        xp: Experiment configuration object
+        dorado_template: Dict with dorado configuration
+        output_dir: Directory to write output BAM files
+        force: If True, reprocess all files ignoring markers
+        dry: If True, only show what would be done
+        input_dir: Directory containing pod5 files
+
+    Returns:
+        0 on success, 1 on failure
+    """
+    import subprocess
+    from pathlib import Path
+
+    logger = Rlogger().get_logger()
+
+    input_path = Path(input_dir)
+    output_path = Path(output_dir)
+    marker_dir = Path(xp.sample_logs)
+
+    # Find all pod5 files recursively
+    pod5_files = sorted(input_path.rglob("*.pod5"))
+
+    if not pod5_files:
+        logger.warning(f"No pod5 files found in {input_dir}")
+        return 0
+
+    logger.info(f"Found {len(pod5_files)} pod5 files in {input_dir}")
+
+    # Check which files already have completion markers
+    pending_files = []
+    completed_files = []
+
+    for pod5_file in pod5_files:
+        marker_file = marker_dir / f".{pod5_file.stem}.dorado_done"
+        if marker_file.exists() and not force:
+            completed_files.append(pod5_file)
+        else:
+            pending_files.append(pod5_file)
+
+    logger.info(f"Status: {len(completed_files)} completed, {len(pending_files)} pending")
+
+    if not pending_files and not force:
+        logger.info("All pod5 files already basecalled - nothing to do")
+        # Ensure final done token exists
+        final_marker = marker_dir / ".dorado_done"
+        if not final_marker.exists():
+            final_marker.touch()
+        return 0
+
+    # For force mode, process all files
+    files_to_process = pod5_files if force else pending_files
+
+    # Get continue_on_failure setting
+    continue_on_failure = dorado_template.get('continue_on_failure', False)
+    if isinstance(continue_on_failure, str):
+        continue_on_failure = continue_on_failure.lower() in ('true', '1', 'yes', 'on')
+
+    # Generate incremental basecalling script
+    script_content = _generate_incremental_basecall_script(
+        pod5_files=files_to_process,
+        output_dir=str(output_path),
+        marker_dir=str(marker_dir),
+        sample_name=xp.target_sample,
+        dorado_template=dorado_template,
+        force=force,
+        continue_on_failure=continue_on_failure
+    )
+
+    # Write script to file
+    script_path = marker_dir / "dorado_incremental.sh"
+    script_path.write_text(script_content)
+    script_path.chmod(0o755)
+
+    logger.info(f"Generated incremental script: {script_path}")
+
+    if dry:
+        logger.info("DRY RUN - Script content:")
+        logger.info("-" * 60)
+        for line in script_content.split("\n")[:50]:  # Show first 50 lines
+            logger.info(line)
+        if len(script_content.split("\n")) > 50:
+            logger.info(f"... ({len(script_content.split(chr(10))) - 50} more lines)")
+        logger.info("-" * 60)
+        return 0
+
+    # Handle force mode: remove existing markers
+    if force:
+        logger.info("Force mode: removing existing completion markers")
+        for pod5_file in pod5_files:
+            marker_file = marker_dir / f".{pod5_file.stem}.dorado_done"
+            if marker_file.exists():
+                marker_file.unlink()
+        final_marker = marker_dir / ".dorado_done"
+        if final_marker.exists():
+            final_marker.unlink()
+
+    # Create output directory
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Submit to LSF or run locally
+    if dorado_template.get('use_lsf', False):
+        return _submit_incremental_lsf_job(xp, script_path, dorado_template, marker_dir)
+    else:
+        return _run_incremental_script_local(xp, script_path, marker_dir)
+
+
+def _submit_incremental_lsf_job(xp, script_path, dorado_template: dict, marker_dir):
+    """Submit the incremental basecalling script as a single LSF job."""
+    import subprocess
+    import re
+
+    logger = Rlogger().get_logger()
+
+    lsf_cmd = [
+        'bsub',
+        '-q', dorado_template.get('lsf_queue', 'gsla_high_gpu'),
+        '-gpu', dorado_template.get('lsf_gpu', 'num=1:gmem=80G'),
+        '-R', f"rusage[mem={dorado_template.get('lsf_mem', '64GB')}]",
+        '-o', f"{marker_dir}/dorado_incremental.lsf.out",
+        '-e', f"{marker_dir}/dorado_incremental.lsf.err",
+        '-J', f"dorado_{xp.target_sample}",
+        str(script_path)
+    ]
+
+    logger.info(f"Submitting incremental dorado job to LSF")
+    logger.debug(f"LSF command: {' '.join(lsf_cmd)}")
+
+    try:
+        result = subprocess.run(lsf_cmd, capture_output=True, text=True)
+
+        if result.returncode == 0:
+            match = re.search(r'Job <(\d+)>', result.stdout)
+            if match:
+                job_id = match.group(1)
+                logger.info(f"Submitted LSF job ID: {job_id}")
+                logger.info(f"Monitor with: bjobs {job_id}")
+                logger.info(f"View logs: tail -f {marker_dir}/dorado_incremental.lsf.out")
+            else:
+                logger.warning(f"Submitted job but could not extract job ID: {result.stdout}")
+            return 0
+        else:
+            logger.error(f"Failed to submit LSF job: {result.stderr}")
+            return 1
+
+    except Exception as e:
+        logger.error(f"Error submitting LSF job: {str(e)}")
+        return 1
+
+
+def _run_incremental_script_local(xp, script_path, marker_dir):
+    """Run the incremental basecalling script locally."""
+    import subprocess
+    from pathlib import Path
+
+    logger = Rlogger().get_logger()
+
+    log_out = marker_dir / "dorado_incremental.out"
+    log_err = marker_dir / "dorado_incremental.err"
+
+    logger.info(f"Running incremental dorado script locally")
+    logger.info(f"Script: {script_path}")
+    logger.info(f"Logs: {log_out}, {log_err}")
+
+    try:
+        result = subprocess.run(
+            ['bash', str(script_path)],
+            stdout=open(log_out, 'w'),
+            stderr=open(log_err, 'w')
+        )
+
+        if result.returncode == 0:
+            logger.info("Incremental basecalling completed successfully")
+            return 0
+        else:
+            logger.error(f"Incremental basecalling failed (exit code: {result.returncode})")
+            logger.error(f"Check error log: {log_err}")
+            return 1
+
+    except Exception as e:
+        logger.error(f"Error running incremental script: {str(e)}")
+        return 1
+
+
 import os
 import subprocess
 import hashlib
