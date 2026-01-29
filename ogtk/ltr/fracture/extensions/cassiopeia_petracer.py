@@ -10,6 +10,188 @@ from dataclasses import dataclass, field
 from ogtk.utils.log import CustomLogger
 from ogtk.utils.general import fuzzy_match_str
 
+
+def flag_spanning_deletions(pl_allele: pl.DataFrame, rcols: list[str], mode: str = 'unedited') -> pl.DataFrame:
+    """Handle alleles spanning multiple cutsites.
+
+    Detects when the same non-empty allele value appears in multiple r columns
+    for the same row, indicating a deletion that spans multiple cutsites.
+
+    Args:
+        pl_allele: DataFrame with r1, r2, ... columns containing allele values
+        rcols: List of r column names (e.g., ['r1', 'r2', 'r3', ...])
+        mode: How to handle spanning deletions:
+            - 'unedited': mark as unedited ("None" string, Cassiopeia state 0)
+            - 'missing': mark as missing data (null)
+            - 'use': leave as-is (keep the deletion allele value)
+
+    Returns:
+        DataFrame with spanning deletions handled according to mode
+    """
+    if not rcols or mode == 'use':
+        return pl_allele
+
+    # Cassiopeia treats "NONE" or strings containing "None" as uncut (state 0)
+    # Missing data requires passing missing_data_allele to convert_alleletable_to_character_matrix
+    replacement_value = 'None' if mode == 'unedited' else None
+
+    # Add row index for tracking
+    df = pl_allele.with_row_index('_row_idx')
+
+    # Unpivot r columns to long format
+    unpivoted = df.unpivot(
+        on=rcols,
+        index='_row_idx',
+        variable_name='cutsite',
+        value_name='allele'
+    )
+
+    # Find alleles that appear in multiple cutsites for the same row
+    # (non-empty values only)
+    spanning = (
+        unpivoted
+        .filter(pl.col('allele').is_not_null())
+        .filter(pl.col('allele') != '')
+        .group_by(['_row_idx', 'allele'])
+        .agg(pl.len().alias('count'))
+        .filter(pl.col('count') > 1)
+        .select(['_row_idx', 'allele'])
+        .with_columns(pl.lit(True).alias('_is_spanning'))
+    )
+
+    # Mark spanning deletions according to mode
+    unpivoted = (
+        unpivoted
+        .join(spanning, on=['_row_idx', 'allele'], how='left')
+        .with_columns(
+            pl.when(pl.col('_is_spanning') == True)
+            .then(pl.lit(replacement_value))
+            .otherwise(pl.col('allele'))
+            .alias('allele')
+        )
+        .with_columns(pl.col('allele').cast(pl.Utf8))  # Ensure string type preserved through pivot
+        .drop('_is_spanning')
+    )
+
+    # Pivot back to wide format
+    pivoted = unpivoted.pivot(
+        on='cutsite',
+        index='_row_idx',
+        values='allele'
+    )
+
+    # Restore original column order and merge with non-r columns
+    other_cols = [c for c in pl_allele.columns if c not in rcols]
+    result = (
+        df.select(['_row_idx'] + other_cols)
+        .join(pivoted, on='_row_idx')
+        .drop('_row_idx')
+        .select(pl_allele.columns)  # restore original column order
+    )
+
+    return result
+
+
+def generate_intbc_whitelist(
+    ldf: pl.LazyFrame,
+    min_umis: int = 100,
+    min_proportion_of_sample: float = 0.05,
+    min_ratio_to_max: float = 0.1,
+    logger: Optional[CustomLogger] = None,
+) -> pl.DataFrame:
+    """
+    Generate valid intBC whitelist using per-sbc adaptive thresholds.
+
+    Keeps intBCs that meet BOTH:
+    - umis >= max(min_umis, sample_total * min_proportion_of_sample)
+    - ratio_to_max >= min_ratio_to_max
+
+    Args:
+        ldf: LazyFrame with 'umi', 'sbc', 'intBC' columns
+        min_umis: Absolute minimum UMI count threshold
+        min_proportion_of_sample: Minimum proportion of sample total UMIs (e.g., 0.05 = 5%)
+        min_ratio_to_max: Minimum ratio to the largest intBC per sbc (e.g., 0.1 = 10%)
+        logger: Optional logger for info messages
+
+    Returns:
+        DataFrame with columns: sbc, intBC, umis, reads, ratio_to_max
+    """
+    result = (
+        ldf
+        .select('umi', 'sbc', 'intBC')
+        .group_by('sbc', 'intBC').agg(
+            pl.col('umi').n_unique().alias('umis'),
+            pl.len().alias('reads')
+        )
+        .with_columns(
+            sample_total_umis=pl.col('umis').sum().over('sbc'),
+            max_umis=pl.col('umis').max().over('sbc'),
+        )
+        .with_columns(
+            min_umis_threshold=pl.max_horizontal(
+                pl.col('sample_total_umis') * min_proportion_of_sample,
+                pl.lit(min_umis)
+            ),
+            ratio_to_max=pl.col('umis') / pl.col('max_umis'),
+        )
+        .filter(
+            (pl.col('umis') >= pl.col('min_umis_threshold')) &
+            (pl.col('ratio_to_max') >= min_ratio_to_max)
+        )
+        .select('sbc', 'intBC', 'umis', 'reads', 'ratio_to_max')
+        .sort(['sbc', 'umis'], descending=[False, True])
+        .collect()
+    )
+
+    if logger:
+        n_sbcs = result['sbc'].n_unique()
+        n_intbcs = result.height
+        logger.info(f"Generated whitelist: {n_intbcs} valid intBCs across {n_sbcs} sbcs")
+
+    return result
+
+
+def filter_by_whitelist(
+    ldf: pl.LazyFrame,
+    whitelist: pl.DataFrame,
+    logger: Optional[CustomLogger] = None,
+) -> pl.LazyFrame:
+    """
+    Filter LazyFrame to only include (sbc, intBC) pairs in whitelist.
+
+    If whitelist has 'sbc' column, filters by (sbc, intBC) pair.
+    If whitelist only has 'intBC' column, filters by intBC globally.
+
+    Args:
+        ldf: LazyFrame with 'sbc' and 'intBC' columns
+        whitelist: DataFrame with valid intBC values (and optionally sbc)
+        logger: Optional logger for info messages
+
+    Returns:
+        Filtered LazyFrame
+    """
+    if 'sbc' in whitelist.columns:
+        # Per-sbc whitelist
+        n_before = ldf.select(pl.struct('sbc', 'intBC').n_unique()).collect().item()
+        filtered = ldf.join(
+            whitelist.select('sbc', 'intBC').lazy(),
+            on=['sbc', 'intBC'],
+            how='semi'
+        )
+        n_after = filtered.select(pl.struct('sbc', 'intBC').n_unique()).collect().item()
+    else:
+        # Global intBC whitelist
+        valid_intbcs = set(whitelist['intBC'].to_list())
+        n_before = ldf.select(pl.col('intBC').n_unique()).collect().item()
+        filtered = ldf.filter(pl.col('intBC').is_in(valid_intbcs))
+        n_after = filtered.select(pl.col('intBC').n_unique()).collect().item()
+
+    if logger:
+        logger.info(f"Whitelist filter: {n_before} -> {n_after} (sbc, intBC) pairs")
+
+    return filtered
+
+
 def plug_cassiopeia(
         ldf: pl.LazyFrame,
         ann_intbc_mod: pl.DataFrame,
@@ -20,9 +202,15 @@ def plug_cassiopeia(
         cutsite_width: int = 12,
         context: bool = True,
         context_size: int = 50,
-        gap_open_penalty: float = 20.0,
-        gap_extend_penalty: float = 1.0,
+        gap_open_penalty: Optional[int] = None,
+        gap_extend_penalty: Optional[int] = None,
         alignment_method: str = 'global',
+        spanning_deletions: str = 'unedited',
+        # Partition filtering parameters
+        intbc_whitelist_path: Optional[str] = None,
+        min_molecules_per_group: int = 10,
+        min_proportion_of_sample: float = 0.02,
+        min_ratio_to_max: float = 0.1,
         ) -> StepResults:
     """ 
     readName - A unique identifier for each row/sequence
@@ -45,7 +233,7 @@ def plug_cassiopeia(
     cass_ldf = (
             ldf.with_columns(
             readName=pl.col('umi'),
-            cellBC=pl.col('umi'), 
+            cellBC=pl.col('umi'),
             UMI=pl.col('umi'),
             readCount=pl.col('reads'),
             seq=pl.col('intBC')+pl.col('contig'),
@@ -54,6 +242,31 @@ def plug_cassiopeia(
             #TODO: change `how`?
             .join(ann_intbc_mod.lazy(), left_on='intBC', right_on='intBC', how='inner')
     )
+
+    # === PRE-FILTERING ===
+    filter_metrics = {}
+
+    # Option A: Load pre-generated whitelist
+    if intbc_whitelist_path is not None:
+        whitelist = pl.read_parquet(intbc_whitelist_path)
+        cass_ldf = filter_by_whitelist(cass_ldf, whitelist, logger)
+        filter_metrics['whitelist_source'] = 'file'
+        filter_metrics['whitelist_path'] = str(intbc_whitelist_path)
+
+    # Option B: Generate whitelist inline if thresholds set
+    elif min_molecules_per_group > 0 or min_proportion_of_sample > 0 or min_ratio_to_max > 0:
+        whitelist = generate_intbc_whitelist(
+            ldf,  # Use original ldf, not cass_ldf (before cassiopeia columns added)
+            min_umis=min_molecules_per_group,
+            min_proportion_of_sample=min_proportion_of_sample,
+            min_ratio_to_max=min_ratio_to_max,
+            logger=logger,
+        )
+        cass_ldf = filter_by_whitelist(cass_ldf, whitelist, logger)
+        filter_metrics['whitelist_source'] = 'generated'
+        filter_metrics['valid_intbc_count'] = whitelist.height
+
+    # === END PRE-FILTERING ===
 
     res = []
     umi_tables = []
@@ -67,14 +280,19 @@ def plug_cassiopeia(
             if logger:
                 logger.debug(f"{mod=} {intBC=} {queries.shape=}")
 
-            umi_table = cas.pp.align_sequences(
-                 queries=queries.to_pandas(),
-                 ref_filepath=f'{workdir}/{mod}.fasta',
-                 n_threads=1,
-                 method=alignment_method,
-                 gap_open_penalty=gap_open_penalty,
-                 gap_extend_penalty=gap_extend_penalty,
-             )
+            # Build alignment kwargs - only include gap penalties if explicitly set
+            align_kwargs = {
+                'queries': queries.to_pandas(),
+                'ref_filepath': f'{workdir}/{mod}.fasta',
+                'n_threads': 1,
+                'method': alignment_method,
+            }
+            if gap_open_penalty is not None:
+                align_kwargs['gap_open_penalty'] = gap_open_penalty
+            if gap_extend_penalty is not None:
+                align_kwargs['gap_extend_penalty'] = gap_extend_penalty
+
+            umi_table = cas.pp.align_sequences(**align_kwargs)
     
             allele_table =  cas.pp.call_alleles(
                             umi_table,
@@ -91,6 +309,18 @@ def plug_cassiopeia(
                     pl.col(col).cigar.enrich_insertions(pl.col('Seq'), pl.col('CIGAR'))
                     for col in rcols
                 ])
+
+            # Handle deletions spanning multiple cutsites
+            pl_allele = flag_spanning_deletions(pl_allele, rcols, mode=spanning_deletions)
+
+            # Fill any remaining null values in r columns with "None" string
+            # (nulls come from cas.pp.call_alleles when it can't determine a cutsite allele)
+            # Cassiopeia treats "None" as unedited/wildtype (state 0)
+            if rcols:
+                pl_allele = pl_allele.with_columns([
+                    pl.col(col).fill_null("None") for col in rcols
+                ])
+
             allele_table = pl_allele.to_pandas()
 
             #replace intBC for real intBC since Cassiopeia does something I don't understand yet
@@ -107,7 +337,8 @@ def plug_cassiopeia(
                 )
 
     return StepResults(
-            results={"alleles_pl" : pl.concat(res), "alleles_pd" : umi_tables}
+            results={"alleles_pl" : pl.concat(res) if res else pl.DataFrame(), "alleles_pd" : umi_tables},
+            metrics={"partitions_processed": len(res), "none_mod_skipped": nones, **filter_metrics}
     )
 
 def save_ref_to_fasta(refs: pl.DataFrame, out_dir: str|Path = '.', field: str = 'mod') -> None:
@@ -413,14 +644,28 @@ class CassiopeiaConfig(ExtensionConfig):
     context_size: int = 50
 
     # Alignment parameters for cas.pp.align_sequences
-    gap_open_penalty: float = 20.0  # Penalty for opening a gap (default: 20)
-    gap_extend_penalty: float = 1.0  # Penalty for extending a gap (default: 1)
+    # When None, Cassiopeia's defaults are used
+    gap_open_penalty: Optional[int] = None
+    gap_extend_penalty: Optional[int] = None
     alignment_method: str = 'global'  # 'local' (Smith-Waterman) or 'global' (Needleman-Wunsch)
+
+    # Spanning deletion handling: how to treat deletions that span multiple cutsites
+    # - 'unedited': mark as unedited ("None" string, Cassiopeia state 0)
+    # - 'missing': mark as missing data (null)
+    # - 'use': leave as-is (keep the deletion allele value)
+    spanning_deletions: str = 'unedited'
 
     # Segmented allele extraction fields
     metas_flanks_csv: Optional[str] = None  # Path to PEtracer_metas_flanks.csv
     cassette_type: str = "5mer"  # Options: 5mer, 10mer, 20mer
     min_consensus_support: float = 0.5  # Minimum support for consensus calls
+
+    # Partition filtering parameters - reduce partition explosion from sequencing errors
+    # See generate_intbc_whitelist() for threshold logic
+    intbc_whitelist_path: Optional[str] = None  # Parquet with 'intBC', 'sbc' columns
+    min_molecules_per_group: int = 10           # Absolute minimum UMIs per (sbc, intBC) group
+    min_proportion_of_sample: float = 0.02      # % of sample total (e.g., 0.02 = 2%)
+    min_ratio_to_max: float = 0.1               # % of largest group per sbc (e.g., 0.1 = 10%)
 
     # Runtime fields (populated during processing, not from config file)
     ann_intbc_mod: Optional[pl.DataFrame] = None  # intBC → mod mapping from classify_cassettes
