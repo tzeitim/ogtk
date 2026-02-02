@@ -305,35 +305,50 @@ class Pipeline:
             self.logger.info(f"Processing {len(files)} {input_format.upper()} files for sample {self.xp.target_sample}")
             temp_parsed_files = []
             temp_merged_files = []
-            
+            temp_raw_bam_files = []
+
             for i, file in enumerate(files):
                 temp_out_fn = f'{sample_dir}/temp_parsed_reads_{i}.parquet'
                 temp_merged_fn = f'{sample_dir}/temp_merged_reads_{i}.parquet'
-                
+                temp_raw_bam_fn = f'{sample_dir}/intermediate/temp_raw_bam_{i}.parquet' if input_format == 'bam' else None
+
                 self.logger.info(f"Processing {input_format.upper()} file {i+1}/{len(files)}: {file}")
 
-                self._par_process_single_file(file, temp_out_fn, temp_merged_fn, sample_dir, input_format, force_tab, limit)
-                
+                self._par_process_single_file(file, temp_out_fn, temp_merged_fn, sample_dir, input_format, force_tab, limit, file_index=i)
+
                 temp_parsed_files.append(temp_out_fn)
                 temp_merged_files.append(temp_merged_fn)
-            
+                if temp_raw_bam_fn:
+                    temp_raw_bam_files.append(temp_raw_bam_fn)
+
             # Combine multiple parquet files (same for both formats)
             self.logger.info(f"Combining {len(temp_parsed_files)} {input_format.upper()}-derived parquet files")
-            
+
             self._par_combine_parquet_files(temp_parsed_files, out_fn)
             self._par_combine_parquet_files(temp_merged_files, merged_fn)
+
+            # Combine raw BAM files if they exist
+            if temp_raw_bam_files and getattr(self.xp, 'save_intermediate_files', False):
+                intermediate_dir = Path(sample_dir) / 'intermediate'
+                raw_bam_combined = str(intermediate_dir / 'raw_bam.parquet')
+                self.logger.info(f"Combining {len(temp_raw_bam_files)} raw BAM parquet files")
+                self._par_combine_parquet_files(temp_raw_bam_files, raw_bam_combined, cleanup=False)
+            elif temp_raw_bam_files:
+                # Clean up temp raw bam files if not saving
+                for f in temp_raw_bam_files:
+                    Path(f).unlink(missing_ok=True)
                     
         else:
             # Single file processing
             file = files[0]
             self.logger.info(f"Processing single {input_format.upper()} file: {file}")
-            
-            # Format-specific processing
-            self._par_process_single_file(file, out_fn, merged_fn, sample_dir, input_format, force_tab, limit)
 
-    def _par_process_single_file(self, file, out_fn, merged_fn, sample_dir, input_format, force_tab, limit):
+            # Format-specific processing
+            self._par_process_single_file(file, out_fn, merged_fn, sample_dir, input_format, force_tab, limit, file_index=None)
+
+    def _par_process_single_file(self, file, out_fn, merged_fn, sample_dir, input_format, force_tab, limit, file_index=None):
         """Process a single input file - format-specific logic"""
-        
+
         if input_format == 'fastq':
             tabulate_paired_10x_fastqs_rs(
                 file_path=file, 
@@ -351,7 +366,12 @@ class Pipeline:
             # Store raw BAM parquet in intermediate directory
             intermediate_dir = Path(sample_dir) / 'intermediate'
             intermediate_dir.mkdir(exist_ok=True)
-            raw_bam_fn = str(intermediate_dir / 'raw_bam.parquet')
+
+            # Use indexed filename for multi-file processing, plain name for single file
+            if file_index is not None:
+                raw_bam_fn = str(intermediate_dir / f'temp_raw_bam_{file_index}.parquet')
+            else:
+                raw_bam_fn = str(intermediate_dir / 'raw_bam.parquet')
 
             import rogtk
 
@@ -382,19 +402,21 @@ class Pipeline:
             import shutil
             shutil.copy2(merged_fn, out_fn)
 
-            # Clean up intermediate file unless save_intermediate_files is set
-            if not getattr(self.xp, 'save_intermediate_files', False):
+            # Clean up intermediate file for single-file processing unless save_intermediate_files is set
+            # For multi-file processing, cleanup is handled by the caller
+            if file_index is None and not getattr(self.xp, 'save_intermediate_files', False):
                 Path(raw_bam_fn).unlink(missing_ok=True)
 
-    def _par_combine_parquet_files(self, file_list, output_file):
+    def _par_combine_parquet_files(self, file_list, output_file, cleanup=True):
         """Combine multiple parquet files into one"""
         if file_list:
             combined = pl.concat([pl.read_parquet(f) for f in file_list])
             combined.write_parquet(output_file)
-            
-            # Clean up temporary files
-            for temp_file in file_list:
-                Path(temp_file).unlink(missing_ok=True)
+
+            # Clean up temporary files unless cleanup=False
+            if cleanup:
+                for temp_file in file_list:
+                    Path(temp_file).unlink(missing_ok=True)
 
     def _par_calculate_parquet_metrics(self, out_fn):
         """Calculate metrics from the processed parquet file"""

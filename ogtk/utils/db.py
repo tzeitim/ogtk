@@ -94,20 +94,19 @@ def run_bcl2fq(xp, force=False, dry=False, **args):
        return(0)
 
 
-def run_dorado(xp, force=False, dry=False, bam_output_dir=None, incremental=True, **args):
-    '''ONT basecalling using dorado following the bcl2fastq pattern
+def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
+    '''ONT basecalling using dorado with per-pod5 checkpointing.
+
+    Each pod5 file is basecalled to an individual BAM, allowing resume after
+    interruption and incremental processing of new reads.
 
     Args:
         xp: Experiment configuration object
         force: Force re-run even if done token exists
         dry: Dry run - only show commands without executing
         bam_output_dir: Directory to save BAM files (if None, uses wd_bam or wd_fastq)
-        incremental: If True (default), use per-pod5 checkpointing for incremental basecalling.
-                     Each pod5 file is basecalled to an individual BAM, allowing resume after
-                     interruption and incremental processing of new reads.
         **args: Additional arguments to override configuration
     '''
-    import subprocess
     from pathlib import Path
 
     if not xp.consolidated:
@@ -156,7 +155,7 @@ def run_dorado(xp, force=False, dry=False, bam_output_dir=None, incremental=True
         logger.debug(f'setting {k}\t-->\t{dorado_template[k]}')
 
     # Sanitize types (preserve booleans for certain keys)
-    boolean_keys = {'wait_for_completion', 'use_lsf', 'dry_run', 'incremental', 'continue_on_failure'}
+    boolean_keys = {'wait_for_completion', 'use_lsf', 'dry_run', 'continue_on_failure'}
     for k, v in dorado_template.items():
         if k in boolean_keys:
             # Handle boolean strings properly
@@ -170,255 +169,21 @@ def run_dorado(xp, force=False, dry=False, bam_output_dir=None, incremental=True
     logger.debug(f"Dorado config: {dorado_conf}")
     logger.debug(f"Dorado template: {dorado_template}")
 
-    # Determine if incremental mode should be used
-    # Priority: function argument > template config > default (True)
-    use_incremental = incremental
-    if 'incremental' in dorado_template:
-        template_incremental = dorado_template['incremental']
-        if isinstance(template_incremental, str):
-            template_incremental = template_incremental.lower() in ('true', '1', 'yes', 'on')
-        # Only use template setting if function argument is default (True)
-        if incremental is True:
-            use_incremental = template_incremental
-
-    # Route to incremental or legacy mode
-    if use_incremental:
-        logger.info("Using incremental basecalling mode (per-pod5 checkpointing)")
-        # Handle sample-specific barcode directories for input
-        consolidated_input_dir = _prepare_sample_specific_input(xp, dorado_conf, dorado_template, logger)
-        output_dir = Path(dorado_template['outdir'])
-        output_dir.mkdir(parents=True, exist_ok=True)
-        return _run_dorado_incremental(
-            xp=xp,
-            dorado_template=dorado_template,
-            output_dir=str(output_dir),
-            force=force,
-            dry=dry,
-            input_dir=consolidated_input_dir
-        )
-
-    # Legacy mode: single BAM per sample directory
-    logger.info("Using legacy basecalling mode (single BAM output)")
-
-    # Handle sample-specific barcode directories
+    # Prepare input and output directories
     consolidated_input_dir = _prepare_sample_specific_input(xp, dorado_conf, dorado_template, logger)
-    
-    # Find POD5 directories in consolidated location
-    input_path = Path(consolidated_input_dir)
-    if not input_path.exists():
-        raise ValueError(f"POD5 input directory does not exist: {input_path}")
-    
-    # Look for sample directories (could be barcode dirs or consolidated sample dirs)
-    sample_dirs = [d for d in input_path.iterdir() if d.is_dir()]
-    
-    if not sample_dirs:
-        sample_dirs = [input_path]
-        logger.info(f"No sample directories found, processing single sample from {input_path}")
-    else:
-        logger.info(f"Found {len(sample_dirs)} sample directories: {[d.name for d in sample_dirs]}")
-        
-    # For consistency with existing code, call them barcode_dirs
-    barcode_dirs = sample_dirs
-
-    # Create output directory
     output_dir = Path(dorado_template['outdir'])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    done_token = f"{xp.sample_logs}/.dorado_done"
-    
-    if not dry:
-        if os.path.exists(done_token) and not force:
-            logger.info("Dorado basecalling already completed")
-            return 0
-        elif os.path.exists(done_token) and force:
-            logger.info("Forcing dorado re-run - removing existing completion token")
-            os.remove(done_token)
+    logger.info(f"Running dorado basecalling for sample '{xp.target_sample}'")
 
-    # Process each barcode directory
-    commands = []
-    for barcode_dir in barcode_dirs:
-        barcode_name = barcode_dir.name
-        output_bam = output_dir / f"{xp.target_sample}.bam"
-        
-        # Build command with template substitution
-        base_cmd = (
-            dorado_template['cmd']
-                .replace('DORADO_BIN', dorado_template['bin_path'])
-                .replace('MODEL', dorado_template['model'])
-                .replace('INPUT_DIR', str(barcode_dir))
-                .replace('OUTPUT_FILE', str(output_bam))
-                .replace('DEVICE', dorado_template.get('device', 'cuda:0'))
-                .replace('OPTIONS', dorado_template.get('options', ''))
-        )
-        
-        # For LSF jobs, add done token creation for the last job only
-        if dorado_template.get('use_lsf', False) and len(barcode_dirs) == 1:
-            # Single job - add done token creation
-            cmd = f"{base_cmd} && touch {done_token}"
-        elif dorado_template.get('use_lsf', False) and barcode_dir == barcode_dirs[-1]:
-            # Last job in multi-job scenario - add done token creation
-            cmd = f"{base_cmd} && touch {done_token}"
-        else:
-            cmd = base_cmd
-        
-        # Add conda environment if specified
-        if 'conda_env' in dorado_template:
-            cmd = f"conda run -n {dorado_template['conda_env']} {cmd}"
-            
-        commands.append((cmd, barcode_name, str(output_bam)))
-
-    logger.debug(f"Generated {len(commands)} dorado commands")
-    
-    if not dry:
-        # Check if using LSF for job submission
-        if dorado_template.get('use_lsf', False):
-            return _submit_dorado_lsf_jobs(xp, commands, dorado_template, done_token)
-        else:
-            return _run_dorado_sequential(xp, commands, done_token, dorado_template)
-    else:
-        logger.info("DRY RUN - Commands that would be executed:")
-        for cmd, barcode, _ in commands:
-            logger.info(f"  Barcode {barcode}: {cmd}")
-        return 0
-
-
-def _run_dorado_sequential(xp, commands, done_token, dorado_template=None):
-    '''Run dorado commands sequentially'''
-    import subprocess
-    from pathlib import Path
-
-    all_success = True
-
-    for i, (cmd, barcode, output_file) in enumerate(commands):
-        logger.info(f"Processing barcode {barcode} ({i+1}/{len(commands)})")
-        logger.debug(f"Command: {cmd}")
-
-        log_out = f'{xp.sample_logs}/dorado_{barcode}.out'
-        log_err = f'{xp.sample_logs}/dorado_{barcode}.err'
-
-        try:
-            result = subprocess.run(cmd, shell=True,
-                                  stdout=open(log_out, 'w'),
-                                  stderr=open(log_err, 'w'))
-
-            if result.returncode == 0:
-                logger.info(f"Successfully processed {barcode} -> {output_file}")
-            else:
-                logger.error(f"Failed to process {barcode} (exit code: {result.returncode})")
-                all_success = False
-
-        except Exception as e:
-            logger.error(f"Error processing {barcode}: {str(e)}")
-            all_success = False
-
-    if all_success:
-        # Done token already created by the last command in LSF mode
-        # For sequential mode, create it here
-        if not any('touch' in cmd for cmd, _, _ in commands):
-            subprocess.run(f'touch {done_token}'.split())
-
-        logger.info("All dorado basecalling completed successfully")
-
-        # Cleanup temporary symlink directory if it was created
-        if dorado_template and 'temp_symlink_dir' in dorado_template:
-            temp_dir = Path(dorado_template['temp_symlink_dir'])
-            if temp_dir.exists() and 'consolidated' in str(temp_dir):
-                logger.info(f"Cleaning up temporary symlink directory: {temp_dir}")
-                _cleanup_symlink_dir(temp_dir, logger)
-
-        return 0
-    else:
-        logger.error("Some dorado basecalling jobs failed")
-        return 1
-
-
-def _submit_dorado_lsf_jobs(xp, commands, dorado_template, done_token):
-    '''Submit dorado jobs to LSF cluster'''
-    import subprocess
-    
-    logger.info(f"Submitting {len(commands)} dorado jobs to LSF")
-    
-    job_ids = []
-    
-    for cmd, barcode, output_file in commands:
-        lsf_cmd = [
-            'bsub',
-            '-q', dorado_template.get('lsf_queue', 'gsla_high_gpu'),
-            '-gpu', dorado_template.get('lsf_gpu', 'num=1:gmem=80G'),
-            '-R', f"rusage[mem={dorado_template.get('lsf_mem', '64GB')}]",
-            '-o', f"{xp.sample_logs}/dorado_{barcode}.lsf.out",
-            '-e', f"{xp.sample_logs}/dorado_{barcode}.lsf.err",
-            '-J', f"dorado_{barcode}",
-            cmd
-        ]
-        
-        logger.debug(f"LSF command: {' '.join(lsf_cmd)}")
-        
-        try:
-            result = subprocess.run(lsf_cmd, capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                import re
-                match = re.search(r'Job <(\d+)>', result.stdout)
-                if match:
-                    job_id = match.group(1)
-                    job_ids.append(job_id)
-                    logger.info(f"Submitted {barcode} job with ID: {job_id}")
-                else:
-                    logger.warning(f"Could not extract job ID for {barcode}: {result.stdout}")
-            else:
-                logger.error(f"Failed to submit {barcode} job: {result.stderr}")
-                return 1
-                
-        except Exception as e:
-            logger.error(f"Error submitting {barcode} job: {str(e)}")
-            return 1
-    
-    logger.info(f"Submitted {len(job_ids)} jobs to LSF. Job IDs: {job_ids}")
-    
-    # Check if we should wait for jobs to complete (default: False for non-blocking behavior)
-    wait_for_completion = dorado_template.get('wait_for_completion', False)
-    
-    if wait_for_completion:
-        logger.info("Monitoring LSF jobs until completion...")
-        result = _monitor_lsf_jobs(job_ids, done_token, dorado_template.get('poll_interval', 30), 
-                                 dorado_template.get('max_wait_hours', 24))
-        return result
-    else:
-        logger.info("Done token will be created automatically when the last job completes")
-        logger.info("Pipeline will continue without waiting for LSF jobs")
-        return 0
-
-
-def _monitor_lsf_jobs(job_ids, done_token, poll_interval=30, max_wait_hours=24):
-    '''Monitor LSF jobs by checking for completion token'''
-    import time
-    import os
-    
-    logger = Rlogger().get_logger()
-    max_wait_seconds = max_wait_hours * 3600
-    start_time = time.time()
-    
-    logger.info(f"Waiting for done token: {done_token}")
-    logger.info(f"Polling every {poll_interval}s (max wait: {max_wait_hours}h)")
-    
-    while True:
-        # Check if done token exists
-        if os.path.exists(done_token):
-            logger.info("Done token found - dorado basecalling completed")
-            return 0
-        
-        # Check timeout
-        elapsed = time.time() - start_time
-        if elapsed > max_wait_seconds:
-            logger.error(f"Timeout after {max_wait_hours} hours waiting for completion token")
-            return 1
-        
-        # Log progress every 10 polls
-        if int(elapsed / poll_interval) % 10 == 0:
-            logger.info(f"Still waiting for completion... (elapsed: {elapsed/60:.1f}min)")
-        
-        time.sleep(poll_interval)
+    return _run_dorado_incremental(
+        xp=xp,
+        dorado_template=dorado_template,
+        output_dir=str(output_dir),
+        force=force,
+        dry=dry,
+        input_dir=consolidated_input_dir
+    )
 
 
 def _prepare_sample_specific_input(xp, dorado_conf, dorado_template, logger):
@@ -570,6 +335,9 @@ def _generate_incremental_basecall_script(
     model = dorado_template.get('model', 'sup')
     device = dorado_template.get('device', 'cuda:0')
     options = dorado_template.get('options', '')
+    models_dir = dorado_template.get('models_dir', None)
+    if models_dir:
+        models_dir = os.path.expanduser(models_dir)
 
     # Build script header
     script_lines = [
@@ -579,6 +347,14 @@ def _generate_incremental_basecall_script(
         f"# Sample: {sample_name}",
         f"# Generated for {len(pod5_files)} pod5 files",
         "",
+    ]
+
+    # Set models directory if provided (avoids re-downloading model for each pod5)
+    if models_dir:
+        script_lines.append(f"export DORADO_MODELS_DIRECTORY=\"{models_dir}\"")
+        script_lines.append("")
+
+    script_lines.extend([
         f"DORADO_BIN=\"{dorado_bin}\"",
         f"MODEL=\"{model}\"",
         f"DEVICE=\"{device}\"",
@@ -590,7 +366,7 @@ def _generate_incremental_basecall_script(
         "PROCESSED_COUNT=0",
         "SKIPPED_COUNT=0",
         "",
-    ]
+    ])
 
     if not continue_on_failure:
         script_lines.append("set -e  # Exit on first error")
