@@ -108,10 +108,19 @@ class PlotDB():
         xp = ppi.xp
 
         # TODO add a few sampling steps to include some info about saturation
-        for key in ['parsed_reads', 'parsed_reads_invalid']:
+        # TODO expose these do_ flagss
+        do_invalid = False
+        do_simple_cov  = False
+
+        keys_to_process = ['parsed_reads']
+        if do_invalid:
+            keys_to_process.append('parsed_reads_invalid')
+
+        for key in keys_to_process:
             ifn = results.results[key]
 
-            out_path = f'{xp.sample_figs}/{xp.target_sample}_{key}_coverage.png'
+            # simple coverage
+            # saturation coverage
             fig = sns.displot(data=
                 pl.scan_parquet(ifn)
                     .group_by('umi')
@@ -125,8 +134,8 @@ class PlotDB():
 
             plt.grid()
             plt.title(f"Reads per UMI\n{xp.target_sample}")
-            plt.xlim((1,2e6))
-            plt.ylim((1,1e5))
+            plt.xlim((1,1e7))
+            plt.ylim((1,1e4))
 
             #th_kmeans = qc.find_read_count_threshold(ifn, method='kmeans')
             #th_kneedle = qc.find_read_count_threshold(ifn, method='kneedle')
@@ -136,10 +145,11 @@ class PlotDB():
             if hasattr(xp, 'fracture'):
                 plt.axhline(y=xp.fracture['min_reads'], color='g', linestyle='--', label="min reads")
 
-            fig.savefig(out_path)
-            xp.logger.info(f"saved {out_path}")
+            if do_simple_cov:
+                out_path = f'{xp.sample_figs}/{xp.target_sample}_{key}_coverage.png'
+                fig.savefig(out_path)
+                xp.logger.info(f"saved {out_path}")
             
-            # saturation coverage
             out_path = f'{xp.sample_figs}/{xp.target_sample}_{key}_sat-coverage.png'
             
             total_reads = pl.scan_parquet(ifn).select(pl.len()).collect().item()
@@ -169,7 +179,8 @@ class PlotDB():
             plt.ylim((1,1e5))
             plt.grid(True, which='both', ls='--', alpha=0.3)
 
-            fig.savefig(out_path)
+            fig = plt.gcf()
+            fig.savefig(out_path, bbox_inches='tight')
             xp.logger.info(f"saved {out_path}")
             # anchor analysis
 
