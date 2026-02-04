@@ -241,7 +241,7 @@ def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
         if dorado_template.get('use_lsf', False):
             return _submit_dorado_lsf_jobs(xp, commands, dorado_template, done_token)
         else:
-            return _run_dorado_sequential(xp, commands, done_token)
+            return _run_dorado_sequential(xp, commands, dorado_template, done_token)
     else:
         logger.info("DRY RUN - Commands that would be executed:")
         for cmd, barcode, output in commands:
@@ -249,12 +249,21 @@ def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
         return 0
 
 
-def _run_dorado_sequential(xp, commands, done_token):
+def _run_dorado_sequential(xp, commands, dorado_template, done_token):
     '''Run dorado commands sequentially'''
     import subprocess
-    
+    from pathlib import Path
+
+    # Set up environment with models_dir if specified (avoids re-downloading)
+    env = os.environ.copy()
+    models_dir = dorado_template.get('models_dir')
+    if models_dir:
+        models_dir = os.path.expanduser(models_dir)
+        env['DORADO_MODELS_DIRECTORY'] = models_dir
+        logger.info(f"Using cached models directory: {models_dir}")
+
     all_success = True
-    
+
     for i, (cmd, barcode, output_file) in enumerate(commands):
         logger.info(f"Processing barcode {barcode} ({i+1}/{len(commands)})")
         logger.debug(f"Command: {cmd}")
@@ -263,7 +272,7 @@ def _run_dorado_sequential(xp, commands, done_token):
         log_err = f'{xp.sample_logs}/dorado_{barcode}.err'
         
         try:
-            result = subprocess.run(cmd, shell=True,
+            result = subprocess.run(cmd, shell=True, env=env,
                                   stdout=open(log_out, 'w'),
                                   stderr=open(log_err, 'w'))
             
@@ -301,12 +310,23 @@ def _run_dorado_sequential(xp, commands, done_token):
 def _submit_dorado_lsf_jobs(xp, commands, dorado_template, done_token):
     '''Submit dorado jobs to LSF cluster'''
     import subprocess
-    
+
     logger.info(f"Submitting {len(commands)} dorado jobs to LSF")
-    
+
+    # Prepare models_dir env export if specified (avoids re-downloading)
+    models_dir = dorado_template.get('models_dir')
+    env_prefix = ""
+    if models_dir:
+        models_dir = os.path.expanduser(models_dir)
+        env_prefix = f"export DORADO_MODELS_DIRECTORY=\"{models_dir}\" && "
+        logger.info(f"LSF jobs will use cached models directory: {models_dir}")
+
     job_ids = []
-    
+
     for cmd, barcode, output_file in commands:
+        # Prepend models_dir export if configured
+        full_cmd = f"{env_prefix}{cmd}" if env_prefix else cmd
+
         lsf_cmd = [
             'bsub',
             '-q', dorado_template.get('lsf_queue', 'gsla_high_gpu'),
@@ -315,7 +335,7 @@ def _submit_dorado_lsf_jobs(xp, commands, dorado_template, done_token):
             '-o', f"{xp.sample_logs}/dorado_{barcode}.lsf.out",
             '-e', f"{xp.sample_logs}/dorado_{barcode}.lsf.err",
             '-J', f"dorado_{barcode}",
-            cmd
+            full_cmd
         ]
         
         logger.debug(f"LSF command: {' '.join(lsf_cmd)}")
@@ -411,14 +431,8 @@ def _prepare_sample_specific_input(xp, dorado_conf, dorado_template, logger):
     sample_barcode_paths = sample_barcode_dirs[target_sample]
     if not isinstance(sample_barcode_paths, list):
         sample_barcode_paths = [sample_barcode_paths]
-    
-    if len(sample_barcode_paths) == 1:
-        # Single barcode directory for this sample
-        single_path = sample_barcode_paths[0]
-        logger.info(f"Single barcode directory for sample '{target_sample}': {single_path}")
-        return single_path
-    
-    # Multi-flowcell mode - consolidate barcode directories for this sample
+
+    # Always consolidate to ensure consistent directory structure and job naming
     temp_dir_template = dorado_template.get('temp_symlink_dir', f"/tmp/dorado_consolidated_{target_sample}_{os.getpid()}")
     # Resolve template variables using eval (like the rest of the xp system)
     if 'self.' in temp_dir_template:
@@ -427,7 +441,7 @@ def _prepare_sample_specific_input(xp, dorado_conf, dorado_template, logger):
     else:
         temp_dir_path = temp_dir_template
     temp_dir = Path(temp_dir_path)
-    logger.info(f"Multi-flowcell mode for sample '{target_sample}': consolidating {len(sample_barcode_paths)} barcode directories into {temp_dir}")
+    logger.info(f"Consolidating {len(sample_barcode_paths)} barcode dir(s) for sample '{target_sample}' into {temp_dir}")
     
     # Clean up any existing temp directory
     if temp_dir.exists():
