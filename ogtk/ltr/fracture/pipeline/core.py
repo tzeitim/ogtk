@@ -386,15 +386,16 @@ class Pipeline:
             if not getattr(self.xp, 'save_intermediate_files', False):
                 Path(raw_bam_fn).unlink(missing_ok=True)
 
-    def _par_combine_parquet_files(self, file_list, output_file):
-        """Combine multiple parquet files into one"""
+    def _par_combine_parquet_files(self, file_list, output_file, cleanup=True):
+        """Combine multiple parquet files into one (lazy/streaming)"""
         if file_list:
-            combined = pl.concat([pl.read_parquet(f) for f in file_list])
-            combined.write_parquet(output_file)
-            
+            # Use lazy evaluation to avoid loading all files into RAM
+            pl.concat([pl.scan_parquet(f) for f in file_list]).sink_parquet(output_file)
+
             # Clean up temporary files
-            for temp_file in file_list:
-                Path(temp_file).unlink(missing_ok=True)
+            if cleanup:
+                for temp_file in file_list:
+                    Path(temp_file).unlink(missing_ok=True)
 
     def _par_calculate_parquet_metrics(self, out_fn):
         """Calculate metrics from the processed parquet file"""
@@ -839,17 +840,13 @@ class Pipeline:
                     out_file = f"{self.xp.sample_wd}/contigs_{strategy}_{key}.parquet"
                     self.logger.info(f"Exporting assembled contigs ({strategy}) to {out_file}")
 
-                    # Choose assembly strategy
                     if use_segmentation:
-                        # Segmented assembly for long cassettes
-                        # Save intermediate files if configured
                         debug_path = None
                         if getattr(self.xp, 'save_intermediate_files', False):
                             intermediate_dir = Path(self.xp.sample_wd) / 'intermediate'
                             intermediate_dir.mkdir(exist_ok=True)
                             debug_path = str(intermediate_dir / "segments_debug.parquet")
 
-                        # Get assembly method from config (default to 'compression' for segments)
                         assembly_method = self.xp.fracture.get('assembly_method', 'compression')
 
                         # Get heterogeneity threshold from config (default 0.20 = 20% of dominant)
