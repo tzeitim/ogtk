@@ -70,7 +70,13 @@ def parse_args():
     parser.add_argument(
         "--basecall",
         action="store_true",
-        help="Recipe: Run only dorado basecalling step with forced recomputation"
+        help="Recipe: Run only dorado basecalling step (skips if already done, use --force to re-run)"
+    )
+
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force recomputation even if output already exists (use with --basecall)"
     )
 
     parser.add_argument(
@@ -180,9 +186,13 @@ def main():
     Multiple extensions with different steps
         $ python pipeline.py --extension-steps cassiopeia_lineage:extract_barcodes transcript_genotyping:all
 
-    Run basecalling only with forced recomputation::
+    Run basecalling only (skips if already done)::
 
         $ python pipeline.py --config config.yml --basecall
+
+    Force re-run basecalling even if done::
+
+        $ python pipeline.py --config config.yml --basecall --force
 
     Basecall a specific sample::
 
@@ -327,9 +337,12 @@ def main():
 
         # Handle --basecall recipe (from CLI or config file)
         elif args.basecall or getattr(xp, 'basecall', False):
-            logger.info("Running basecall recipe: dorado step with forced recomputation")
             xp.steps = ['dorado']
-            xp.force_dorado = True
+            if args.force:
+                logger.info("Running basecall recipe: dorado step with forced recomputation")
+                xp.force_dorado = True
+            else:
+                logger.info("Running basecall recipe: dorado step (will skip if already done)")
 
             if args.all_samples:
                 # Process all samples

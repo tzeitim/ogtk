@@ -153,7 +153,7 @@ def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
         logger.debug(f'setting {k}\t-->\t{dorado_template[k]}')
 
     # Sanitize types (preserve booleans for certain keys)
-    boolean_keys = {'wait_for_completion', 'use_lsf', 'dry_run'}
+    boolean_keys = {'wait_for_completion', 'use_lsf', 'dry_run', 'iterative'}
     for k, v in dorado_template.items():
         if k in boolean_keys:
             # Handle boolean strings properly
@@ -191,15 +191,8 @@ def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
     output_dir = Path(dorado_template['outdir'])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    done_token = f"{xp.sample_logs}/.dorado_done"
-    
-    if not dry:
-        if os.path.exists(done_token) and not force:
-            logger.info("Dorado basecalling already completed")
-            return 0
-        elif os.path.exists(done_token) and force:
-            logger.info("Forcing dorado re-run - removing existing completion token")
-            os.remove(done_token)
+    # No done token - iterative mode checks per-file, non-iterative checks output BAM
+    # This allows incremental processing when new data is added
 
     # Process each barcode directory
     commands = []
@@ -218,15 +211,7 @@ def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
                 .replace('OPTIONS', dorado_template.get('options', ''))
         )
         
-        # For LSF jobs, add done token creation for the last job only
-        if dorado_template.get('use_lsf', False) and len(barcode_dirs) == 1:
-            # Single job - add done token creation
-            cmd = f"{base_cmd} && touch {done_token}"
-        elif dorado_template.get('use_lsf', False) and barcode_dir == barcode_dirs[-1]:
-            # Last job in multi-job scenario - add done token creation
-            cmd = f"{base_cmd} && touch {done_token}"
-        else:
-            cmd = base_cmd
+        cmd = base_cmd
         
         # Add conda environment if specified
         if 'conda_env' in dorado_template:
@@ -235,21 +220,59 @@ def run_dorado(xp, force=False, dry=False, bam_output_dir=None, **args):
         commands.append((cmd, barcode_name, str(output_bam)))
 
     logger.debug(f"Generated {len(commands)} dorado commands")
-    
+
+    # Check if iterative mode is enabled (per-pod5 processing with resume capability)
+    use_iterative = dorado_template.get('iterative', False)
+
     if not dry:
-        # Check if using LSF for job submission
-        if dorado_template.get('use_lsf', False):
-            return _submit_dorado_lsf_jobs(xp, commands, dorado_template, done_token)
+        if use_iterative:
+            # Iterative mode: generate bash script that loops through pod5 files
+            # This enables incremental processing and resume capability
+            logger.info("Using iterative mode (per-pod5 processing)")
+
+            # Use the first barcode_dir (which is the consolidated sample dir)
+            consolidated_dir = str(barcode_dirs[0])
+
+            if dorado_template.get('use_lsf', False):
+                return _submit_iterative_dorado_lsf(
+                    xp, dorado_template, consolidated_dir, str(output_dir), force
+                )
+            else:
+                # For local/sequential, run the script directly
+                script_path = _generate_iterative_dorado_script(
+                    xp, dorado_template, consolidated_dir, str(output_dir), force
+                )
+                import subprocess
+                result = subprocess.run(['bash', script_path], capture_output=False)
+                return result.returncode
         else:
-            return _run_dorado_sequential(xp, commands, dorado_template, done_token)
+            # Original mode: single dorado command per consolidated directory
+            if dorado_template.get('use_lsf', False):
+                return _submit_dorado_lsf_jobs(xp, commands, dorado_template)
+            else:
+                return _run_dorado_sequential(xp, commands, dorado_template)
     else:
-        logger.info("DRY RUN - Commands that would be executed:")
-        for cmd, barcode, output in commands:
-            logger.info(f"  Barcode {barcode}: {cmd}")
+        if use_iterative:
+            # Show what iterative mode would do
+            consolidated_dir = str(barcode_dirs[0])
+            logger.info("DRY RUN - Iterative mode would process each pod5 file in:")
+            logger.info(f"  Input: {consolidated_dir}")
+            logger.info(f"  Output: {output_dir}")
+            logger.info(f"  Pattern: {xp.target_sample}_<pod5_name>.bam")
+
+            # Generate the script for inspection but don't submit
+            script_path = _generate_iterative_dorado_script(
+                xp, dorado_template, consolidated_dir, str(output_dir), force
+            )
+            logger.info(f"  Script: {script_path}")
+        else:
+            logger.info("DRY RUN - Commands that would be executed:")
+            for cmd, barcode, output in commands:
+                logger.info(f"  Barcode {barcode}: {cmd}")
         return 0
 
 
-def _run_dorado_sequential(xp, commands, dorado_template, done_token):
+def _run_dorado_sequential(xp, commands, dorado_template):
     '''Run dorado commands sequentially'''
     import subprocess
     from pathlib import Path
@@ -267,31 +290,26 @@ def _run_dorado_sequential(xp, commands, dorado_template, done_token):
     for i, (cmd, barcode, output_file) in enumerate(commands):
         logger.info(f"Processing barcode {barcode} ({i+1}/{len(commands)})")
         logger.debug(f"Command: {cmd}")
-        
+
         log_out = f'{xp.sample_logs}/dorado_{barcode}.out'
         log_err = f'{xp.sample_logs}/dorado_{barcode}.err'
-        
+
         try:
             result = subprocess.run(cmd, shell=True, env=env,
                                   stdout=open(log_out, 'w'),
                                   stderr=open(log_err, 'w'))
-            
+
             if result.returncode == 0:
                 logger.info(f"Successfully processed {barcode} -> {output_file}")
             else:
                 logger.error(f"Failed to process {barcode} (exit code: {result.returncode})")
                 all_success = False
-                
+
         except Exception as e:
             logger.error(f"Error processing {barcode}: {str(e)}")
             all_success = False
-    
+
     if all_success:
-        # Done token already created by the last command in LSF mode
-        # For sequential mode, create it here
-        if not any('touch' in cmd for cmd, _, _ in commands):
-            subprocess.run(f'touch {done_token}'.split())
-        
         logger.info("All dorado basecalling completed successfully")
         
         # Cleanup temporary symlink directory if it was created
@@ -307,7 +325,129 @@ def _run_dorado_sequential(xp, commands, dorado_template, done_token):
         return 1
 
 
-def _submit_dorado_lsf_jobs(xp, commands, dorado_template, done_token):
+def _generate_iterative_dorado_script(xp, dorado_template, consolidated_dir, output_dir, force=False):
+    '''Generate a bash script that iterates through pod5 files and runs dorado on each.
+
+    Args:
+        xp: Experiment configuration
+        dorado_template: Dorado configuration dictionary
+        consolidated_dir: Path to consolidated pod5 directory (contains symlinks)
+        output_dir: Path to output BAM files
+        force: If True, re-process even if BAM exists
+
+    Returns:
+        str: Path to the generated script
+    '''
+    from pathlib import Path
+
+    script_dir = Path(xp.sample_logs)
+    script_path = script_dir / 'dorado_iterative.sh'
+
+    # Extract dorado parameters
+    dorado_bin = os.path.expanduser(dorado_template.get('bin_path', 'dorado'))
+    model = dorado_template.get('model', 'sup')
+    device = dorado_template.get('device', 'cuda:0')
+    options = dorado_template.get('options', '')
+    models_dir = dorado_template.get('models_dir')
+    if models_dir:
+        models_dir = os.path.expanduser(models_dir)
+
+    target_sample = xp.target_sample
+    force_flag = "true" if force else "false"
+
+    script_content = f'''#!/bin/bash
+set -e
+
+# Dorado iterative basecalling script
+# Generated for sample: {target_sample}
+# Consolidated input: {consolidated_dir}
+# Output directory: {output_dir}
+# Note: No done token - script checks per-file for incremental processing
+
+TARGET_SAMPLE="{target_sample}"
+CONSOLIDATED_DIR="{consolidated_dir}"
+OUTPUT_DIR="{output_dir}"
+DORADO_BIN="{dorado_bin}"
+MODEL="{model}"
+DEVICE="{device}"
+OPTIONS="{options}"
+FORCE="{force_flag}"
+
+'''
+
+    # Add models directory export if specified
+    if models_dir:
+        script_content += f'''# Use cached models directory to avoid re-downloading
+export DORADO_MODELS_DIRECTORY="{models_dir}"
+
+'''
+
+    script_content += '''# Ensure output directory exists
+mkdir -p "$OUTPUT_DIR"
+
+# Count files for progress reporting
+total_pod5=$(find "$CONSOLIDATED_DIR" -name "*.pod5" | wc -l)
+processed=0
+skipped=0
+
+echo "Starting iterative dorado basecalling"
+echo "Total pod5 files to process: $total_pod5"
+echo "Force mode: $FORCE"
+echo ""
+
+# Iterate through each pod5 file
+for pod5 in "$CONSOLIDATED_DIR"/*.pod5; do
+    # Check if any pod5 files exist
+    [[ -e "$pod5" ]] || { echo "No pod5 files found in $CONSOLIDATED_DIR"; exit 1; }
+
+    # Extract basename without extension
+    pod5_basename=$(basename "$pod5" .pod5)
+
+    # Build output BAM path
+    bam="${OUTPUT_DIR}/${TARGET_SAMPLE}_${pod5_basename}.bam"
+
+    if [[ -f "$bam" ]] && [[ "$FORCE" != "true" ]]; then
+        echo "SKIP: $pod5_basename (BAM exists)"
+        skipped=$((skipped + 1))
+    else
+        echo "PROCESSING: $pod5_basename"
+        # Write to temp file first to avoid empty BAM files if job is killed
+        temp_bam="${bam}.tmp"
+        "$DORADO_BIN" basecaller "$MODEL" "$pod5" --device "$DEVICE" $OPTIONS > "$temp_bam"
+
+        if [[ $? -eq 0 ]]; then
+            mv "$temp_bam" "$bam"
+            echo "  SUCCESS: $bam"
+            processed=$((processed + 1))
+        else
+            rm -f "$temp_bam"
+            echo "  FAILED: $pod5_basename"
+            exit 1
+        fi
+    fi
+done
+
+echo ""
+echo "=========================================="
+echo "Dorado basecalling complete"
+echo "Processed: $processed"
+echo "Skipped: $skipped"
+echo "Total: $total_pod5"
+echo "=========================================="
+'''
+
+    # Write script to file
+    with open(script_path, 'w') as f:
+        f.write(script_content)
+
+    # Make executable
+    os.chmod(script_path, 0o755)
+
+    logger.info(f"Generated iterative dorado script: {script_path}")
+    return str(script_path)
+
+
+def _submit_dorado_lsf_jobs(xp, commands, dorado_template):
     '''Submit dorado jobs to LSF cluster'''
     import subprocess
 
@@ -337,12 +477,12 @@ def _submit_dorado_lsf_jobs(xp, commands, dorado_template, done_token):
             '-J', f"dorado_{barcode}",
             full_cmd
         ]
-        
+
         logger.debug(f"LSF command: {' '.join(lsf_cmd)}")
-        
+
         try:
             result = subprocess.run(lsf_cmd, capture_output=True, text=True)
-            
+
             if result.returncode == 0:
                 import re
                 match = re.search(r'Job <(\d+)>', result.stdout)
@@ -355,55 +495,167 @@ def _submit_dorado_lsf_jobs(xp, commands, dorado_template, done_token):
             else:
                 logger.error(f"Failed to submit {barcode} job: {result.stderr}")
                 return 1
-                
+
         except Exception as e:
             logger.error(f"Error submitting {barcode} job: {str(e)}")
             return 1
-    
+
     logger.info(f"Submitted {len(job_ids)} jobs to LSF. Job IDs: {job_ids}")
-    
-    # Check if we should wait for jobs to complete (default: False for non-blocking behavior)
+
+    # By default, exit after submitting GPU jobs to avoid wasting CPU resources
+    # Set wait_for_completion: true in config to poll and wait instead
     wait_for_completion = dorado_template.get('wait_for_completion', False)
-    
+
     if wait_for_completion:
         logger.info("Monitoring LSF jobs until completion...")
-        result = _monitor_lsf_jobs(job_ids, done_token, dorado_template.get('poll_interval', 30), 
+        result = _monitor_lsf_jobs(job_ids, dorado_template.get('poll_interval', 30),
                                  dorado_template.get('max_wait_hours', 24))
         return result
     else:
-        logger.info("Done token will be created automatically when the last job completes")
-        logger.info("Pipeline will continue without waiting for LSF jobs")
-        return 0
+        logger.info("=" * 60)
+        logger.info("GPU jobs submitted successfully. Exiting pipeline.")
+        logger.info(f"Job IDs: {job_ids}")
+        logger.info(f"Monitor with: bjobs {' '.join(map(str, job_ids))}")
+        logger.info("")
+        logger.info("Re-run the pipeline after GPU jobs complete to continue processing.")
+        logger.info("=" * 60)
+        import sys
+        sys.exit(0)
 
 
-def _monitor_lsf_jobs(job_ids, done_token, poll_interval=30, max_wait_hours=24):
-    '''Monitor LSF jobs by checking for completion token'''
+def _submit_iterative_dorado_lsf(xp, dorado_template, consolidated_dir, output_dir, force=False):
+    '''Generate and submit iterative dorado script to LSF.
+
+    Args:
+        xp: Experiment configuration
+        dorado_template: Dorado configuration dictionary
+        consolidated_dir: Path to consolidated pod5 directory
+        output_dir: Path for output BAM files
+        force: If True, re-process even if BAM exists
+
+    Returns:
+        int: 0 on success, 1 on failure
+    '''
+    import subprocess
+
+    # Generate the iterative script
+    script_path = _generate_iterative_dorado_script(
+        xp, dorado_template, consolidated_dir, output_dir, force
+    )
+
+    target_sample = xp.target_sample
+
+    # Submit to LSF
+    lsf_cmd = [
+        'bsub',
+        '-q', dorado_template.get('lsf_queue', 'gsla_high_gpu'),
+        '-gpu', dorado_template.get('lsf_gpu', 'num=1:gmem=80G'),
+        '-R', f"rusage[mem={dorado_template.get('lsf_mem', '64GB')}]",
+        '-o', f"{xp.sample_logs}/dorado_{target_sample}.lsf.out",
+        '-e', f"{xp.sample_logs}/dorado_{target_sample}.lsf.err",
+        '-J', f"dorado_{target_sample}",
+        script_path
+    ]
+
+    logger.info(f"Submitting iterative dorado script to LSF")
+    logger.debug(f"LSF command: {' '.join(lsf_cmd)}")
+
+    try:
+        result = subprocess.run(lsf_cmd, capture_output=True, text=True)
+
+        if result.returncode == 0:
+            import re
+            match = re.search(r'Job <(\d+)>', result.stdout)
+            if match:
+                job_id = match.group(1)
+                logger.info(f"Submitted iterative dorado job with ID: {job_id}")
+            else:
+                logger.warning(f"Could not extract job ID: {result.stdout}")
+        else:
+            logger.error(f"Failed to submit job: {result.stderr}")
+            return 1
+
+    except Exception as e:
+        logger.error(f"Error submitting job: {str(e)}")
+        return 1
+
+    # By default, exit after submitting GPU job to avoid wasting CPU resources
+    # Set wait_for_completion: true in config to poll and wait instead
+    wait_for_completion = dorado_template.get('wait_for_completion', False)
+
+    if wait_for_completion:
+        logger.info("Monitoring LSF job until completion...")
+        return _monitor_lsf_jobs([job_id],
+                                 dorado_template.get('poll_interval', 30),
+                                 dorado_template.get('max_wait_hours', 24))
+    else:
+        logger.info("=" * 60)
+        logger.info("GPU job submitted successfully. Exiting pipeline.")
+        logger.info(f"Job ID: {job_id}")
+        logger.info(f"Monitor with: bjobs {job_id}")
+        logger.info(f"View output: tail -f {xp.sample_logs}/dorado_{xp.target_sample}.lsf.out")
+        logger.info("")
+        logger.info("Re-run the pipeline after GPU job completes to continue processing.")
+        logger.info("=" * 60)
+        import sys
+        sys.exit(0)
+
+
+def _monitor_lsf_jobs(job_ids, poll_interval=30, max_wait_hours=24):
+    '''Monitor LSF jobs by polling job status via bjobs.
+
+    Args:
+        job_ids: List of LSF job IDs to monitor
+        poll_interval: Seconds between status checks (default 30)
+        max_wait_hours: Maximum hours to wait before timeout (default 24)
+
+    Returns:
+        0 if all jobs completed successfully, 1 on failure or timeout
+    '''
     import time
-    import os
-    
+    import subprocess
+
     logger = Rlogger().get_logger()
     max_wait_seconds = max_wait_hours * 3600
     start_time = time.time()
-    
-    logger.info(f"Waiting for done token: {done_token}")
+
+    logger.info(f"Monitoring {len(job_ids)} LSF job(s): {job_ids}")
     logger.info(f"Polling every {poll_interval}s (max wait: {max_wait_hours}h)")
-    
+
     while True:
-        # Check if done token exists
-        if os.path.exists(done_token):
-            logger.info("Done token found - dorado basecalling completed")
-            return 0
-        
+        # Check job status via bjobs
+        try:
+            result = subprocess.run(
+                ['bjobs', '-noheader', '-o', 'stat'] + list(map(str, job_ids)),
+                capture_output=True, text=True
+            )
+            statuses = result.stdout.strip().split('\n') if result.stdout.strip() else []
+
+            # Check if all jobs are done (DONE) or if any failed (EXIT)
+            if all(s == 'DONE' for s in statuses if s):
+                logger.info("All LSF jobs completed successfully")
+                return 0
+            elif any(s == 'EXIT' for s in statuses if s):
+                logger.error("One or more LSF jobs failed (EXIT status)")
+                return 1
+            elif not statuses or all(s == '' for s in statuses):
+                # Jobs not found - likely completed and cleaned up
+                logger.info("Jobs no longer in queue - assuming completed")
+                return 0
+
+        except Exception as e:
+            logger.warning(f"Error checking job status: {e}")
+
         # Check timeout
         elapsed = time.time() - start_time
         if elapsed > max_wait_seconds:
-            logger.error(f"Timeout after {max_wait_hours} hours waiting for completion token")
+            logger.error(f"Timeout after {max_wait_hours} hours waiting for job completion")
             return 1
-        
+
         # Log progress every 10 polls
         if int(elapsed / poll_interval) % 10 == 0:
             logger.info(f"Still waiting for completion... (elapsed: {elapsed/60:.1f}min)")
-        
+
         time.sleep(poll_interval)
 
 
