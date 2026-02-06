@@ -175,8 +175,8 @@ class PlotDB():
             plt.xscale('log')
             plt.yscale('log')
             #plt.xlim((1,2e3))
-            plt.xlim((1,2e6))
-            plt.ylim((1,1e5))
+            plt.xlim((1,1e7))
+            plt.ylim((1,1e4))
             plt.grid(True, which='both', ls='--', alpha=0.3)
 
             fig = plt.gcf()
