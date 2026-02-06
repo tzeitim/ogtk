@@ -841,11 +841,9 @@ class Pipeline:
                     self.logger.info(f"Exporting assembled contigs ({strategy}) to {out_file}")
 
                     if use_segmentation:
-                        debug_path = None
-                        if getattr(self.xp, 'save_intermediate_files', False):
-                            intermediate_dir = Path(self.xp.sample_wd) / 'intermediate'
-                            intermediate_dir.mkdir(exist_ok=True)
-                            debug_path = str(intermediate_dir / "segments_debug.parquet")
+                        intermediate_dir = Path(self.xp.sample_wd) / 'intermediate'
+                        intermediate_dir.mkdir(exist_ok=True)
+                        debug_path = str(intermediate_dir / "segments_debug.parquet")
 
                         assembly_method = self.xp.fracture.get('assembly_method', 'compression')
 

@@ -1215,12 +1215,10 @@ class PllPipeline:
             logger=self.logger,
         )
 
-        # TODO remove: optional checkpoint to save segments before assembly
         if debug_path:
             self.logger.info(f"Saving segments to {debug_path}")
             segments_ldf.collect().write_parquet(debug_path)
             segments_ldf = pl.scan_parquet(debug_path)
-        # END TODO remove
 
         # Log segment type count
         segment_types = segments_ldf.select('start_meta', 'end_meta').unique().collect()
