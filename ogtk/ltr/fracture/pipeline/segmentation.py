@@ -1358,6 +1358,7 @@ def plot_segmentation_qc(
     output_dir,
     sample_name: str,
     contig_col: str = 'contig',
+    min_meta_freq: float = 0.01,
     logger: Optional[CustomLogger] = None,
 ):
     """
@@ -1378,6 +1379,7 @@ def plot_segmentation_qc(
         output_dir: Path to output directory
         sample_name: Sample name for file naming
         contig_col: Name of column containing contig sequences
+        min_meta_freq: Minimum frequency threshold for including metas in plots (default 0.01 = 1%)
         logger: Optional logger
     """
     import matplotlib.pyplot as plt
@@ -1389,36 +1391,61 @@ def plot_segmentation_qc(
     # Get segment_types from report
     segment_types = pl.DataFrame(report['segments']['segment_types'])
 
-    # Extract metas that actually appear in segment_types (for filtered plots)
-    observed_metas = set(segment_types['start_meta'].unique().to_list() +
-                        segment_types['end_meta'].unique().to_list())
-    # Remove edge markers from observed set for filtering metas DataFrame
-    observed_metas.discard(CASSETTE_START_MARKER)
-    observed_metas.discard(CASSETTE_END_MARKER)
+    # Calculate frequency of each meta (fraction of molecules with this meta)
+    total_molecules = segment_types['count'].sum()
 
-    # Filter metas DataFrame to only include observed metas
+    # Count molecules per meta (sum counts where meta appears as start or end)
+    start_counts = segment_types.group_by('start_meta').agg(pl.col('count').sum().alias('n')).rename({'start_meta': 'meta'})
+    end_counts = segment_types.group_by('end_meta').agg(pl.col('count').sum().alias('n')).rename({'end_meta': 'meta'})
+
+    meta_freq = (
+        pl.concat([start_counts, end_counts])
+        .group_by('meta')
+        .agg(pl.col('n').sum())
+        .with_columns((pl.col('n') / total_molecules).alias('freq'))
+    )
+
+    # Filter to metas above frequency threshold (always include edge markers)
+    observed_metas = set(
+        meta_freq
+        .filter(pl.col('freq') >= min_meta_freq)
+        .get_column('meta')
+        .to_list()
+    )
+    observed_metas.add(CASSETTE_START_MARKER)
+    observed_metas.add(CASSETTE_END_MARKER)
+
+    # Filter segment_types to only include transitions with observed metas
+    filtered_segment_types = segment_types.filter(
+        pl.col('start_meta').is_in(list(observed_metas)) &
+        pl.col('end_meta').is_in(list(observed_metas))
+    )
+
+    # Filter metas DataFrame: keep non-META entries (anchors, etc.) + observed METAs
     meta_col = 'feature'
     if meta_col in metas.columns and 'kind' in metas.columns:
-        # Keep observed METAs + all non-META entries (anchors, etc.)
         filtered_metas = metas.filter(
             (pl.col(meta_col).is_in(list(observed_metas))) | (pl.col('kind') != 'META')
         )
     elif meta_col in metas.columns:
-        # No 'kind' column, just filter by feature name
         filtered_metas = metas.filter(pl.col(meta_col).is_in(list(observed_metas)))
     else:
         filtered_metas = metas
 
     if logger:
         logger.info(f"Generating segmentation QC plots for {sample_name}")
-        total_metas = metas.filter(pl.col('kind') == 'META').height if 'kind' in metas.columns else metas.height
-        if len(observed_metas) < total_metas:
-            logger.info(f"Filtering plots to show only observed metas: {sorted(observed_metas)}")
+        excluded = meta_freq.filter(pl.col('freq') < min_meta_freq)
+        if excluded.height > 0:
+            excluded_list = excluded.select('meta', 'freq').sort('freq', descending=True).to_dicts()
+            excluded_str = [f"{e['meta']}({e['freq']:.2%})" for e in excluded_list]
+            logger.info(f"Excluding {excluded.height} metas below {min_meta_freq:.1%} threshold: {excluded_str}")
+        included_metas = sorted([m for m in observed_metas if not m.startswith('_')])
+        logger.info(f"Including {len(observed_metas)} metas: {included_metas}")
 
     # 1. Heatmap
     try:
         fig, ax = plt.subplots(figsize=(12, 10))
-        plot_meta_transition_heatmap(segment_types, metas, ax=ax,
+        plot_meta_transition_heatmap(filtered_segment_types, filtered_metas, ax=ax,
                                       title=f"{sample_name} - Meta Transitions", logger=logger)
         fig.tight_layout()
         heatmap_path = output_dir / f"{sample_name}_meta_transition_heatmap.png"
@@ -1433,7 +1460,7 @@ def plot_segmentation_qc(
     # 2. Bar chart
     try:
         fig, ax = plt.subplots(figsize=(14, 10))
-        plot_meta_transition_bars(segment_types, metas, ax=ax,
+        plot_meta_transition_bars(filtered_segment_types, filtered_metas, ax=ax,
                                    title=f"{sample_name} - Transition Frequencies", logger=logger)
         fig.tight_layout()
         bars_path = output_dir / f"{sample_name}_meta_transition_bars.png"
@@ -1462,7 +1489,7 @@ def plot_segmentation_qc(
 
     # 4. Transition lines (horizontal lines at prevalence heights, two panels)
     try:
-        fig = plot_meta_transition_lines(segment_types, metas,
+        fig = plot_meta_transition_lines(filtered_segment_types, filtered_metas,
                                          title=f"{sample_name} - Transition Prevalence", logger=logger)
         fig.tight_layout()
         lines_path = output_dir / f"{sample_name}_meta_transition_lines.png"
@@ -1476,7 +1503,7 @@ def plot_segmentation_qc(
 
     # 5. Sankey (HTML/interactive)
     try:
-        sankey_fig = plot_meta_transition_sankey(segment_types, metas,
+        sankey_fig = plot_meta_transition_sankey(filtered_segment_types, filtered_metas,
                                                   title=f"{sample_name} - Transition Flow", logger=logger)
         if sankey_fig is not None:
             sankey_path = output_dir / f"{sample_name}_meta_transition_sankey.html"
