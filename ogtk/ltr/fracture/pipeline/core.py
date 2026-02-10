@@ -292,99 +292,102 @@ class Pipeline:
 
     def _par_process_input_files(self, files, sample_dir, out_fn, merged_fn, input_format):
         """Converts FASTQ or BAM files into parquet"""
-        
+
         force_tab = getattr(self.xp, "force_tab", False)
         limit = getattr(self.xp, "limit", None)
-        
+
         if limit is not None:
             self.logger.warning(f"Only loading {limit} reads")
 
+        # BAM files: always use bams_to_parquet (works for 1 or N files)
+        if input_format == 'bam':
+            self._par_process_bams(files, sample_dir, out_fn, merged_fn, force_tab, limit)
+            return
+
+        # FASTQ files: use temp files + combine for multiple files
         max_files = getattr(self.xp, 'allow_wildcards', 1)
-        
+
         if len(files) > 1 and max_files > 1:
-            self.logger.info(f"Processing {len(files)} {input_format.upper()} files for sample {self.xp.target_sample}")
+            self.logger.info(f"Processing {len(files)} FASTQ files for sample {self.xp.target_sample}")
             temp_parsed_files = []
             temp_merged_files = []
-            
+
             for i, file in enumerate(files):
                 temp_out_fn = f'{sample_dir}/temp_parsed_reads_{i}.parquet'
                 temp_merged_fn = f'{sample_dir}/temp_merged_reads_{i}.parquet'
-                
-                self.logger.info(f"Processing {input_format.upper()} file {i+1}/{len(files)}: {file}")
 
-                self._par_process_single_file(file, temp_out_fn, temp_merged_fn, sample_dir, input_format, force_tab, limit)
-                
+                self.logger.info(f"Processing FASTQ file {i+1}/{len(files)}: {file}")
+                self._par_process_single_fastq(file, temp_out_fn, temp_merged_fn, sample_dir, force_tab, limit)
+
                 temp_parsed_files.append(temp_out_fn)
                 temp_merged_files.append(temp_merged_fn)
-            
-            # Combine multiple parquet files (same for both formats)
-            self.logger.info(f"Combining {len(temp_parsed_files)} {input_format.upper()}-derived parquet files")
-            
+
+            self.logger.info(f"Combining {len(temp_parsed_files)} FASTQ-derived parquet files")
             self._par_combine_parquet_files(temp_parsed_files, out_fn)
             self._par_combine_parquet_files(temp_merged_files, merged_fn)
-                    
         else:
-            # Single file processing
             file = files[0]
-            self.logger.info(f"Processing single {input_format.upper()} file: {file}")
-            
-            # Format-specific processing
-            self._par_process_single_file(file, out_fn, merged_fn, sample_dir, input_format, force_tab, limit)
+            self.logger.info(f"Processing single FASTQ file: {file}")
+            self._par_process_single_fastq(file, out_fn, merged_fn, sample_dir, force_tab, limit)
 
-    def _par_process_single_file(self, file, out_fn, merged_fn, sample_dir, input_format, force_tab, limit):
-        """Process a single input file - format-specific logic"""
-        
-        if input_format == 'fastq':
-            tabulate_paired_10x_fastqs_rs(
-                file_path=file, 
-                out_fn=out_fn,
-                merged_fn=merged_fn,
-                out_dir=sample_dir,
-                modality=self.xp.modality,
+    def _par_process_bams(self, files, sample_dir, out_fn, merged_fn, force_tab, limit):
+        """Process BAM files (1 or more) efficiently using bams_to_parquet"""
+        import rogtk
+
+        intermediate_dir = Path(sample_dir) / 'intermediate'
+        intermediate_dir.mkdir(exist_ok=True)
+        raw_bam_fn = str(intermediate_dir / 'raw_bam.parquet')
+        debug_bam = getattr(self.xp, 'debug_bam', False)
+
+        self.logger.info(f"Processing {len(files)} BAM files into single parquet")
+
+        if not Path(raw_bam_fn).exists() or force_tab:
+            rogtk.bams_to_parquet(
+                bam_paths=files,
+                parquet_path=raw_bam_fn,
+                include_sequence=True,
+                include_quality=True,
+                compression='snappy',
+                limit=limit,
+                include_source_file=debug_bam,
+            )
+
+        self.logger.info(f"Converting to paired format: {raw_bam_fn} -> {merged_fn}")
+        (
+            pl.scan_parquet(raw_bam_fn)
+            .pp.ont_to_paired_format(
                 umi_len=self.xp.umi_len,
+                sbc_len=self.xp.sbc_len,
+                anchor_orient=self.xp.anchor_orient,
+                anchor_ont=self.xp.anchor_ont,
+                modality=self.xp.modality,
+                cbc_len=getattr(self.xp, 'cbc_len', 16),
                 do_rev_comp=self.xp.rev_comp,
-                force=force_tab,
-                limit=limit
             )
-            
-        elif input_format == 'bam':
-            # Store raw BAM parquet in intermediate directory
-            intermediate_dir = Path(sample_dir) / 'intermediate'
-            intermediate_dir.mkdir(exist_ok=True)
-            raw_bam_fn = str(intermediate_dir / 'raw_bam.parquet')
+            .sink_parquet(merged_fn)
+        )
 
-            import rogtk
+        # For BAM, parsed = merged
+        import shutil
+        shutil.copy2(merged_fn, out_fn)
 
-            if not Path(raw_bam_fn).exists() or force_tab:
-                rogtk.bam_to_parquet(
-                    bam_path=file,
-                    parquet_path=raw_bam_fn,
-                    include_sequence=True,
-                    include_quality=True,
-                    compression='snappy',
-                    limit=limit
-                )
-            (
-                pl.scan_parquet(raw_bam_fn)
-                .pp.ont_to_paired_format(
-                    umi_len=self.xp.umi_len,
-                    sbc_len=self.xp.sbc_len,
-                    anchor_orient=self.xp.anchor_orient,
-                    anchor_ont=self.xp.anchor_ont,
-                    modality=self.xp.modality,
-                    cbc_len=getattr(self.xp, 'cbc_len', 16),
-                    do_rev_comp=self.xp.rev_comp,
-                )
-                .sink_parquet(merged_fn)
-            )
+        # Clean up unless save_intermediate_files is set
+        if not getattr(self.xp, 'save_intermediate_files', False):
+            Path(raw_bam_fn).unlink(missing_ok=True)
 
-            # For BAM, parsed = merged (no additional processing)
-            import shutil
-            shutil.copy2(merged_fn, out_fn)
-
-            # Clean up intermediate file unless save_intermediate_files is set
-            if not getattr(self.xp, 'save_intermediate_files', False):
-                Path(raw_bam_fn).unlink(missing_ok=True)
+    def _par_process_single_fastq(self, file, out_fn, merged_fn, sample_dir, force_tab, limit):
+        """Process a single FASTQ file"""
+        tabulate_paired_10x_fastqs_rs(
+            file_path=file,
+            out_fn=out_fn,
+            merged_fn=merged_fn,
+            out_dir=sample_dir,
+            modality=self.xp.modality,
+            umi_len=self.xp.umi_len,
+            do_rev_comp=self.xp.rev_comp,
+            force=force_tab,
+            limit=limit
+        )
 
     def _par_combine_parquet_files(self, file_list, output_file, cleanup=True):
         """Combine multiple parquet files into one (lazy/streaming)"""
