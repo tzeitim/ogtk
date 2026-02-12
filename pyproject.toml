@@ -8,7 +8,7 @@ allow-direct-references = true
 
 [project]
 name="ogtk"
-version="0.1.9dev"
+version="0.1.10dev"
 python_requires='>=3.9'
 readme="README.md"
 authors=[
@@ -46,6 +46,7 @@ dependencies=[
     'pyseq_align',
     'tables',
     'textual',
+    'upsetplot'
 ] 
 
 # Platform-specific core dependencies
