@@ -248,5 +248,191 @@ def find_read_count_threshold(df, min_reads=10, method="kneedle"):
     
     else:
         raise ValueError(f"Unknown method: {method}. Choose 'kneedle' or 'kmeans'.")
-    
+
     return read_count_threshold
+
+
+# =============================================================================
+# Checkhealth: Feature screening and QC for raw reads
+# =============================================================================
+
+def _make_fuzzy_pattern(seq: str, fuzzy_mismatches: int = 0) -> str:
+    """Generate regex pattern with allowed mismatches."""
+    if fuzzy_mismatches == 0:
+        return seq
+    from ogtk.utils.general import fuzzy_match_str
+    wildcard = '.{0,' + str(fuzzy_mismatches) + '}'
+    return fuzzy_match_str(seq, wildcard=wildcard)
+
+
+def checkhealth(
+    ldf: pl.LazyFrame,
+    features: pl.DataFrame,
+    seq_col: str = 'sequence',
+    check_revcomp: bool = True,
+    group_expr: Optional[pl.Expr] = None,
+    group_col: str = 'group',
+    orient_anchor: Optional[str] = None,
+    orient_fuzzy: int = 0,
+    feature_fuzzy: int = 0,
+) -> pl.LazyFrame:
+    """
+    Screen reads for features (and optionally their reverse complements).
+
+    Args:
+        ldf: LazyFrame with sequence data
+        features: DataFrame with columns 'name' and 'sequence'
+        seq_col: column containing the sequence to screen
+        check_revcomp: whether to also check for reverse complements
+        group_expr: expression to create grouping column, e.g. pl.col('source_file').str.extract('fc(..)', 1)
+        group_col: name for the grouping column (default: 'group')
+        orient_anchor: sequence to orient reads by (reads will be revcomp'd if anchor found on reverse strand)
+        orient_fuzzy: number of mismatches allowed for orient_anchor matching (0=exact)
+        feature_fuzzy: number of mismatches allowed for feature matching (0=exact)
+
+    Returns:
+        LazyFrame with:
+        - has_{name}: bool column for each feature (forward)
+        - has_{name}_r: bool column for each feature (reverse complement)
+        - masked_seq: human-readable masked sequence
+        - feature_set: comma-separated string of detected features for upset grouping
+        - {group_col}: grouping column if group_expr provided
+    """
+    result = ldf
+
+    if orient_anchor is not None:
+        orient_pattern = _make_fuzzy_pattern(orient_anchor, orient_fuzzy)
+        result = result.with_columns(
+            pl.when(pl.col(seq_col).str.contains(orient_pattern))
+            .then(pl.col(seq_col))
+            .when(pl.col(seq_col).dna.reverse_complement().str.contains(orient_pattern))
+            .then(pl.col(seq_col).dna.reverse_complement())
+            .otherwise(pl.col(seq_col))
+            .alias(seq_col)
+        )
+
+    features_with_rc = features.with_columns(
+        pl.col('sequence').dna.reverse_complement().alias('revcomp')
+    )
+
+    has_exprs = []
+    for row in features_with_rc.iter_rows(named=True):
+        name, seq, revcomp = row['name'], row['sequence'], row['revcomp']
+        seq_pattern = _make_fuzzy_pattern(seq, feature_fuzzy)
+        revcomp_pattern = _make_fuzzy_pattern(revcomp, feature_fuzzy)
+        has_exprs.append(pl.col(seq_col).str.contains(seq_pattern).alias(f'has_{name}'))
+        if check_revcomp:
+            has_exprs.append(pl.col(seq_col).str.contains(revcomp_pattern).alias(f'has_{name}_r'))
+
+    if group_expr is not None:
+        has_exprs.append(group_expr.alias(group_col))
+
+    result = result.with_columns(has_exprs)
+
+    mask_expr = pl.col(seq_col)
+    for row in features_with_rc.iter_rows(named=True):
+        name, seq, revcomp = row['name'], row['sequence'], row['revcomp']
+        seq_pattern = _make_fuzzy_pattern(seq, feature_fuzzy)
+        revcomp_pattern = _make_fuzzy_pattern(revcomp, feature_fuzzy)
+        mask_expr = mask_expr.str.replace(seq_pattern, f'[{name}]')
+        if check_revcomp:
+            mask_expr = mask_expr.str.replace(revcomp_pattern, f'[{name}_r]')
+
+    mask_expr = mask_expr.str.replace_all(r'\][ACTGN]+\[', ']---[')
+    result = result.with_columns(mask_expr.alias('masked_seq'))
+
+    has_cols = [f'has_{row["name"]}' for row in features.iter_rows(named=True)]
+    if check_revcomp:
+        has_cols += [f'has_{row["name"]}_r' for row in features.iter_rows(named=True)]
+
+    feature_set_expr = pl.concat_str(
+        [pl.when(pl.col(c)).then(pl.lit(c.replace('has_', '') + ',')).otherwise(pl.lit('')) for c in has_cols]
+    ).str.strip_chars(',').alias('feature_set')
+
+    result = result.with_columns(feature_set_expr)
+
+    return result
+
+
+def tabulate_health(df: pl.DataFrame, group_col: Optional[str] = None) -> pl.DataFrame:
+    """
+    Tabulate feature set counts, optionally by group.
+
+    Args:
+        df: DataFrame with 'feature_set' column from checkhealth()
+        group_col: optional column to group by (e.g., 'fc')
+
+    Returns:
+        DataFrame with counts per feature_set (and per group if specified)
+    """
+    group_cols = ['feature_set']
+    if group_col:
+        group_cols = [group_col, 'feature_set']
+
+    return (
+        df
+        .group_by(group_cols)
+        .agg(pl.len().alias('count'))
+        .sort(group_cols[0], 'count', descending=[False, True])
+    )
+
+
+def plot_upset(df: pl.DataFrame, min_subset_size: int = 1, group_col: Optional[str] = None, show_percentages: bool = False):
+    """
+    Generate upset plot from checkhealth output.
+
+    Args:
+        df: DataFrame with 'feature_set' column from checkhealth()
+        min_subset_size: minimum count to show in plot
+        group_col: optional column to create separate figure per group
+        show_percentages: show percentages instead of counts on bars
+    """
+    import warnings
+    import matplotlib.pyplot as plt
+    from upsetplot import UpSet, from_memberships
+    warnings.filterwarnings('ignore', category=FutureWarning, module='upsetplot')
+
+    if group_col is None:
+        return _plot_upset_single(df, min_subset_size, show_percentages=show_percentages)
+
+    groups = df.select(group_col).unique().sort(group_col).to_series().to_list()
+
+    for grp in groups:
+        grp_df = df.filter(pl.col(group_col) == grp)
+        _plot_upset_single(grp_df, min_subset_size, title=f'{group_col}={grp} (n={len(grp_df):,})', show_percentages=show_percentages)
+        plt.show()
+
+
+def _plot_upset_single(df: pl.DataFrame, min_subset_size: int = 1, title: Optional[str] = None, show_percentages: bool = False):
+    """Internal: plot single upset."""
+    import matplotlib.pyplot as plt
+    from upsetplot import UpSet, from_memberships
+
+    counts = (
+        df
+        .group_by('feature_set')
+        .agg(pl.len().alias('count'))
+        .filter(pl.col('count') >= min_subset_size)
+        .sort('count', descending=True)
+    )
+
+    if counts.height == 0:
+        print(f"No subsets with count >= {min_subset_size}.")
+        return None
+
+    memberships = []
+    values = []
+    for row in counts.iter_rows(named=True):
+        fs = row['feature_set']
+        members = tuple(fs.split(',')) if fs else ()
+        memberships.append(members)
+        values.append(row['count'])
+
+    data = from_memberships(memberships, data=values)
+
+    # Note: upsetplot has a bug when show_counts=False with show_percentages=True
+    # Use empty string to suppress counts when showing percentages
+    upset = UpSet(data, min_subset_size=1, show_counts="" if show_percentages else True, show_percentages=show_percentages, sort_by='cardinality')
+    upset.plot()
+    plt.suptitle(title or f'Feature combinations (n={len(df):,})')
+    return upset
