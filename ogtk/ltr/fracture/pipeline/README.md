@@ -286,11 +286,14 @@ class StepResults(NamedTuple):
 
 3. **FRACTURE** - Assemble reads into contigs
    - Input: `parsed_reads.parquet`
-   - Output: `contigs_pl_direct.parquet`
+   - Output: `contigs_{strategy}_{key}.parquet` where strategy is:
+     - `segmented` - segment → assemble → stitch (for long cassettes with METAs)
+     - `masked` - mask → assemble → unmask (for repetitive sequences)
+     - `direct` - direct assembly (no masking/segmentation)
    - Metrics: `success_rate`, `total_assembled`, `mean_contig_length`
 
 4. **Extensions** - Post-processing analysis (optional)
-   - Input: `contigs_pl_direct.parquet`
+   - Input: `contigs_{strategy}_{key}.parquet` (auto-detected)
    - Output: Extension-specific results
 
 ## API Reference

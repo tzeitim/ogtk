@@ -1,0 +1,110 @@
+# BWA Configuration File
+# Contains all necessary parameters for running BWA mapping routines
+
+# Input files section
+input_files:
+  # Reference genome in FASTA format
+  ref_fa: "/path/to/reference/genome.fa"
+  # Optional annotation file (GTF/GFF)
+  ref_gtf: "/path/to/annotation.gtf"
+  # Optional known variants (VCF)
+  known_variants: "/path/to/known_variants.vcf"
+
+# BWA specific parameters
+bwa:
+  # Algorithm to use: 'mem' for BWA-MEM, 'aln' for BWA-backtrack
+  alg: "mem"
+  # Number of threads to use
+  threads: 8
+  # Additional BWA arguments
+  args: "-M -R '@RG\tID:sample\tSM:sample\tPL:ILLUMINA'"
+  # Minimum mapping quality
+  min_mapq: 20
+  # Maximum number of alignments to output per read
+  max_hits: 1
+  # Mark shorter split hits as secondary
+  mark_shorter: true
+  # Minimum seed length
+  min_seed_len: 19
+  # Band width for banded alignment
+  band_width: 100
+  # Perform Smith-Waterman for the unmapped mate
+  mate_sw: true
+
+# Output parameters
+output:
+  # Base directory for output files
+  base_dir: "/path/to/output"
+  # Output file format (SAM/BAM)
+  format: "BAM"
+  # Sort output by coordinate
+  sort_output: true
+  # Create index for output BAM
+  create_index: true
+  # Output file naming pattern
+  naming_pattern: "{sample_id}.aligned"
+  # Temporary directory for intermediate files
+  tmp_dir: "/path/to/tmp"
+
+# Resource allocation
+resources:
+  # Maximum memory usage in GB
+  max_memory: "16G"
+  # Temporary storage space in GB
+  tmp_space: "50G"
+  # Number of CPU cores
+  cpu_cores: 8
+
+# Quality control parameters
+qc:
+  # Minimum base quality for filtering
+  min_base_qual: 20
+  # Minimum read length after trimming
+  min_read_length: 36
+  # Maximum percentage of N's allowed in read
+  max_n_percent: 10
+  # Generate QC report
+  generate_report: true
+
+# Logging configuration
+logging:
+  # Log level (DEBUG, INFO, WARNING, ERROR)
+  level: "INFO"
+  # Log file location
+  file: "bwa_mapping.log"
+  # Include timestamp in log
+  timestamp: true
+  # Maximum log file size in MB
+  max_size: 100
+  # Number of backup log files to keep
+  backup_count: 5
+
+# Post-processing options
+post_processing:
+  # Mark duplicate reads
+  mark_duplicates: true
+  # Remove duplicate reads
+  remove_duplicates: false
+  # Realign around indels
+  realign_indels: true
+  # Base quality score recalibration
+  bqsr: true
+  # Generate coverage statistics
+  coverage_stats: true
+  # Generate alignment metrics
+  alignment_metrics: true
+
+# Pipeline metadata
+metadata:
+  # Project name
+  project_name: "genome_mapping_project"
+  # Project description
+  description: "Genome mapping using BWA-MEM"
+  # Pipeline version
+  version: "1.0.0"
+  # Date of run
+  date: "2024-10-29"
+  # Contact person
+  contact: "researcher@institution.edu"
+  # Institution
+  institution: "Research Institution"

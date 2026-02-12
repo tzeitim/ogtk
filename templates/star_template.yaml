@@ -1,0 +1,45 @@
+# STAR Configuration File
+
+# Input files section
+input_files:
+  # Reference genome in FASTA format
+  ref_fa: "/path/to/reference/genome.fa"
+  # Gene annotation file (GTF/GFF)
+  ref_gtf: "/path/to/annotation.gtf"
+  # Optional splice junctions database
+  splice_junctions: "/path/to/splice_junctions.txt"
+  # Optional set of known variants
+  known_variants: "/path/to/known_variants.vcf"
+
+# STAR specific parameters
+star:
+  # Genome directory for STAR index
+  genomedir: "/path/to/star/genome"
+  # Number of threads to use
+  threads: 16
+  # STAR command options
+  options: >-
+    --outSAMtype BAM SortedByCoordinate 
+    --outSAMunmapped Within 
+    --outSAMattributes Standard 
+    --outFilterMultimapNmax 20 
+    --outFilterMismatchNmax 10 
+    --outFilterMismatchNoverReadLmax 0.04 
+    --alignIntronMin 20 
+    --alignIntronMax 1000000 
+    --alignMatesGapMax 1000000 
+    --alignSJoverhangMin 8 
+    --alignSJDBoverhangMin 1 
+    --sjdbScore 1 
+    --limitBAMsortRAM 60000000000
+
+  # Genome generation parameters
+  genome_generation:
+    # Size of the genomic sequence for use in indices
+    genomeSAindexNbases: 14
+    # Length of the SA pre-indexing string
+    genomeChrBinNbits: 18
+    # Maximum length of the suffix array
+    genomeSAsparseD: 1
+    # Size of RAM buffer for sorting
+    limitGenomeGenerateRAM: 60000000000

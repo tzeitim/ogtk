@@ -343,13 +343,13 @@ def tabulate_paired_10x_fastqs_rs(
     ``limit`` limits the number of reads to process (None means process all reads)
 
     '''
-    if not modality in ['single-cell', 'single-molecule']:
-        raise ValueError("Invalid modality. Use 'single-cell' or 'single-molecule'") 
-        
+    if not modality in ['single-cell', 'single-molecule', 'single-molecule-v2']:
+        raise ValueError("Invalid modality. Use 'single-cell', 'single-molecule', or 'single-molecule-v2'")
+
     if not file_path.endswith('fastq.gz'):
         raise ValueError("Input files must be gzipped fastq (fastq.gz)")
 
-    if modality =='single-molecule':
+    if modality in ['single-molecule', 'single-molecule-v2']:
         cbc_len = 0
 
     if merged_fn is None:
@@ -383,13 +383,17 @@ def tabulate_paired_10x_fastqs_rs(
     logger.info(f"scanning {merged_fn}")
 
     import polars as pl
-    
+
+    # TODO: Review this extraction logic for single-molecule-v2 modality.
+    # Currently assumes [CBC][UMI] order (with cbc_len=0 for single-molecule variants).
+    # For single-molecule-v2 the actual order is [SBC][UMI], but this output gets
+    # overwritten by PREPROCESS step which calls parse_reads() with correct logic.
     lazy_df = (
         pl.scan_parquet(merged_fn)
         .with_columns(
-            cbc=pl.col('r1_seq').str.slice(0, cbc_len), 
+            cbc=pl.col('r1_seq').str.slice(0, cbc_len),
             umi=pl.col('r1_seq').str.slice(cbc_len, cbc_len+umi_len),
-            cbc_qual=pl.col('r1_qual').str.slice(0, cbc_len), 
+            cbc_qual=pl.col('r1_qual').str.slice(0, cbc_len),
             umi_qual=pl.col('r1_qual').str.slice(cbc_len, cbc_len+umi_len)
         )
         .rename(renaming_dict)
@@ -933,3 +937,31 @@ def run_sge_job(xp, files, sge_conf):
     # This part depends on how results are handled in your setup
     return f"Job {job_id} (Unique ID: {unique_job_id}) completed. Check results in the specified directory."
 
+def fuzzy_match_str(string, wildcard=".{0,1}", include_original=True, sep='|', max_length=200):
+    """Generate fuzzy regex pattern allowing single character variations.
+
+    Args:
+        string: Input string to fuzzify
+        wildcard: Regex pattern for character substitution
+        include_original: Whether to include exact match
+        sep: Separator for alternatives
+        max_length: Skip fuzzy variants for strings longer than this
+
+    Returns:
+        Regex pattern string for fuzzy matching
+    """
+    if not string:
+        return string
+
+    fuzz = []
+    if include_original:
+        fuzz.append(string)
+
+    # Skip fuzzy generation for very long strings to avoid performance issues
+    if len(string) <= max_length:
+        for i in range(len(string)):
+            # Use list comprehension + join instead of character-by-character building
+            variant = ''.join(wildcard if j == i else c for j, c in enumerate(string))
+            fuzz.append(variant)
+
+    return sep.join(fuzz)

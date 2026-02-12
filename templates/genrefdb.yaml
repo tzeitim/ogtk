@@ -1,0 +1,33 @@
+rootdir: /home/projects/nyosef/pedro/projects/wlt/conf/refs/transgenes/
+trans_gtf: /home/projects/nyosef/pedro/projects/wlt/conf/refs/trans.gtf
+loci:
+ Egfp-dox: 
+  chrom: chrTrans
+  fa: XLone-GFP.fa
+  start: 383
+  end: 1288
+  strand: "+"
+ Tet-on-bsd: 
+  chrom: chrTrans
+  fa: chrTrans.fa
+  start: 4706
+  end: 6054
+  strand: "-"
+ Cas9: 
+  chrom: chrCas
+  fa: chrCas9.fa
+  start: 329
+  end: 4627
+  strand: "+"
+ Hygr: 
+  chrom: chrCas
+  fa: PB_tre_Cas9.fa
+  start: 5647
+  end: 6700
+  strand: "+"
+ Mcherry-lt: 
+  chrom: chrLt
+  fa: chrLt.fa
+  start: 3278
+  end: 4315
+  strand: "+"

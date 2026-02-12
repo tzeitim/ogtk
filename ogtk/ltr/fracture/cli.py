@@ -10,7 +10,7 @@ __all__ = [
 ]
 
 # Define the pipeline step names for argument parsing without importing PipelineStep
-PIPELINE_STEP_NAMES = ['parquet', 'preprocess', 'fracture', 'test']
+PIPELINE_STEP_NAMES = ['dorado', 'parquet', 'preprocess', 'fracture', 'test']
 
 def parse_args():
     """Parse command line arguments"""
@@ -65,6 +65,18 @@ def parse_args():
         "--all-samples",
         action="store_true",
         help="Run specified steps (conf file or argument) for all samples in the configuration"
+    )
+
+    parser.add_argument(
+        "--basecall",
+        action="store_true",
+        help="Recipe: Run only dorado basecalling step (skips if already done, use --force to re-run)"
+    )
+
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force recomputation even if output already exists (use with --basecall)"
     )
 
     parser.add_argument(
@@ -152,7 +164,11 @@ def main():
     Regenerate plots for a specific sample::
 
         $ python pipeline.py --config config.yml --target-sample "sample_id" --regenerate-plots
-        
+
+    Regenerate segmentation QC plots only::
+
+        $ python pipeline.py --config config.yml --target-sample "sample_id" --regenerate-plots segmentation
+
     Regenerate markdown summary from existing JSON data::
     
         $ python pipeline.py --config config.yml --target-sample "sample_id" --regenerate-summary
@@ -170,6 +186,21 @@ def main():
     Multiple extensions with different steps
         $ python pipeline.py --extension-steps cassiopeia_lineage:extract_barcodes transcript_genotyping:all
 
+    Run basecalling only (skips if already done)::
+
+        $ python pipeline.py --config config.yml --basecall
+
+    Force re-run basecalling even if done::
+
+        $ python pipeline.py --config config.yml --basecall --force
+
+    Basecall a specific sample::
+
+        $ python pipeline.py --config config.yml --basecall --target-sample group_011
+
+    Basecall all samples::
+
+        $ python pipeline.py --config config.yml --basecall --all-samples
 
     Returns
     -------
@@ -224,6 +255,15 @@ def main():
                     extension_steps[ext_spec] = None
             
             xp.extension_steps = extension_steps
+
+        # Handle target sample override early (needed for all code paths)
+        if args.target_sample:
+            logger.info(f"Overriding target sample from config with: {args.target_sample}")
+            sample_ids = [sample['id'] for sample in xp.samples]
+            if args.target_sample not in sample_ids:
+                raise ValueError(f"Target sample '{args.target_sample}' not found in samples list: {sample_ids}")
+            xp.target_sample = args.target_sample
+            xp.consolidate_conf(update=True)
 
         # Skip the pipeline if we are only regenerating plots or summary
         if args.regenerate_plots is not None or args.regenerate_summary:
@@ -295,16 +335,31 @@ def main():
 
             return 0 if success else 1
 
-        # Handle single sample processing
-        if args.target_sample:
-            logger.info(f"Overriding target sample from config with: {args.target_sample}")
-            # Verify sample exists in samples list
-            sample_ids = [sample['id'] for sample in xp.samples]
-            if args.target_sample not in sample_ids:
-                raise ValueError(f"Target sample '{args.target_sample}' not found in samples list: {sample_ids}")
+        # Handle --basecall recipe (from CLI or config file)
+        elif args.basecall or getattr(xp, 'basecall', False):
+            xp.steps = ['dorado']
+            if args.force:
+                logger.info("Running basecall recipe: dorado step with forced recomputation")
+                xp.force_dorado = True
+            else:
+                logger.info("Running basecall recipe: dorado step (will skip if already done)")
 
-            xp.target_sample = args.target_sample
-            xp.consolidate_conf(update=True)
+            if args.all_samples:
+                # Process all samples
+                success = True
+                for sample in xp.samples:
+                    logger.info(f"\nBasecalling sample: {sample['id']}")
+                    xp.target_sample = sample['id']
+                    xp.consolidate_conf(update=True)
+                    pipeline = Pipeline(xp)
+                    sample_success = pipeline.run()
+                    success = success and sample_success
+                return 0 if success else 1
+            else:
+                # Process target sample only
+                pipeline = Pipeline(xp)
+                success = pipeline.run()
+                return 0 if success else 1
 
         pipeline = Pipeline(xp)
 

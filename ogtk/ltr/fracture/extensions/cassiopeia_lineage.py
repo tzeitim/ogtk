@@ -6,14 +6,18 @@ from .base import PostProcessorExtension
 from .registry import extension_registry
 from .config import ExtensionConfig
 from ..pipeline.types import StepResults,FractureXp
+from ..pipeline.masking import generate_mask_PEtracer_expression
 from dataclasses import dataclass, field
 from ogtk.utils.log import CustomLogger
+from ogtk.utils.general import fuzzy_match_str
 
 def plug_cassiopeia(
         ldf: pl.LazyFrame,
         ann_intbc_mod: pl.DataFrame,
         workdir: Path|str ='.',
         logger: None|CustomLogger=  None,
+        modality: str = 'single-molecule',
+        cbc_len: int = 16,
         barcode_interval: List|Tuple = (0, 7),
         cutsite_locations: List =  [40, 67, 94, 121, 148, 175, 202, 229, 256, 283],
         cutsite_width: int = 12,
@@ -38,25 +42,70 @@ def plug_cassiopeia(
         'context_size': context_size,
     }
 
-    cass_ldf = (
+    if modality == 'single-cell':
+        # For single-cell: extract cell barcode from compound UMI, keep full UMI
+        cass_ldf = (
             ldf.with_columns(
-            readName=pl.col('umi'),
-            cellBC=pl.col('umi'), 
-            UMI=pl.col('umi'),
-            readCount=pl.col('reads'),
-            seq=pl.col('intBC')+pl.col('contig'),
+                readName=pl.col('umi'),
+                cellBC=pl.col('umi').str.slice(0, cbc_len),  # Extract cell barcode portion
+                UMI=pl.col('umi'),                           # Keep compound UMI (cbc+umi) 
+                readCount=pl.col('reads'),
+                seq=pl.col('intBC')+pl.col('contig'),
+            )
+            .select('readName', 'cellBC', 'UMI', 'readCount', 'seq', 'intBC')
+            .join(ann_intbc_mod.lazy(), left_on='intBC', right_on='intBC', how='inner')
+        )
+        if logger:
+            logger.debug("Single-cell mode: using cellBC instead of sbc")
+    else:
+        # For single-molecule: duplicate UMI as cellBC (existing behavior)
+        cass_ldf = (
+            ldf.with_columns(
+                readName=pl.col('umi'),
+                cellBC=pl.col('umi'),                        # Duplicate UMI as fake cellBC
+                UMI=pl.col('umi'),
+                readCount=pl.col('reads'),
+                seq=pl.col('intBC')+pl.col('contig'),
             )
             .select('readName', 'cellBC', 'UMI', 'readCount', 'seq', 'intBC', 'sbc')
-            #TODO: change `how`?
             .join(ann_intbc_mod.lazy(), left_on='intBC', right_on='intBC', how='inner')
-    )
+        )
 
     res = []
     umi_tables = []
     nones = 0
 
 
-    for (intBC, mod, sbc), queries in cass_ldf.collect().partition_by('intBC', 'mod', 'sbc', as_dict=True).items():
+    # Choose partition columns based on modality
+    if modality == 'single-cell':
+        partition_cols = ['intBC', 'mod']  # No sample barcode for single-cell
+        extra_cols = {}
+    else:
+        partition_cols = ['intBC', 'mod', 'sbc'] 
+        extra_cols = {}
+    
+    if logger:
+        logger.debug(f"Using modality: {modality}, partition columns: {partition_cols}")
+        
+    collected_df = cass_ldf.collect()
+    if logger:
+        logger.debug(f"Collected dataframe shape: {collected_df.shape}")
+        if collected_df.height > 0:
+            logger.debug(f"Available columns: {collected_df.columns}")
+            logger.debug(f"Sample of data:\n{collected_df.head(3)}")
+        
+    partitions = collected_df.partition_by(partition_cols, as_dict=True)
+    if logger:
+        logger.info(f"Found {len(partitions)} partitions to process")
+    
+    for partition_key, queries in partitions.items():
+        # Handle both single value (when partitioning by 2 cols) and tuple (when partitioning by 3 cols)
+        if len(partition_cols) == 2:
+            intBC, mod = partition_key
+            sbc = None
+        else:
+            intBC, mod, sbc = partition_key
+            
         if mod is None:
             nones+=1
         else:
@@ -80,7 +129,8 @@ def plug_cassiopeia(
             # include colums dropped by cass?
             allele_table['intBC'] = intBC
             allele_table['mod'] = mod
-            allele_table['sbc'] = sbc
+            if sbc is not None:
+                allele_table['sbc'] = sbc
 
             umi_tables.append(umi_table.copy())
             #self.xp.logger.info(f"found {umi_table['intBC'].n_unique()} integrations for {mod}")
@@ -89,8 +139,20 @@ def plug_cassiopeia(
                 pl.DataFrame(allele_table).with_columns(mod=pl.lit(mod), mols=allele_table.shape[0])
                 )
 
+    if logger:
+        logger.info(f"Processed partitions: {len(res)} successful, {nones} with None mod")
+    
+    if not res:
+        # Return empty results if no valid allele tables were generated
+        logger.warning("No valid allele tables generated - returning empty results")
+        return StepResults(
+            results={"alleles_pl": pl.DataFrame(), "alleles_pd": []},
+            metrics={"processed_partitions": 0, "none_partitions": nones}
+        )
+    
     return StepResults(
-            results={"alleles_pl" : pl.concat(res), "alleles_pd" : umi_tables}
+            results={"alleles_pl" : pl.concat(res), "alleles_pd" : umi_tables},
+            metrics={"processed_partitions": len(res), "none_partitions": nones}
     )
 
 def save_ref_to_fasta(refs, out_dir='.', field='mod') -> None : 
@@ -101,17 +163,23 @@ def save_ref_to_fasta(refs, out_dir='.', field='mod') -> None :
             refs.filter(pl.col(field)==i).dna.to_fasta(read_id_col=field, read_col='seq').get_column('seq_fasta')[0]
             )
 
-def kmer_classify_cassettes(ldf, refs: pl.DataFrame, K: int = 25) -> StepResults:
+def kmer_classify_cassettes(ldf, refs: pl.DataFrame, K: int = 25, modality: str = 'single-molecule') -> StepResults:
     """ Annotates contigs based on the top occurring mod based on kmer matches """
 
     k_ref = refs.kmer.explode_kmers(k=K, seq_field='seq')
+
+    # Choose grouping columns based on modality
+    if modality == 'single-cell':
+        group_cols = ['intBC', 'mod']  # No sample barcode for single-cell
+    else:
+        group_cols = ['intBC', 'mod', 'sbc']
 
     cont_k = (
         ldf
         .kmer.explode_kmers(k=K, seq_field='contig', only_unique=False)
         .filter(pl.col('kmer').is_in(set(k_ref.get_column('kmer').to_list())))
         .join(k_ref.drop('seq').lazy(), left_on='kmer', right_on='kmer', how='inner')
-        .group_by('intBC', 'mod', 'sbc')
+        .group_by(group_cols)
                 .agg(fps=pl.col('umi').n_unique())
         .group_by('intBC', 'mod')
                 .agg(fps=pl.col('fps').sum())
@@ -129,13 +197,14 @@ def parse_contigs(
         ldf: pl.LazyFrame,
         int_anchor1: str,
         int_anchor2 : str,
+        modality: str = 'single-molecule',
         sbc_dict: Optional[Dict] = None,
         annotation:str = 'sbc',
         ) ->StepResults:
     """Extracts integration barcodes (intBC) and sample barcodes (sbc)."""
     
-    # 1. Extract/use sbcs
-    if sbc_dict is not None:
+    # 1. Extract/use sbcs (only for single-molecule data)
+    if modality == 'single-molecule' and sbc_dict is not None:
         ldf = ldf.with_columns(pl.col('sbc').replace(sbc_dict).alias(annotation))
     
     # 2. Extract intBC
@@ -148,7 +217,7 @@ def parse_contigs(
     )
     
     return StepResults(results={'ldf':ldf},
-                       metrics={'n_parsed_contigs':ldf.height})
+                       metrics={'n_parsed_contigs':ldf.select(pl.len()).collect().item()})
 
 
 def generate_refs_from_fasta(refs_fasta_path: str|Path, anchor1: str, anchor2: str) -> pl.DataFrame:
@@ -178,11 +247,17 @@ class CassiopeiaConfig(ExtensionConfig):
     int_anchor2: str
     
     # Optional fields with defaults
+    modality: str = 'single-molecule'  # 'single-cell' or 'single-molecule'
+    cbc_len: int = 16                  # Cell barcode length (for single-cell)
+    force: bool = False                # Force re-processing of existing files
     sbc_dict: Optional[Dict] = None
     annotation: str = 'sbc'
     refs_fasta_path: Optional[str] = None
     anchor1: Optional[str] = None
     anchor2: Optional[str] = None
+    
+    # Runtime parameters (set during processing)
+    ann_intbc_mod: Optional[pl.DataFrame] = None
 
     barcode_interval: Tuple[int, int] = (0, 7)
     cutsite_locations: List[int] = field(default_factory=lambda: [40, 67, 94, 121, 148, 175, 202, 229, 256, 283])
@@ -318,7 +393,7 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         """ Guesses what reference a given intBC corresponds to based on kmer composition analysis"""
         return kmer_classify_cassettes(
                 ldf=self.ldf, 
-                refs=self.refs, 
+                refs=self.refs,
                 **self.config.get_function_config(kmer_classify_cassettes)
                 )
 
@@ -339,10 +414,11 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         seq - The actual sequence to be aligned
 
         """
+        # Update config with runtime parameter
+        self.config.ann_intbc_mod = self.ann_intbc_mod
         config = self.config.get_function_config(plug_cassiopeia)
 
-        return plug_cassiopeia(ldf=self.ldf, 
-                               ann_intbc_mod=self.ann_intbc_mod,
+        return plug_cassiopeia(ldf=self.ldf,
                                workdir=self.workdir,
                                logger=self.xp.logger,
                                **config)
@@ -470,5 +546,7 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         # Implementation here
         pass
 
+
 # Register the extension
 extension_registry.register(CassiopeiaLineageExtension)
+
