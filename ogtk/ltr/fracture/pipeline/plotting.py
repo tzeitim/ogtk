@@ -5,6 +5,7 @@ os.environ['OPENBLAS_NUM_THREADS'] = '4'
 import polars as pl
 from pathlib import Path
 from ogtk.utils.log import call, Rlogger
+from .formats import scan_file, read_file
 
 logger = Rlogger().get_logger()
 
@@ -58,9 +59,9 @@ def plot_segmentation_qc_standalone(
     from .segmentation import generate_segmentation_report, plot_segmentation_qc
 
     # Load data from parquet files
-    segments_df = pl.read_parquet(segments_parquet)
-    assembled_df = pl.read_parquet(assembled_parquet)
-    contigs_df = pl.read_parquet(contigs_parquet)
+    segments_df = read_file(segments_parquet)
+    assembled_df = read_file(assembled_parquet)
+    contigs_df = read_file(contigs_parquet)
 
     # Rename contig column if needed (stitched_seq -> contig)
     if 'stitched_seq' in contigs_df.columns and contig_col not in contigs_df.columns:
@@ -122,7 +123,7 @@ class PlotDB():
             # simple coverage
             # saturation coverage
             fig = sns.displot(data=
-                pl.scan_parquet(ifn)
+                scan_file(ifn)
                     .group_by('umi')
                               .len().rename({'len':'reads'})
                     .collect(engine='streaming'),
@@ -152,10 +153,10 @@ class PlotDB():
             
             out_path = f'{xp.sample_figs}/{xp.target_sample}_{key}_sat-coverage.png'
             
-            total_reads = pl.scan_parquet(ifn).select(pl.len()).collect().item()
+            total_reads = scan_file(ifn).select(pl.len()).collect().item()
 
             _=[
-                sns.ecdfplot(pl.scan_parquet(ifn)
+                sns.ecdfplot(scan_file(ifn)
                                 .head(int(i))
                                 .group_by('umi')
                                 .len().rename({'len':'reads'})
@@ -169,7 +170,7 @@ class PlotDB():
                 for i in np.linspace(0, total_reads, num=5)
             ]
 
-            #plt.title(f'{pl.scan_parquet(mfn_pcr).select(pl.len()).collect().item()/1e6:.2f}')
+            #plt.title(f'{scan_file(mfn_pcr).select(pl.len()).collect().item()/1e6:.2f}')
             plt.title(f'{xp.target_sample} {total_reads/1e6:.2f}M reads')
 
             plt.xscale('log')

@@ -9,6 +9,7 @@ import logging
 #from scipy.optimize import curve_fit
 
 from ogtk.utils.log import Rlogger, call
+from .formats import scan_file
 
 logger = Rlogger().get_logger()
 
@@ -19,7 +20,7 @@ def compute_double_anchor(ifn, sample_n = 50, reps=10, start_anchor = "GAGACTGCA
     Returns ``reps`` groups of size ``sample_n`` to assess the number molecules that contain both anchor sequences.
     """
     return [
-        pl.scan_parquet(ifn)
+        scan_file(ifn)
         .filter(pl.col('ont'))
         .filter(pl.col('umi').is_in(pl.col('umi').sample(sample_n)))
         .group_by('umi')
@@ -33,7 +34,7 @@ def compute_double_anchor(ifn, sample_n = 50, reps=10, start_anchor = "GAGACTGCA
     
 def compute_anchor_stats(ifn, sample_n = 50, reps=1, start_anchor = "GAGACTGCATGG", end_anchor="TTTAGTGAGGGT"):
     return [
-        pl.scan_parquet(ifn)
+        scan_file(ifn)
         .filter(pl.col('ont'))
         .filter(pl.col('umi').is_in(pl.col('umi').sample(sample_n, with_replacement=True)))
         .group_by('umi')
@@ -78,7 +79,7 @@ def compute_saturation_curve(ifn, name=None, max_sample_size=250_000, reps=3, kw
     if name is None:
         name = ifn.split('/')[-1]
         
-    lazy_df = pl.scan_parquet(ifn)
+    lazy_df = scan_file(ifn)
     dataset_size = lazy_df.select(pl.len()).collect().item()
 
     sizes = _generate_sample_sizes(max_sample_size, reps, **kw_sizes)  
@@ -144,7 +145,7 @@ def find_read_count_threshold(df, min_reads=10, method="kneedle"):
     import os 
     os.environ['OPENBLAS_NUM_THREADS'] = '4'
 
-    ranked_umis = (pl.scan_parquet(df)
+    ranked_umis = (scan_file(df)
                    .filter(pl.col('reads') >= min_reads)
                    .select('umi', 'reads')
                    .unique()

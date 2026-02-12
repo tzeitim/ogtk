@@ -103,6 +103,12 @@ def parse_args():
         help="Extension steps in format extension:step1,step2"
     )
 
+    parser.add_argument(
+        "--use-ipc",
+        action="store_true",
+        help="Use Arrow IPC format for intermediate files (2-5x faster I/O, default: Parquet)"
+    )
+
     return parser
 
 def lazy_import():
@@ -238,6 +244,11 @@ def main():
         
         # Initialize Xp configuration
         xp = FractureXp(conf_fn=args.config)
+
+        # Handle Arrow IPC format override
+        if args.use_ipc:
+            logger.info("Using Arrow IPC format for intermediate files (faster I/O)")
+            xp.use_ipc = True
 
         # handle extensions
         if args.extensions:

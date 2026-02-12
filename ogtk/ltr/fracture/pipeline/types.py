@@ -21,7 +21,7 @@ class FractureXp(Xp):
     samples: List[str]
     pro_workdir: str
     plotdb: PlotDB
-    do_plot: bool    
+    do_plot: bool
     fracture: dict
     start_anchor: str
     end_anchor: str
@@ -32,6 +32,9 @@ class FractureXp(Xp):
     extensions: List[str]
     extension_steps: Dict[str, List[str]]
     extension_config: Dict[str, Dict[str, Any]]
+    # Format configuration for Arrow IPC support
+    use_ipc: bool  # Enable Arrow IPC for intermediate files (2-5x faster I/O)
+    ipc_for_intermediates: bool  # Use IPC only for intermediates, Parquet for finals
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -40,6 +43,9 @@ class FractureXp(Xp):
         self.make_test = getattr(self, 'make_test', False)
         self.parse_read1 = getattr(self, 'parse_read1', False)
         self.sbc_len = getattr(self, 'sbc_len', 6)
+        # Format configuration defaults
+        self.use_ipc = getattr(self, 'use_ipc', False)
+        self.ipc_for_intermediates = getattr(self, 'ipc_for_intermediates', True)
         
         # Set defaults based on modality
         modality = getattr(self, 'modality', 'single-molecule')
