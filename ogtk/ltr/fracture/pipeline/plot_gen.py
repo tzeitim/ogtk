@@ -60,8 +60,8 @@ class PlotRegenerator:
             self.logger.info("Plotting is disabled in configuration")
             return
 
-        # Pipeline steps + additional plot-only steps like segmentation
-        available_steps = [step.name.lower() for step in PipelineStep] + ['segmentation']
+        # Pipeline steps + additional plot-only steps like segmentation, checkhealth
+        available_steps = [step.name.lower() for step in PipelineStep] + ['segmentation', 'checkhealth']
 
         if steps:
             steps_to_run = [s.lower() for s in steps]
@@ -105,6 +105,18 @@ class PlotRegenerator:
                     'segments': segments,
                     'assembled': assembled,
                     'contigs_segmented_valid': contigs,
+                })
+            return None
+
+        # Handle checkhealth separately
+        if step_name.lower() == 'checkhealth':
+            raw_bam = f"{self.xp.sample_wd}/intermediate/raw_bam.parquet"
+            if not Path(raw_bam).exists():
+                raw_bam = f"{self.xp.sample_wd}/intermediate/raw_bam.arrow"
+            if Path(raw_bam).exists():
+                return StepResults(results={
+                    'xp': self.xp,
+                    'raw_bam': raw_bam,
                 })
             return None
 

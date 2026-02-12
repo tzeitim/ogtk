@@ -217,6 +217,115 @@ class PlotDB():
             fig.savefig(out_path)
             xp.logger.info(f"saved {out_path}")
 
+        # Checkhealth QC - screen raw reads for expected features
+        self._plot_checkhealth(ppi, results)
+
+    def _plot_checkhealth(self, ppi, results):
+        """Run checkhealth QC on raw reads to verify expected features are present."""
+        from . import qc
+
+        xp = ppi.xp
+        plt = ppi.plt
+
+        # Get checkhealth config early (needed for extras)
+        checkhealth_cfg = getattr(xp, 'checkhealth', {})
+
+        # Get features CSV path - same as metas
+        features_csv = getattr(xp, 'features_csv', None)
+        if features_csv is None and hasattr(xp, 'fracture'):
+            features_csv = xp.fracture.get('metas_csv')
+
+        # Build features from CSV (filtered by kind) and/or extras
+        features_dfs = []
+        feature_kinds = checkhealth_cfg.get('feature_kinds', ['ANCHOR'])
+
+        if features_csv and Path(features_csv).exists():
+            all_features = pl.read_csv(features_csv)
+            if 'kind' in all_features.columns:
+                filtered_features = all_features.filter(pl.col('kind').is_in(feature_kinds))
+                if filtered_features.height > 0:
+                    features_dfs.append(filtered_features.select([
+                        pl.col('feature').alias('name'),
+                        pl.col('seq').alias('sequence')
+                    ]))
+
+        # Add extras from config
+        extras = checkhealth_cfg.get('extras', [])
+        if extras:
+            extras_df = pl.DataFrame({
+                'name': [f'extra{i+1:02d}' for i in range(len(extras))],
+                'sequence': extras
+            })
+            features_dfs.append(extras_df)
+
+        if not features_dfs:
+            xp.logger.info("No ANCHOR features or extras configured, skipping checkhealth")
+            return
+
+        features_df = pl.concat(features_dfs)
+
+        # Find raw_bam file - use from results if provided, otherwise search
+        raw_bam_path = None
+        if hasattr(results, 'results') and results.results.get('raw_bam'):
+            raw_bam_path = Path(results.results['raw_bam'])
+
+        if not raw_bam_path or not raw_bam_path.exists():
+            raw_bam_path = Path(xp.sample_wd) / 'intermediate' / 'raw_bam.parquet'
+            if not raw_bam_path.exists():
+                raw_bam_path = Path(xp.sample_wd) / 'intermediate' / 'raw_bam.arrow'
+
+        if not raw_bam_path.exists():
+            xp.logger.warning("Raw BAM file not found, skipping checkhealth")
+            return
+
+        xp.logger.info(f"Running checkhealth on {raw_bam_path}")
+
+        # Get config options - reuse anchor_orient from main config as default
+        sample_n = checkhealth_cfg.get('sample_n', 10000)
+        orient_anchor = checkhealth_cfg.get('orient_anchor', getattr(xp, 'anchor_orient', None))
+        orient_fuzzy = checkhealth_cfg.get('orient_fuzzy', 0)
+        feature_fuzzy = checkhealth_cfg.get('feature_fuzzy', 0)
+
+        # Sample reads (no grouping in auto-run)
+        raw_ldf = scan_file(str(raw_bam_path)).head(sample_n)
+
+        # Run checkhealth
+        health_df = qc.checkhealth(
+            raw_ldf,
+            features_df,
+            orient_anchor=orient_anchor,
+            orient_fuzzy=orient_fuzzy,
+            feature_fuzzy=feature_fuzzy,
+        ).collect()
+
+        xp.logger.info(f"Checkhealth processed {len(health_df):,} reads")
+
+        # Save tabulated results
+        out_dir = Path(xp.sample_figs)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        health_table = qc.tabulate_health(health_df)
+        health_table.write_csv(str(out_dir / f'{xp.target_sample}_checkhealth.csv'))
+        xp.logger.info(f"Saved checkhealth table to {out_dir / f'{xp.target_sample}_checkhealth.csv'}")
+
+        # Generate upset plot
+        min_subset_size = max(1, int(len(health_df) * 0.01))
+        qc.plot_upset(health_df, min_subset_size=min_subset_size, show_percentages=True)
+
+        out_path = out_dir / f'{xp.target_sample}_checkhealth_upset.png'
+        plt.savefig(str(out_path), bbox_inches='tight')
+        xp.logger.info(f"Saved checkhealth upset plot to {out_path}")
+
+    @call
+    def plot_checkhealth(self, ppi, results):
+        """
+        Standalone checkhealth plot generation for regeneration.
+
+        This is called by PlotRegenerator and uses results['raw_bam'] as input.
+        """
+        # Delegate to the internal implementation
+        self._plot_checkhealth(ppi, results)
+
     @call
     def plot_segmentation(self, ppi, results):
         """
