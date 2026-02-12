@@ -6,6 +6,7 @@ from .base import PostProcessorExtension
 from .registry import extension_registry
 from .config import ExtensionConfig
 from ..pipeline.types import StepResults,FractureXp
+from ..pipeline.formats import scan_file, read_file
 from dataclasses import dataclass, field
 from ogtk.utils.log import CustomLogger
 from ogtk.utils.general import fuzzy_match_str
@@ -248,7 +249,7 @@ def plug_cassiopeia(
 
     # Option A: Load pre-generated whitelist
     if intbc_whitelist_path is not None:
-        whitelist = pl.read_parquet(intbc_whitelist_path)
+        whitelist = read_file(intbc_whitelist_path)
         cass_ldf = filter_by_whitelist(cass_ldf, whitelist, logger)
         filter_metrics['whitelist_source'] = 'file'
         filter_metrics['whitelist_path'] = str(intbc_whitelist_path)
@@ -704,7 +705,7 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         """Main entry point - orchestrates all sub-steps"""
         
         # Initialize
-        #self.temp_data['contigs'] = pl.read_parquet(contigs_path)
+        #self.temp_data['contigs'] = read_file(contigs_path)
         config = self.config
         force = getattr(config, 'force', False)  
         
@@ -716,7 +717,7 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         refs_path = contigs_path.parent / "refs.parquet"
         ann_intbc_mod_path = contigs_path.parent / "ann_intbc_mod_path.parquet"
 
-        self.ldf = pl.scan_parquet(contigs_path).filter(pl.col('contig').str.len_chars() > 0)
+        self.ldf = scan_file(contigs_path).filter(pl.col('contig').str.len_chars() > 0)
 
         if self.config.refs_fasta_path is not None:
             self.refs = generate_refs_from_fasta(
@@ -743,7 +744,7 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
             final_metrics.update(result.metrics)
         else:
             self.xp.logger.info(f"Loading parsed contigs from {parsed_path}")
-            self.ldf = pl.scan_parquet(parsed_path)
+            self.ldf = scan_file(parsed_path)
         
         if self.should_run_step(CassiopeiaStep.CLASSIFY_CASSETTES.value):
             self.xp.logger.info("Running classify_cassettes step")
@@ -872,19 +873,20 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
             return StepResults(results={}, metrics={})
 
         metas = pl.read_csv(metas_csv)
-        segments_df = pl.read_parquet(segments_path)
+        segments_df = read_file(segments_path)
 
         # Load assembled if available
         if assembled_path.exists():
-            assembled_df = pl.read_parquet(assembled_path)
+            assembled_df = read_file(assembled_path)
         else:
             # Create minimal assembled_df from segments
             assembled_df = segments_df.select(['umi', 'start_meta', 'end_meta']).unique()
 
-        # Load contigs
-        contigs_path = list(self.workdir.glob("contigs_segmented_*.parquet"))
+        # Load contigs (check for both IPC and Parquet formats)
+        contigs_path = list(self.workdir.glob("contigs_segmented_*.arrow")) or \
+                       list(self.workdir.glob("contigs_segmented_*.parquet"))
         if contigs_path:
-            contigs_df = pl.read_parquet(contigs_path[0])
+            contigs_df = read_file(contigs_path[0])
             if 'stitched_seq' in contigs_df.columns and 'contig' not in contigs_df.columns:
                 contigs_df = contigs_df.rename({'stitched_seq': 'contig'})
         else:
@@ -989,7 +991,7 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
                 "Run fracture with use_segmentation=True first."
             )
 
-        segments_df = pl.read_parquet(segments_path)
+        segments_df = read_file(segments_path)
 
         if self.config.metas_flanks_csv is None:
             raise ValueError("metas_flanks_csv must be set in config for segmented_allele step")

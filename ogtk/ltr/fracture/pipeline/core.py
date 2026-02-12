@@ -8,6 +8,7 @@ from ogtk.utils.log import Rlogger, call
 from ogtk.utils.general import sfind, tabulate_paired_10x_fastqs_rs
 from .plotting import PlotDB
 from .types import FractureXp,StepResults
+from .formats import scan_file, sink_file, read_file, write_file, get_file_path
 
 class PipelineStep(Enum):
     """Enum defining available pipeline steps"""
@@ -323,38 +324,64 @@ class Pipeline:
                 temp_merged_files.append(temp_merged_fn)
 
             self.logger.info(f"Combining {len(temp_parsed_files)} FASTQ-derived parquet files")
-            self._par_combine_parquet_files(temp_parsed_files, out_fn)
-            self._par_combine_parquet_files(temp_merged_files, merged_fn)
+            self._par_combine_files(temp_parsed_files, out_fn)
+            self._par_combine_files(temp_merged_files, merged_fn)
         else:
             file = files[0]
             self.logger.info(f"Processing single FASTQ file: {file}")
             self._par_process_single_fastq(file, out_fn, merged_fn, sample_dir, force_tab, limit)
 
     def _par_process_bams(self, files, sample_dir, out_fn, merged_fn, force_tab, limit):
-        """Process BAM files (1 or more) efficiently using bams_to_parquet"""
+        """Process BAM files (1 or more) efficiently using bams_to_parquet/bams_to_arrow_ipc"""
         import rogtk
 
         intermediate_dir = Path(sample_dir) / 'intermediate'
         intermediate_dir.mkdir(exist_ok=True)
-        raw_bam_fn = str(intermediate_dir / 'raw_bam.parquet')
-        debug_bam = getattr(self.xp, 'debug_bam', False)
 
-        self.logger.info(f"Processing {len(files)} BAM files into single parquet")
+        # Use IPC for raw BAM output if enabled (intermediate file)
+        use_ipc = getattr(self.xp, 'use_ipc', False)
+        raw_bam_ext = '.arrow' if use_ipc else '.parquet'
+        raw_bam_fn = str(intermediate_dir / f'raw_bam{raw_bam_ext}')
+        debug_bam = getattr(self.xp, 'debug_bam', True)
+
+        format_name = "Arrow IPC" if use_ipc else "Parquet"
+        self.logger.info(f"Processing {len(files)} BAM files into single {format_name}")
 
         if not Path(raw_bam_fn).exists() or force_tab:
-            rogtk.bams_to_parquet(
-                bam_paths=files,
-                parquet_path=raw_bam_fn,
-                include_sequence=True,
-                include_quality=True,
-                compression='snappy',
-                limit=limit,
-                include_source_file=debug_bam,
-            )
+            if use_ipc:
+                # Use Arrow IPC for faster I/O (try htslib optimized first, fallback to noodles)
+                if hasattr(rogtk, 'bams_to_arrow_ipc_htslib_optimized') and rogtk.bams_to_arrow_ipc_htslib_optimized is not None:
+                    rogtk.bams_to_arrow_ipc_htslib_optimized(
+                        bam_paths=files,
+                        arrow_ipc_path=raw_bam_fn,
+                        include_sequence=True,
+                        include_quality=True,
+                        limit=limit,
+                        include_source_file=debug_bam,
+                    )
+                else:
+                    rogtk.bams_to_arrow_ipc(
+                        bam_paths=files,
+                        arrow_ipc_path=raw_bam_fn,
+                        include_sequence=True,
+                        include_quality=True,
+                        limit=limit,
+                        include_source_file=debug_bam,
+                    )
+            else:
+                rogtk.bams_to_parquet(
+                    bam_paths=files,
+                    parquet_path=raw_bam_fn,
+                    include_sequence=True,
+                    include_quality=True,
+                    compression='snappy',
+                    limit=limit,
+                    include_source_file=debug_bam,
+                )
 
         self.logger.info(f"Converting to paired format: {raw_bam_fn} -> {merged_fn}")
         (
-            pl.scan_parquet(raw_bam_fn)
+            scan_file(raw_bam_fn)
             .pp.ont_to_paired_format(
                 umi_len=self.xp.umi_len,
                 sbc_len=self.xp.sbc_len,
@@ -364,10 +391,10 @@ class Pipeline:
                 cbc_len=getattr(self.xp, 'cbc_len', 16),
                 do_rev_comp=self.xp.rev_comp,
             )
-            .sink_parquet(merged_fn)
+            .pipe(lambda ldf: sink_file(ldf, merged_fn))
         )
 
-        # For BAM, parsed = merged
+        # For BAM, parsed = merged (same format now, both IPC or both Parquet)
         import shutil
         shutil.copy2(merged_fn, out_fn)
 
@@ -389,24 +416,25 @@ class Pipeline:
             limit=limit
         )
 
-    def _par_combine_parquet_files(self, file_list, output_file, cleanup=True):
-        """Combine multiple parquet files into one (lazy/streaming)"""
+    def _par_combine_files(self, file_list, output_file, cleanup=True):
+        """Combine multiple data files into one (lazy/streaming, format-agnostic)"""
         if file_list:
             # Use lazy evaluation to avoid loading all files into RAM
-            pl.concat([pl.scan_parquet(f) for f in file_list]).sink_parquet(output_file)
+            combined = pl.concat([scan_file(f) for f in file_list])
+            sink_file(combined, output_file)
 
             # Clean up temporary files
             if cleanup:
                 for temp_file in file_list:
                     Path(temp_file).unlink(missing_ok=True)
 
-    def _par_calculate_parquet_metrics(self, out_fn):
-        """Calculate metrics from the processed parquet file"""
+    def _par_calculate_metrics(self, out_fn):
+        """Calculate metrics from the processed file (format-agnostic)"""
         limit = getattr(self.xp, "limit", None)
-        
+
         return {
             'total_reads': (
-                pl.scan_parquet(out_fn)
+                scan_file(out_fn)
                 .collect()
                 .height
             ),
@@ -415,7 +443,7 @@ class Pipeline:
             # the real issue is that the progression of file names is not correct
             # what is the difference between parsed and merged and why do parsed gets overwritten ?
             'total_umis': (
-                pl.scan_parquet(out_fn)
+                scan_file(out_fn)
                 #.select('umi')
                 #.unique()
                 #
@@ -498,14 +526,17 @@ class Pipeline:
                 for sample_id, files in sample_to_file.items():
                     sample_dir = f'{self.xp.pro_workdir}/{sample_id}'
                     Path(sample_dir).mkdir(parents=True, exist_ok=True)
-                    
-                    out_fn = f'{sample_dir}/parsed_reads.parquet'
-                    merged_fn = f'{sample_dir}/merged_reads.parquet'
-                    
+
+                    # Use IPC for intermediate files if enabled
+                    use_ipc = getattr(self.xp, 'use_ipc', False)
+                    ipc_ext = '.arrow' if use_ipc else '.parquet'
+                    out_fn = f'{sample_dir}/parsed_reads{ipc_ext}'  # Intermediate - can be IPC
+                    merged_fn = f'{sample_dir}/merged_reads{ipc_ext}'  # Intermediate - can be IPC
+
                     # ** main invocation ** #
                     self._par_process_input_files(files, sample_dir, out_fn, merged_fn, input_format)
-                    
-                    metrics = self._par_calculate_parquet_metrics(out_fn)
+
+                    metrics = self._par_calculate_metrics(out_fn)
                     
             return StepResults(
                 results={'parsed_fn': out_fn}, 
@@ -580,26 +611,26 @@ class Pipeline:
                             temp_merged_files.append(temp_merged_fn)
                         
                         self.logger.info(f"Concatenating results from {len(files)} files")
-                        (pl.concat([pl.scan_parquet(f) for f in temp_parsed_files]).sink_parquet(out_fn))
-                        (pl.concat([pl.scan_parquet(f) for f in temp_merged_files]).sink_parquet(merged_fn))
+                        sink_file(pl.concat([scan_file(f) for f in temp_parsed_files]), out_fn)
+                        sink_file(pl.concat([scan_file(f) for f in temp_merged_files]), merged_fn)
 
                         #TODO if limit is set, downsample the concatenation too
-                        
+
                         for f in temp_parsed_files + temp_merged_files:
                             Path(f).unlink(missing_ok=True)
-                            
+
                         self.logger.info(f"Successfully concatenated results")
                     else:
                         file = files[0]
                         self.logger.info(f"Processing single file: {file}")
                         tabulate_paired_10x_fastqs_rs(
-                            file_path=file, 
+                            file_path=file,
                             out_fn=out_fn,
                             merged_fn=merged_fn,
                             out_dir=sample_dir,
-                            modality=self.xp.modality,     
-                            umi_len=self.xp.umi_len,      
-                            do_rev_comp=self.xp.rev_comp,  
+                            modality=self.xp.modality,
+                            umi_len=self.xp.umi_len,
+                            do_rev_comp=self.xp.rev_comp,
                             force=force_tab)# expose to cli?
 
                 # TODO why are merged files and parsed files so similar? can we get read of merged?
@@ -609,11 +640,11 @@ class Pipeline:
                         },
                         metrics = {
                         'total_reads': (
-                                pl.scan_parquet(out_fn)
+                                scan_file(out_fn)
                                 .collect()
                                 .height),
                         'total_umis': (
-                                pl.scan_parquet(out_fn)
+                                scan_file(out_fn)
                                 .select('umi')
                                 .unique()
                                 .collect()
@@ -641,21 +672,26 @@ class Pipeline:
                 if param not in vars(self.xp):
                     raise ValueError(f"Missing required parameter: {param}")
 
-            in_file = f"{self.xp.pro_workdir}/{self.xp.target_sample}/merged_reads.parquet"
-            out_file = f"{self.xp.sample_wd}/parsed_reads.parquet" #pyright:ignore
-            out_file_inv = f"{self.xp.sample_wd}/parsed_reads_invalid.parquet" #pyright:ignore
+            # Check for IPC format first (intermediate file), fallback to Parquet
+            use_ipc = getattr(self.xp, 'use_ipc', False)
+            ipc_ext = '.arrow' if use_ipc else '.parquet'
+            in_file = f"{self.xp.pro_workdir}/{self.xp.target_sample}/merged_reads{ipc_ext}"
 
-            out_file_qc = out_file.replace('.parquet', '_qc.parquet')
-            total_reads = self.get_metric_from_summary("parquet", 'total_reads') 
+            # Fallback to parquet if arrow file doesn't exist (backwards compatibility)
+            if not Path(in_file).exists():
+                in_file = f"{self.xp.pro_workdir}/{self.xp.target_sample}/merged_reads.parquet"
+
+            out_file = f"{self.xp.sample_wd}/parsed_reads{ipc_ext}" #pyright:ignore
+            out_file_inv = f"{self.xp.sample_wd}/parsed_reads_invalid{ipc_ext}" #pyright:ignore
+
+            out_file_qc = f"{self.xp.sample_wd}/parsed_reads_qc.parquet"  # QC stays parquet (small file)
+            total_reads = self.get_metric_from_summary("parquet", 'total_reads')
 
             self.logger.info(f"reading from {in_file} with {total_reads/1e6:0.2f} M reads")
 
-             
+
             if not self.xp.dry:
-                ldf = (
-                    pl
-                    .scan_parquet(in_file)
-                )
+                ldf = scan_file(in_file)
 
                 self.logger.step(f"ldf")
 
@@ -673,24 +709,24 @@ class Pipeline:
                 # save without gc fields
                 if not self.xp.parse_read1:
                     self.logger.info(f"Exporting lazily to {out_file}")
-                    (
+                    sink_file(
                             ldf
                             .filter(pl.col('valid_umi'))
-                            .filter(pl.col('ont'))
-                            .sink_parquet(out_file)
+                            .filter(pl.col('ont')),
+                            out_file
                     )
 
                     self.logger.info(f"Exporting lazily to {out_file_inv}")
-                    (
+                    sink_file(
                             ldf
-                            .filter((~pl.col('valid_umi')) | (~pl.col('ont')))
-                            .sink_parquet(out_file_inv)
+                            .filter((~pl.col('valid_umi')) | (~pl.col('ont'))),
+                            out_file_inv
                     )
                 else:
                     # TODO change the logics to an adaptive expression instead of boiler plate
                     # if r1 is long and informative: e.g long paired-end
                     self.logger.warning(f"extracting juice from R1")
-                    (
+                    sink_file(
                         pl.concat(
                             [
                                 ldf
@@ -701,10 +737,10 @@ class Pipeline:
                                 .filter(pl.col('ont'))
                                 .pp.parse_read1(anchor_ont=self.xp.anchor_ont),
                             ]
-                        ).sink_parquet(out_file)
+                        ), out_file
                      )
 
-                    (
+                    sink_file(
                         pl.concat(
                             [
                                 ldf
@@ -713,7 +749,7 @@ class Pipeline:
                                 .filter((~pl.col('valid_umi')) | (~pl.col('ont')))
                                 .pp.parse_read1(anchor_ont=self.xp.anchor_ont),
                             ]
-                        ).sink_parquet(out_file_inv)
+                        ), out_file_inv
                      )
 
                 # extract QC fields and compute UMI-level metrics
@@ -789,16 +825,22 @@ class Pipeline:
                 self.logger.info(f"Segmented assembly enabled, loading METAs from {metas_csv}")
                 metas_df = pl.read_csv(metas_csv)
 
-            in_files = {
-                    'valid': f"{self.xp.sample_wd}/parsed_reads.parquet", #pyright:ignore
-                    'invalid':f"{self.xp.sample_wd}/parsed_reads_invalid.parquet", #pyright:ignore
-                    }
+            # Use IPC for intermediate files if enabled
+            use_ipc = getattr(self.xp, 'use_ipc', False)
+            ipc_ext = '.arrow' if use_ipc else '.parquet'
+
+            # Build input file paths with fallback for backwards compatibility
+            in_files = {}
+            for key, base in [('valid', 'parsed_reads'), ('invalid', 'parsed_reads_invalid')]:
+                preferred = f"{self.xp.sample_wd}/{base}{ipc_ext}"  #pyright:ignore
+                fallback = f"{self.xp.sample_wd}/{base}.parquet"   #pyright:ignore
+                in_files[key] = preferred if Path(preferred).exists() else fallback
 
             for key,in_file in in_files.items():
                 if not self.xp.dry:
                     self.logger.info(f'Reading {in_file}')
 
-                    ldf = pl.scan_parquet(in_file)
+                    ldf = scan_file(in_file)
 
                     # Apply masking if configured (skip if using segmentation - they're alternative strategies)
                     if hasattr(self.xp, 'features_csv') and self.xp.features_csv and not use_segmentation:
@@ -825,10 +867,13 @@ class Pipeline:
                         if getattr(self.xp, 'save_intermediate_files', False):
                             intermediate_dir = Path(self.xp.sample_wd) / 'intermediate'
                             intermediate_dir.mkdir(exist_ok=True)
-                            masked_file = intermediate_dir / f"masked_reads_{key}.parquet"
+                            # Use IPC for intermediate masked reads if enabled
+                            use_ipc = getattr(self.xp, 'use_ipc', False)
+                            masked_ext = '.arrow' if use_ipc else '.parquet'
+                            masked_file = intermediate_dir / f"masked_reads_{key}{masked_ext}"
                             self.logger.info(f"Saving masked reads to {masked_file}")
-                            ldf.sink_parquet(str(masked_file))
-                            ldf = pl.scan_parquet(str(masked_file))
+                            sink_file(ldf, str(masked_file))
+                            ldf = scan_file(str(masked_file))
 
                     filter_expr= pl.col('reads')>=self.xp.fracture['min_reads']
 
@@ -840,7 +885,7 @@ class Pipeline:
                     else:
                         strategy = 'direct'
 
-                    out_file = f"{self.xp.sample_wd}/contigs_{strategy}_{key}.parquet"
+                    out_file = f"{self.xp.sample_wd}/contigs_{strategy}_{key}{ipc_ext}"
                     self.logger.info(f"Exporting assembled contigs ({strategy}) to {out_file}")
 
                     if use_segmentation:
@@ -869,7 +914,7 @@ class Pipeline:
                             .with_columns(pl.col('contig').str.len_chars().alias('length'))
                             .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                             .join(
-                                pl.scan_parquet(in_file)
+                                scan_file(in_file)
                                   .select('umi','reads')
                                   .filter(filter_expr)
                                   .unique(),
@@ -895,7 +940,7 @@ class Pipeline:
                                 .with_columns(pl.col('contig').str.len_chars().alias('length'))
                                 .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                                 .join(
-                                    pl.scan_parquet(in_file)
+                                    scan_file(in_file)
                                       .select('umi','reads')
                                       .filter(filter_expr)
                                       .unique(),
@@ -917,7 +962,7 @@ class Pipeline:
                             pl.col('contig').str.len_chars().alias('length')
                         )
 
-                    df_contigs.sink_parquet(out_file)
+                    sink_file(df_contigs, out_file)
 
                     success_rate = (df_contigs.collect().get_column('length')>0).mean()
                     total_assembled = (df_contigs.collect().get_column('length')>0).sum()
@@ -953,15 +998,19 @@ class Pipeline:
             self.logger.warning("Extensions module not available")
             return True
         
-        # Look for contigs file (check all strategy variants)
+        # Look for contigs file (check all strategy variants and both formats)
         # on valid reads only
         key = 'valid'
         contigs_path = None
         for strategy in ['segmented', 'masked', 'direct']:
-            candidate = Path(f"{self.xp.sample_wd}/contigs_{strategy}_{key}.parquet")
-            if candidate.exists():
-                contigs_path = candidate
-                self.logger.info(f"Found contigs file: {contigs_path.name}")
+            # Check IPC format first, then Parquet
+            for ext in ['.arrow', '.parquet']:
+                candidate = Path(f"{self.xp.sample_wd}/contigs_{strategy}_{key}{ext}")
+                if candidate.exists():
+                    contigs_path = candidate
+                    self.logger.info(f"Found contigs file: {contigs_path.name}")
+                    break
+            if contigs_path:
                 break
 
         if not contigs_path:
