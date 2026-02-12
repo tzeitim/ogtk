@@ -1,6 +1,16 @@
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Set
 from .core import Pipeline, PipelineStep, StepResults
+from .formats import read_file
+
+
+def get_available_extensions() -> Set[str]:
+    """Get available extension names from registry."""
+    try:
+        from ..extensions import extension_registry
+        return set(extension_registry.get_available())
+    except ImportError:
+        return set()
 
 class SummaryRegenerator:
     """Utility class for regenerating the markdown summary from previous pipeline runs"""
@@ -60,8 +70,9 @@ class PlotRegenerator:
             self.logger.info("Plotting is disabled in configuration")
             return
 
-        # Pipeline steps + additional plot-only steps like segmentation, checkhealth
-        available_steps = [step.name.lower() for step in PipelineStep] + ['segmentation', 'checkhealth']
+        # Pipeline steps + additional plot-only steps like segmentation, checkhealth + extensions
+        extensions = [f"ext_{ext}" for ext in get_available_extensions()]
+        available_steps = [step.name.lower() for step in PipelineStep] + ['segmentation', 'checkhealth'] + extensions
 
         if steps:
             steps_to_run = [s.lower() for s in steps]
@@ -73,19 +84,29 @@ class PlotRegenerator:
             
         for step_name in steps_to_run:
             self.logger.step(f"Regenerating plots for {step_name}")
-            
+
+            # Handle extensions separately (prefixed with ext_)
+            if step_name.startswith('ext_'):
+                ext_name = step_name[4:]  # Remove 'ext_' prefix
+                results = self._load_extension_results(ext_name)
+                if results:
+                    self._regenerate_extension_plots(ext_name, results)
+                else:
+                    self.logger.info(f"No previous results found for extension {ext_name}")
+                continue
+
             # Get plot method from PlotDB
             plot_method = getattr(self.pipeline.plotdb, f"plot_{step_name}", None)
             if not plot_method:
                 self.logger.info(f"No plotting method found for step {step_name}")
                 continue
-                
+
             # Get results from previous run
             results = self._load_step_results(step_name)
             if not results:
                 self.logger.info(f"No previous results found for step {step_name}")
                 continue
-                
+
             try:
                 plot_method(self.pipeline, results)
                 self.logger.info(f"Successfully regenerated plots for {step_name}")
@@ -140,3 +161,57 @@ class PlotRegenerator:
                 return StepResults(results={'xp': self.xp, 'contigs': contigs})
 
         return None
+
+    def _load_extension_results(self, ext_name: str) -> Optional[StepResults]:
+        """Load results for regenerating extension plots."""
+        if ext_name == 'cassiopeia_petracer':
+            intermediate_dir = Path(self.xp.sample_wd) / "intermediate"
+            segments_path = intermediate_dir / "segments_debug.parquet"
+            if not segments_path.exists():
+                segments_path = intermediate_dir / "segments.parquet"
+
+            refs_path = Path(self.xp.sample_wd) / "refs.parquet"
+
+            # Find contigs file (check for both IPC and Parquet formats)
+            contigs_path = None
+            for pattern in ["contigs_segmented_valid.arrow", "contigs_segmented_valid.parquet",
+                            "contigs_*.arrow", "contigs_*.parquet"]:
+                matches = list(Path(self.xp.sample_wd).glob(pattern))
+                if matches:
+                    contigs_path = matches[0]
+                    break
+
+            if segments_path.exists() and refs_path.exists():
+                return StepResults(results={
+                    'xp': self.xp,
+                    'segments': str(segments_path),
+                    'refs': str(refs_path),
+                    'contigs': str(contigs_path) if contigs_path else None,
+                })
+        return None
+
+    def _regenerate_extension_plots(self, ext_name: str, results: StepResults) -> None:
+        """Regenerate plots for an extension."""
+        from ..extensions import extension_registry
+
+        extension = extension_registry.create_extension(ext_name, self.xp)
+        if not extension:
+            self.logger.warning(f"Extension {ext_name} not found")
+            return
+
+        try:
+            if ext_name == 'cassiopeia_petracer':
+                # Load refs into extension
+                extension.refs = read_file(results.results['refs'])
+                extension.workdir = Path(self.xp.sample_wd)
+
+                # Load ldf if contigs available (needed for some QC)
+                if results.results.get('contigs'):
+                    from .formats import scan_file
+                    extension.ldf = scan_file(results.results['contigs'])
+
+                # Call the plot regeneration step
+                extension._regenerate_filtered_qc()
+                self.logger.info(f"Successfully regenerated plots for extension {ext_name}")
+        except Exception as e:
+            self.logger.error(f"Failed to regenerate plots for extension {ext_name}: {str(e)}", with_traceback=True)
