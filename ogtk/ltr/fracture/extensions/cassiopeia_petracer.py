@@ -574,10 +574,12 @@ def plug_cassiopeia(
     alleles_pl = pl.concat(res) if res else pl.DataFrame()
 
     # For single-cell: collapse UMIs to one allele per (cell, intBC)
+    # Keep both raw (per-UMI) and collapsed (per-cell) versions
     collapse_metrics = {}
+    alleles_pl_collapsed = None
     if modality == 'single-cell' and collapse_to_cells and alleles_pl.height > 0:
         n_rows_before = alleles_pl.height
-        alleles_pl = collapse_umis_to_cells(
+        alleles_pl_collapsed = collapse_umis_to_cells(
             alleles_pl,
             cell_col='cellBC',
             intbc_col='intBC',
@@ -588,7 +590,7 @@ def plug_cassiopeia(
         collapse_metrics = {
             'collapse_enabled': True,
             'rows_before_collapse': n_rows_before,
-            'rows_after_collapse': alleles_pl.height,
+            'rows_after_collapse': alleles_pl_collapsed.height,
             'min_umis_per_cell': min_umis_per_cell,
             'min_umi_agreement': min_umi_agreement,
         }
@@ -596,7 +598,11 @@ def plug_cassiopeia(
         collapse_metrics = {'collapse_enabled': False}
 
     return StepResults(
-            results={"alleles_pl" : alleles_pl, "alleles_pd" : umi_tables},
+            results={
+                "alleles_pl": alleles_pl,                      # Raw per-UMI alleles
+                "alleles_pl_collapsed": alleles_pl_collapsed,  # Collapsed per-cell (single-cell only)
+                "alleles_pd": umi_tables,
+            },
             metrics={"partitions_processed": len(res), "none_mod_skipped": nones, **filter_metrics, **collapse_metrics}
     )
 
@@ -1036,8 +1042,18 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         if self.should_run_step(CassiopeiaStep.PLUG_CASSIOPEIA.value):
             self.xp.logger.info("Running plug_cassiopeia step")
             result = self._plug_cassiopeia()
+
+            # Save raw per-UMI alleles
             self.alleles_pl = result.results['alleles_pl']
             self.alleles_pl.write_parquet(f"{self.workdir}/alleles_pl.parquet")
+            self.xp.logger.io(f"Saved raw per-UMI alleles to {self.workdir}/alleles_pl.parquet")
+
+            # Save collapsed per-cell alleles (single-cell only)
+            self.alleles_pl_collapsed = result.results.get('alleles_pl_collapsed')
+            if self.alleles_pl_collapsed is not None:
+                self.alleles_pl_collapsed.write_parquet(f"{self.workdir}/alleles_pl_collapsed.parquet")
+                self.xp.logger.io(f"Saved collapsed per-cell alleles to {self.workdir}/alleles_pl_collapsed.parquet")
+
             self.xp.logger.io(f"Saving cassiopeia allele tables to {cass_allele_path}")
             self.ldf.sink_parquet(cass_allele_path)
 
