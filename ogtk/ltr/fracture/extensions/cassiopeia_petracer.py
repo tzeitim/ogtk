@@ -12,6 +12,143 @@ from ogtk.utils.log import CustomLogger
 from ogtk.utils.general import fuzzy_match_str
 
 
+def collapse_umis_to_cells(
+    allele_df: pl.DataFrame,
+    cell_col: str = 'cellBC',
+    intbc_col: str = 'intBC',
+    min_umis_per_cell: int = 4,
+    min_umi_agreement: float = 0.5,
+    logger: Optional[CustomLogger] = None,
+) -> pl.DataFrame:
+    """
+    Collapse multiple UMIs per cell into one consensus allele per (cell, intBC).
+
+    For single-cell lineage tracing, each cell may have multiple UMIs for the same
+    integration barcode. This function collapses them to one consensus row per
+    (cell, intBC) using mode-based voting.
+
+    Args:
+        allele_df: DataFrame with cellBC, intBC, r1, r2, ..., readCount columns
+        cell_col: Column name for cell barcode
+        intbc_col: Column name for integration barcode
+        min_umis_per_cell: Minimum UMIs required for valid consensus (default 4).
+                          Groups with fewer UMIs are filtered out.
+        min_umi_agreement: Minimum fraction for consensus (default 0.5).
+                          If the mode has support below this threshold, mark as None (missing).
+        logger: Optional logger for info messages
+
+    Returns:
+        DataFrame with one row per (cell, intBC), adds n_umis column.
+        Cells with fewer than min_umis_per_cell UMIs are excluded.
+    """
+    if allele_df.height == 0:
+        return allele_df.with_columns(pl.lit(0).alias('n_umis'))
+
+    # Identify r columns (allele columns)
+    rcols = allele_df.select(pl.col('^r\\d+$')).columns
+    if not rcols:
+        if logger:
+            logger.warning("No r columns found in allele_df, returning as-is with n_umis=1")
+        return allele_df.with_columns(pl.lit(1).alias('n_umis'))
+
+    # Columns to preserve (take first value per group)
+    preserve_cols = [c for c in allele_df.columns if c not in rcols + [cell_col, intbc_col]]
+
+    # Add row index for tracking
+    df = allele_df.with_row_index('_row_idx')
+
+    # Step 1: Get group sizes and filter by min_umis_per_cell
+    group_sizes = (
+        df.group_by([cell_col, intbc_col])
+        .agg(pl.len().alias('n_umis'))
+    )
+
+    n_groups_before = group_sizes.height
+    valid_groups = group_sizes.filter(pl.col('n_umis') >= min_umis_per_cell)
+    n_groups_after = valid_groups.height
+
+    if logger and n_groups_before != n_groups_after:
+        logger.info(f"UMI collapse: filtered {n_groups_before - n_groups_after} (cell, intBC) groups "
+                   f"with < {min_umis_per_cell} UMIs ({n_groups_after} remaining)")
+
+    if valid_groups.height == 0:
+        # Return empty DataFrame with expected columns
+        empty_cols = [cell_col, intbc_col, 'n_umis'] + rcols + preserve_cols
+        return pl.DataFrame(schema={c: allele_df.schema.get(c, pl.Utf8) for c in empty_cols if c in allele_df.columns or c == 'n_umis'})
+
+    # Filter to only valid groups
+    df = df.join(valid_groups.select([cell_col, intbc_col]), on=[cell_col, intbc_col], how='semi')
+
+    # Step 2: For each r column, compute mode and support using native Polars
+    # Use unpivot -> group -> compute -> pivot approach for efficiency
+
+    # Unpivot r columns to long format
+    id_cols = [cell_col, intbc_col, '_row_idx'] + preserve_cols
+    unpivoted = df.unpivot(
+        on=rcols,
+        index=id_cols,
+        variable_name='_rcol',
+        value_name='_allele'
+    )
+
+    # For each (cell, intBC, rcol), compute mode and support
+    consensus = (
+        unpivoted
+        .group_by([cell_col, intbc_col, '_rcol'])
+        .agg([
+            pl.len().alias('_n_total'),
+            # Get value counts and extract mode info
+            pl.col('_allele').value_counts(sort=True).first().alias('_mode_struct'),
+        ])
+        .with_columns([
+            # Extract mode value
+            pl.col('_mode_struct').struct.field('_allele').alias('_mode_value'),
+            # Extract mode count
+            pl.col('_mode_struct').struct.field('count').alias('_mode_count'),
+        ])
+        .with_columns(
+            # Calculate support fraction
+            (pl.col('_mode_count') / pl.col('_n_total')).alias('_support')
+        )
+        .with_columns(
+            # Apply threshold: if support < min_umi_agreement, set to None
+            pl.when(pl.col('_support') >= min_umi_agreement)
+            .then(pl.col('_mode_value'))
+            .otherwise(pl.lit(None))
+            .alias('_consensus_value')
+        )
+        .select([cell_col, intbc_col, '_rcol', '_consensus_value'])
+    )
+
+    # Pivot back to wide format
+    result = consensus.pivot(
+        on='_rcol',
+        index=[cell_col, intbc_col],
+        values='_consensus_value'
+    )
+
+    # Add n_umis column
+    result = result.join(valid_groups, on=[cell_col, intbc_col], how='left')
+
+    # Add preserved columns (take first value per group)
+    if preserve_cols:
+        preserved = (
+            df.group_by([cell_col, intbc_col])
+            .agg([pl.col(c).first().alias(c) for c in preserve_cols])
+        )
+        result = result.join(preserved, on=[cell_col, intbc_col], how='left')
+
+    # Reorder columns to match expected output
+    output_cols = [cell_col, intbc_col, 'n_umis'] + rcols + preserve_cols
+    output_cols = [c for c in output_cols if c in result.columns]
+    result = result.select(output_cols)
+
+    if logger:
+        logger.info(f"UMI collapse: {allele_df.height} rows -> {result.height} (cell, intBC) pairs")
+
+    return result
+
+
 def flag_spanning_deletions(pl_allele: pl.DataFrame, rcols: list[str], mode: str = 'unedited') -> pl.DataFrame:
     """Handle alleles spanning multiple cutsites.
 
@@ -269,6 +406,10 @@ def plug_cassiopeia(
         # Modality parameters
         modality: str = 'single-molecule',
         cbc_len: int = 16,
+        # Single-cell collapse parameters
+        collapse_to_cells: bool = True,
+        min_umis_per_cell: int = 4,
+        min_umi_agreement: float = 0.5,
         ) -> StepResults:
     """
     readName - A unique identifier for each row/sequence
@@ -429,9 +570,34 @@ def plug_cassiopeia(
                 pl.DataFrame(allele_table).with_columns(mod=pl.lit(mod), mols=allele_table.shape[0])
                 )
 
+    # Concatenate all partition results
+    alleles_pl = pl.concat(res) if res else pl.DataFrame()
+
+    # For single-cell: collapse UMIs to one allele per (cell, intBC)
+    collapse_metrics = {}
+    if modality == 'single-cell' and collapse_to_cells and alleles_pl.height > 0:
+        n_rows_before = alleles_pl.height
+        alleles_pl = collapse_umis_to_cells(
+            alleles_pl,
+            cell_col='cellBC',
+            intbc_col='intBC',
+            min_umis_per_cell=min_umis_per_cell,
+            min_umi_agreement=min_umi_agreement,
+            logger=logger,
+        )
+        collapse_metrics = {
+            'collapse_enabled': True,
+            'rows_before_collapse': n_rows_before,
+            'rows_after_collapse': alleles_pl.height,
+            'min_umis_per_cell': min_umis_per_cell,
+            'min_umi_agreement': min_umi_agreement,
+        }
+    else:
+        collapse_metrics = {'collapse_enabled': False}
+
     return StepResults(
-            results={"alleles_pl" : pl.concat(res) if res else pl.DataFrame(), "alleles_pd" : umi_tables},
-            metrics={"partitions_processed": len(res), "none_mod_skipped": nones, **filter_metrics}
+            results={"alleles_pl" : alleles_pl, "alleles_pd" : umi_tables},
+            metrics={"partitions_processed": len(res), "none_mod_skipped": nones, **filter_metrics, **collapse_metrics}
     )
 
 def save_ref_to_fasta(refs: pl.DataFrame, out_dir: str|Path = '.', field: str = 'mod') -> None:
@@ -759,6 +925,12 @@ class CassiopeiaConfig(ExtensionConfig):
     min_molecules_per_group: int = 10           # Absolute minimum UMIs per (sbc, intBC) group
     min_proportion_of_sample: float = 0.02      # % of sample total (e.g., 0.02 = 2%)
     min_ratio_to_max: float = 0.1               # % of largest group per sbc (e.g., 0.1 = 10%)
+
+    # Single-cell collapse parameters
+    # For single-cell lineage tracing, collapse multiple UMIs per cell to one allele per (cell, intBC)
+    collapse_to_cells: bool = True              # Enable collapse for single-cell modality
+    min_umis_per_cell: int = 4                  # Minimum UMIs for valid consensus (cells with fewer are filtered)
+    min_umi_agreement: float = 0.5              # Min fraction for consensus (below -> missing/None)
 
     # Runtime fields (populated during processing, not from config file)
     ann_intbc_mod: Optional[pl.DataFrame] = None  # intBC → mod mapping from classify_cassettes
