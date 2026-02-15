@@ -403,6 +403,7 @@ def plug_cassiopeia(
         min_molecules_per_group: int = 10,
         min_proportion_of_sample: float = 0.02,
         min_ratio_to_max: float = 0.1,
+        top_n_cells: Optional[int] = None,
         # Modality parameters
         modality: str = 'single-molecule',
         cbc_len: int = 16,
@@ -489,6 +490,24 @@ def plug_cassiopeia(
         cass_ldf = filter_by_whitelist(cass_ldf, whitelist, modality=modality, cbc_len=cbc_len, logger=logger)
         filter_metrics['whitelist_source'] = 'generated'
         filter_metrics['valid_intbc_count'] = whitelist.height
+
+    # Cell-level filter: keep only top N cells by total UMI count (single-cell only)
+    if top_n_cells is not None and modality == 'single-cell':
+        top_cells = (
+            cass_ldf.group_by('cbc')
+            .len()
+            .sort('len', descending=True)
+            .head(top_n_cells)
+            .select('cbc')
+        )
+        n_before = cass_ldf.select(pl.col('cbc').n_unique()).collect().item()
+        cass_ldf = cass_ldf.join(top_cells.lazy(), on='cbc', how='semi')
+        n_after = cass_ldf.select(pl.col('cbc').n_unique()).collect().item()
+        if logger:
+            logger.info(f"top_n_cells filter: {n_before} -> {n_after} cells (top {top_n_cells})")
+        filter_metrics['top_n_cells'] = top_n_cells
+        filter_metrics['cells_before_topn'] = n_before
+        filter_metrics['cells_after_topn'] = n_after
 
     # === END PRE-FILTERING ===
 
@@ -931,6 +950,7 @@ class CassiopeiaConfig(ExtensionConfig):
     min_molecules_per_group: int = 10           # Absolute minimum UMIs per (sbc, intBC) group
     min_proportion_of_sample: float = 0.02      # % of sample total (e.g., 0.02 = 2%)
     min_ratio_to_max: float = 0.1               # % of largest group per sbc (e.g., 0.1 = 10%)
+    top_n_cells: Optional[int] = None            # Keep top N cells by total UMI count (single-cell only)
 
     # Single-cell collapse parameters
     # For single-cell lineage tracing, collapse multiple UMIs per cell to one allele per (cell, intBC)
