@@ -20,9 +20,9 @@ def parse_args():
 
     parser.add_argument(
         "--steps",
-        nargs="+",
+        nargs="*",
         choices=PIPELINE_STEP_NAMES,
-        help="Specific steps to run (overrides config file)"
+        help="Specific steps to run (overrides config file). Use --steps with no args to skip main pipeline and run only extensions."
         )
 
     parser.add_argument(
@@ -323,7 +323,7 @@ def main():
         elif args.all_samples:
             logger.info("Processing specified steps for all samples")
             # Use steps from command line if provided, otherwise use config
-            if args.steps:
+            if args.steps is not None:
                 xp.steps = args.steps
 
             success = True
@@ -386,8 +386,8 @@ def main():
             if "test" not in [step.lower() for step in xp.steps]:
                 xp.steps.append("test")
 
-        # Override steps if specified in command line
-        if args.steps:
+        # Override steps if specified in command line (including empty list to skip main pipeline)
+        if args.steps is not None:
             xp.steps = args.steps
 
         success = pipeline.run()
