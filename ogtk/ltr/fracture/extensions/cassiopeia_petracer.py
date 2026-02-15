@@ -509,6 +509,19 @@ def plug_cassiopeia(
         filter_metrics['cells_before_topn'] = n_before
         filter_metrics['cells_after_topn'] = n_after
 
+    # Filter intBCs with too few UMIs within each mod (across all cells)
+    # Always applied, including when using a whitelist
+    if min_molecules_per_group > 0:
+        n_before = cass_ldf.select(pl.len()).collect().item()
+        cass_ldf = cass_ldf.filter(
+            pl.len().over(['intBC', 'mod']) >= min_molecules_per_group
+        )
+        n_after = cass_ldf.select(pl.len()).collect().item()
+        if logger:
+            logger.info(f"min_molecules_per_group filter ({min_molecules_per_group}): {n_before} -> {n_after} rows")
+        filter_metrics['rows_before_partition_filter'] = n_before
+        filter_metrics['rows_after_partition_filter'] = n_after
+
     # === END PRE-FILTERING ===
 
     res = []
@@ -517,12 +530,16 @@ def plug_cassiopeia(
 
     # Determine partition columns based on modality
     if modality == 'single-cell':
-        partition_cols = ['intBC', 'mod', 'cbc']
+        partition_cols = ['intBC', 'mod']
     else:
         partition_cols = ['intBC', 'mod', 'sbc']
 
     for partition_key, queries in cass_ldf.collect().partition_by(*partition_cols, as_dict=True).items():
-        intBC, mod, group_id = partition_key  # group_id is cbc for single-cell, sbc for single-molecule
+        if modality == 'single-cell':
+            intBC, mod = partition_key
+            group_id = None
+        else:
+            intBC, mod, group_id = partition_key
         if mod is None:
             nones+=1
         else:
@@ -576,10 +593,7 @@ def plug_cassiopeia(
             # include colums dropped by cass?
             allele_table['intBC'] = intBC
             allele_table['mod'] = mod
-            # group_id is cbc for single-cell, sbc for single-molecule
-            if modality == 'single-cell':
-                allele_table['cbc'] = group_id
-            else:
+            if modality != 'single-cell':
                 allele_table['sbc'] = group_id
 
             umi_tables.append(umi_table.copy())
