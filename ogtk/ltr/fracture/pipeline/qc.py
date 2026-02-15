@@ -354,27 +354,51 @@ def checkhealth(
     return result
 
 
-def tabulate_health(df: pl.DataFrame, group_col: Optional[str] = None) -> pl.DataFrame:
+def tabulate_health(
+    df: pl.DataFrame,
+    group_col: Optional[str] = None,
+    n_examples: int = 0,
+    example_col: str = 'masked_seq',
+) -> pl.DataFrame:
     """
-    Tabulate feature set counts, optionally by group.
+    Tabulate feature set counts, optionally by group, with example reads.
 
     Args:
         df: DataFrame with 'feature_set' column from checkhealth()
         group_col: optional column to group by (e.g., 'fc')
+        n_examples: number of example reads to include per feature_set (default 0 = none)
+        example_col: column to use for examples (default 'masked_seq', can also use 'sequence')
 
     Returns:
-        DataFrame with counts per feature_set (and per group if specified)
+        DataFrame with counts per feature_set (and per group if specified).
+        If n_examples > 0, includes 'examples' column with sample reads.
     """
     group_cols = ['feature_set']
     if group_col:
         group_cols = [group_col, 'feature_set']
 
-    return (
+    agg_exprs = [pl.len().alias('count')]
+
+    # Add example reads if requested
+    if n_examples > 0 and example_col in df.columns:
+        agg_exprs.append(
+            pl.col(example_col).head(n_examples).alias('examples')
+        )
+
+    result = (
         df
         .group_by(group_cols)
-        .agg(pl.len().alias('count'))
-        .sort(group_cols[0], 'count', descending=[False, True])
+        .agg(agg_exprs)
+        .sort('count', descending=True)
     )
+
+    # Convert examples list to semicolon-separated string for CSV compatibility
+    if n_examples > 0 and 'examples' in result.columns:
+        result = result.with_columns(
+            pl.col('examples').list.join(' | ').alias('examples')
+        )
+
+    return result
 
 
 def plot_upset(df: pl.DataFrame, min_subset_size: int = 1, group_col: Optional[str] = None, show_percentages: bool = False):

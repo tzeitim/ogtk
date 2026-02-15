@@ -304,7 +304,10 @@ class PlotDB():
         out_dir = Path(xp.sample_figs)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        health_table = qc.tabulate_health(health_df)
+        # Get number of examples from config (default 10)
+        # Use original sequence (not masked) for examples
+        n_examples = checkhealth_cfg.get('n_examples', 10)
+        health_table = qc.tabulate_health(health_df, n_examples=n_examples, example_col='sequence')
         health_table.write_csv(str(out_dir / f'{xp.target_sample}_checkhealth.csv'))
         xp.logger.info(f"Saved checkhealth table to {out_dir / f'{xp.target_sample}_checkhealth.csv'}")
 
