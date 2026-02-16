@@ -12,6 +12,143 @@ from ogtk.utils.log import CustomLogger
 from ogtk.utils.general import fuzzy_match_str
 
 
+def collapse_umis_to_cells(
+    allele_df: pl.DataFrame,
+    cell_col: str = 'cellBC',
+    intbc_col: str = 'intBC',
+    min_umis_per_cell: int = 4,
+    min_umi_agreement: float = 0.5,
+    logger: Optional[CustomLogger] = None,
+) -> pl.DataFrame:
+    """
+    Collapse multiple UMIs per cell into one consensus allele per (cell, intBC).
+
+    For single-cell lineage tracing, each cell may have multiple UMIs for the same
+    integration barcode. This function collapses them to one consensus row per
+    (cell, intBC) using mode-based voting.
+
+    Args:
+        allele_df: DataFrame with cellBC, intBC, r1, r2, ..., readCount columns
+        cell_col: Column name for cell barcode
+        intbc_col: Column name for integration barcode
+        min_umis_per_cell: Minimum UMIs required for valid consensus (default 4).
+                          Groups with fewer UMIs are filtered out.
+        min_umi_agreement: Minimum fraction for consensus (default 0.5).
+                          If the mode has support below this threshold, mark as None (missing).
+        logger: Optional logger for info messages
+
+    Returns:
+        DataFrame with one row per (cell, intBC), adds n_umis column.
+        Cells with fewer than min_umis_per_cell UMIs are excluded.
+    """
+    if allele_df.height == 0:
+        return allele_df.with_columns(pl.lit(0).alias('n_umis'))
+
+    # Identify r columns (allele columns)
+    rcols = allele_df.select(pl.col('^r\\d+$')).columns
+    if not rcols:
+        if logger:
+            logger.warning("No r columns found in allele_df, returning as-is with n_umis=1")
+        return allele_df.with_columns(pl.lit(1).alias('n_umis'))
+
+    # Columns to preserve (take first value per group)
+    preserve_cols = [c for c in allele_df.columns if c not in rcols + [cell_col, intbc_col]]
+
+    # Add row index for tracking
+    df = allele_df.with_row_index('_row_idx')
+
+    # Step 1: Get group sizes and filter by min_umis_per_cell
+    group_sizes = (
+        df.group_by([cell_col, intbc_col])
+        .agg(pl.len().alias('n_umis'))
+    )
+
+    n_groups_before = group_sizes.height
+    valid_groups = group_sizes.filter(pl.col('n_umis') >= min_umis_per_cell)
+    n_groups_after = valid_groups.height
+
+    if logger and n_groups_before != n_groups_after:
+        logger.info(f"UMI collapse: filtered {n_groups_before - n_groups_after} (cell, intBC) groups "
+                   f"with < {min_umis_per_cell} UMIs ({n_groups_after} remaining)")
+
+    if valid_groups.height == 0:
+        # Return empty DataFrame with expected columns
+        empty_cols = [cell_col, intbc_col, 'n_umis'] + rcols + preserve_cols
+        return pl.DataFrame(schema={c: allele_df.schema.get(c, pl.Utf8) for c in empty_cols if c in allele_df.columns or c == 'n_umis'})
+
+    # Filter to only valid groups
+    df = df.join(valid_groups.select([cell_col, intbc_col]), on=[cell_col, intbc_col], how='semi')
+
+    # Step 2: For each r column, compute mode and support using native Polars
+    # Use unpivot -> group -> compute -> pivot approach for efficiency
+
+    # Unpivot r columns to long format
+    id_cols = [cell_col, intbc_col, '_row_idx'] + preserve_cols
+    unpivoted = df.unpivot(
+        on=rcols,
+        index=id_cols,
+        variable_name='_rcol',
+        value_name='_allele'
+    )
+
+    # For each (cell, intBC, rcol), compute mode and support
+    consensus = (
+        unpivoted
+        .group_by([cell_col, intbc_col, '_rcol'])
+        .agg([
+            pl.len().alias('_n_total'),
+            # Get value counts and extract mode info
+            pl.col('_allele').value_counts(sort=True).first().alias('_mode_struct'),
+        ])
+        .with_columns([
+            # Extract mode value
+            pl.col('_mode_struct').struct.field('_allele').alias('_mode_value'),
+            # Extract mode count
+            pl.col('_mode_struct').struct.field('count').alias('_mode_count'),
+        ])
+        .with_columns(
+            # Calculate support fraction
+            (pl.col('_mode_count') / pl.col('_n_total')).alias('_support')
+        )
+        .with_columns(
+            # Apply threshold: if support < min_umi_agreement, set to None
+            pl.when(pl.col('_support') >= min_umi_agreement)
+            .then(pl.col('_mode_value'))
+            .otherwise(pl.lit(None))
+            .alias('_consensus_value')
+        )
+        .select([cell_col, intbc_col, '_rcol', '_consensus_value'])
+    )
+
+    # Pivot back to wide format
+    result = consensus.pivot(
+        on='_rcol',
+        index=[cell_col, intbc_col],
+        values='_consensus_value'
+    )
+
+    # Add n_umis column
+    result = result.join(valid_groups, on=[cell_col, intbc_col], how='left')
+
+    # Add preserved columns (take first value per group)
+    if preserve_cols:
+        preserved = (
+            df.group_by([cell_col, intbc_col])
+            .agg([pl.col(c).first().alias(c) for c in preserve_cols])
+        )
+        result = result.join(preserved, on=[cell_col, intbc_col], how='left')
+
+    # Reorder columns to match expected output
+    output_cols = [cell_col, intbc_col, 'n_umis'] + rcols + preserve_cols
+    output_cols = [c for c in output_cols if c in result.columns]
+    result = result.select(output_cols)
+
+    if logger:
+        logger.info(f"UMI collapse: {allele_df.height} rows -> {result.height} (cell, intBC) pairs")
+
+    return result
+
+
 def flag_spanning_deletions(pl_allele: pl.DataFrame, rcols: list[str], mode: str = 'unedited') -> pl.DataFrame:
     """Handle alleles spanning multiple cutsites.
 
@@ -98,10 +235,15 @@ def generate_intbc_whitelist(
     min_umis: int = 100,
     min_proportion_of_sample: float = 0.05,
     min_ratio_to_max: float = 0.1,
+    modality: str = 'single-molecule',
+    cbc_len: int = 16,
     logger: Optional[CustomLogger] = None,
 ) -> pl.DataFrame:
     """
-    Generate valid intBC whitelist using per-sbc adaptive thresholds.
+    Generate valid intBC whitelist using per-sample adaptive thresholds.
+
+    For single-molecule: groups by sbc (sample barcode)
+    For single-cell: groups by cbc (cell barcode, extracted from compound umi)
 
     Keeps intBCs that meet BOTH:
     - umis >= max(min_umis, sample_total * min_proportion_of_sample)
@@ -112,21 +254,40 @@ def generate_intbc_whitelist(
         min_umis: Absolute minimum UMI count threshold
         min_proportion_of_sample: Minimum proportion of sample total UMIs (e.g., 0.05 = 5%)
         min_ratio_to_max: Minimum ratio to the largest intBC per sbc (e.g., 0.1 = 10%)
+        modality: 'single-cell' or 'single-molecule'
+        cbc_len: Cell barcode length for single-cell (default 16 for 10x)
         logger: Optional logger for info messages
 
     Returns:
-        DataFrame with columns: sbc, intBC, umis, reads, ratio_to_max
+        DataFrame with columns: group_id, intBC, umis, reads, ratio_to_max
+        (group_id is sbc for single-molecule, cbc for single-cell)
     """
+    # Determine grouping column based on modality
+    if modality == 'single-cell':
+        # Extract cbc from compound umi (first cbc_len characters)
+        work_ldf = ldf.with_columns(
+            pl.col('umi').str.slice(0, cbc_len).alias('cbc'),
+            pl.col('umi').str.slice(cbc_len).alias('umi_only'),
+        )
+        group_col = 'cbc'
+        umi_col = 'umi_only'
+        group_label = 'cbcs'
+    else:
+        work_ldf = ldf
+        group_col = 'sbc'
+        umi_col = 'umi'
+        group_label = 'sbcs'
+
     result = (
-        ldf
-        .select('umi', 'sbc', 'intBC')
-        .group_by('sbc', 'intBC').agg(
-            pl.col('umi').n_unique().alias('umis'),
+        work_ldf
+        .select(umi_col, group_col, 'intBC')
+        .group_by(group_col, 'intBC').agg(
+            pl.col(umi_col).n_unique().alias('umis'),
             pl.len().alias('reads')
         )
         .with_columns(
-            sample_total_umis=pl.col('umis').sum().over('sbc'),
-            max_umis=pl.col('umis').max().over('sbc'),
+            sample_total_umis=pl.col('umis').sum().over(group_col),
+            max_umis=pl.col('umis').max().over(group_col),
         )
         .with_columns(
             min_umis_threshold=pl.max_horizontal(
@@ -139,15 +300,15 @@ def generate_intbc_whitelist(
             (pl.col('umis') >= pl.col('min_umis_threshold')) &
             (pl.col('ratio_to_max') >= min_ratio_to_max)
         )
-        .select('sbc', 'intBC', 'umis', 'reads', 'ratio_to_max')
-        .sort(['sbc', 'umis'], descending=[False, True])
+        .select(pl.col(group_col).alias('group_id'), 'intBC', 'umis', 'reads', 'ratio_to_max')
+        .sort(['group_id', 'umis'], descending=[False, True])
         .collect()
     )
 
     if logger:
-        n_sbcs = result['sbc'].n_unique()
+        n_groups = result['group_id'].n_unique()
         n_intbcs = result.height
-        logger.info(f"Generated whitelist: {n_intbcs} valid intBCs across {n_sbcs} sbcs")
+        logger.info(f"Generated whitelist: {n_intbcs} valid intBCs across {n_groups} {group_label}")
 
     return result
 
@@ -155,40 +316,70 @@ def generate_intbc_whitelist(
 def filter_by_whitelist(
     ldf: pl.LazyFrame,
     whitelist: pl.DataFrame,
+    modality: str = 'single-molecule',
+    cbc_len: int = 16,
     logger: Optional[CustomLogger] = None,
 ) -> pl.LazyFrame:
     """
-    Filter LazyFrame to only include (sbc, intBC) pairs in whitelist.
+    Filter LazyFrame to only include (group, intBC) pairs in whitelist.
 
-    If whitelist has 'sbc' column, filters by (sbc, intBC) pair.
-    If whitelist only has 'intBC' column, filters by intBC globally.
+    For single-molecule: filters by (sbc, intBC) pair
+    For single-cell: filters by (cbc, intBC) pair where cbc is extracted from umi
 
     Args:
-        ldf: LazyFrame with 'sbc' and 'intBC' columns
-        whitelist: DataFrame with valid intBC values (and optionally sbc)
+        ldf: LazyFrame with 'umi', 'sbc', and 'intBC' columns
+        whitelist: DataFrame with 'group_id' and 'intBC' columns (or legacy 'sbc')
+        modality: 'single-cell' or 'single-molecule'
+        cbc_len: Cell barcode length for single-cell (default 16 for 10x)
         logger: Optional logger for info messages
 
     Returns:
         Filtered LazyFrame
     """
-    if 'sbc' in whitelist.columns:
-        # Per-sbc whitelist
-        n_before = ldf.select(pl.struct('sbc', 'intBC').n_unique()).collect().item()
-        filtered = ldf.join(
-            whitelist.select('sbc', 'intBC').lazy(),
-            on=['sbc', 'intBC'],
-            how='semi'
-        )
-        n_after = filtered.select(pl.struct('sbc', 'intBC').n_unique()).collect().item()
+    # Handle both new format (group_id) and legacy format (sbc)
+    if 'group_id' in whitelist.columns:
+        group_col_whitelist = 'group_id'
+    elif 'sbc' in whitelist.columns:
+        group_col_whitelist = 'sbc'
     else:
-        # Global intBC whitelist
+        # Global intBC whitelist (no grouping)
         valid_intbcs = set(whitelist['intBC'].to_list())
         n_before = ldf.select(pl.col('intBC').n_unique()).collect().item()
         filtered = ldf.filter(pl.col('intBC').is_in(valid_intbcs))
         n_after = filtered.select(pl.col('intBC').n_unique()).collect().item()
+        if logger:
+            logger.info(f"Whitelist filter: {n_before} -> {n_after} intBCs (global)")
+        return filtered
+
+    # Determine grouping column in ldf based on modality
+    if modality == 'single-cell':
+        # Extract cbc from compound umi for joining
+        work_ldf = ldf.with_columns(
+            pl.col('umi').str.slice(0, cbc_len).alias('_filter_group')
+        )
+        group_label = 'cbc'
+    else:
+        work_ldf = ldf.with_columns(
+            pl.col('sbc').alias('_filter_group')
+        )
+        group_label = 'sbc'
+
+    # Prepare whitelist for join
+    whitelist_for_join = whitelist.select(
+        pl.col(group_col_whitelist).alias('_filter_group'),
+        'intBC'
+    ).lazy()
+
+    n_before = work_ldf.select(pl.struct('_filter_group', 'intBC').n_unique()).collect().item()
+    filtered = work_ldf.join(
+        whitelist_for_join,
+        on=['_filter_group', 'intBC'],
+        how='semi'
+    ).drop('_filter_group')
+    n_after = filtered.select(pl.struct(group_label if modality == 'single-cell' else 'sbc', 'intBC').n_unique()).collect().item() if modality != 'single-cell' else filtered.with_columns(pl.col('umi').str.slice(0, cbc_len).alias('cbc')).select(pl.struct('cbc', 'intBC').n_unique()).collect().item()
 
     if logger:
-        logger.info(f"Whitelist filter: {n_before} -> {n_after} (sbc, intBC) pairs")
+        logger.info(f"Whitelist filter: {n_before} -> {n_after} ({group_label}, intBC) pairs")
 
     return filtered
 
@@ -212,37 +403,68 @@ def plug_cassiopeia(
         min_molecules_per_group: int = 10,
         min_proportion_of_sample: float = 0.02,
         min_ratio_to_max: float = 0.1,
+        top_n_cells: Optional[int] = None,
+        # Modality parameters
+        modality: str = 'single-molecule',
+        cbc_len: int = 16,
+        # Single-cell collapse parameters
+        collapse_to_cells: bool = True,
+        min_umis_per_cell: int = 4,
+        min_umi_agreement: float = 0.5,
         ) -> StepResults:
-    """ 
+    """
     readName - A unique identifier for each row/sequence
-    cellBC - The cell barcode
+    cellBC - The cell barcode (cbc for single-cell, sbc for single-molecule)
     UMI - The UMI (Unique Molecular Identifier)
     readCount - The number of reads for this sequence
     seq - The actual sequence to be aligned
 
+    For single-cell data:
+        - cellBC is extracted from compound umi (first cbc_len chars)
+        - UMI is the remaining part of compound umi (umi_only)
+        - Whitelist grouping uses cbc instead of sbc
     """
     import cassiopeia as cas
 
     allele_params = {
         'barcode_interval': barcode_interval,
         'cutsite_locations': cutsite_locations,
-        'cutsite_width': cutsite_width, 
+        'cutsite_width': cutsite_width,
         'context': context,
         'context_size': context_size,
     }
 
-    cass_ldf = (
+    # Build cassiopeia columns based on modality
+    if modality == 'single-cell':
+        # For single-cell: extract cbc and umi_only from compound umi
+        cass_ldf = (
             ldf.with_columns(
-            readName=pl.col('umi'),
-            cellBC=pl.col('umi'),
-            UMI=pl.col('umi'),
-            readCount=pl.col('reads'),
-            seq=pl.col('intBC')+pl.col('contig'),
+                pl.col('umi').str.slice(0, cbc_len).alias('cbc'),
+                pl.col('umi').str.slice(cbc_len).alias('umi_only'),
+            )
+            .with_columns(
+                readName=pl.col('umi'),
+                cellBC=pl.col('cbc'),           # Use actual cell barcode
+                UMI=pl.col('umi_only'),          # Use actual UMI (not compound)
+                readCount=pl.col('reads'),
+                seq=pl.col('intBC')+pl.col('contig'),
+            )
+            .select('readName', 'cellBC', 'UMI', 'readCount', 'seq', 'intBC', 'sbc', 'cbc', 'umi')
+            .join(ann_intbc_mod.lazy(), left_on='intBC', right_on='intBC', how='inner')
+        )
+    else:
+        # For single-molecule: use compound umi as before
+        cass_ldf = (
+            ldf.with_columns(
+                readName=pl.col('umi'),
+                cellBC=pl.col('umi'),
+                UMI=pl.col('umi'),
+                readCount=pl.col('reads'),
+                seq=pl.col('intBC')+pl.col('contig'),
             )
             .select('readName', 'cellBC', 'UMI', 'readCount', 'seq', 'intBC', 'sbc')
-            #TODO: change `how`?
             .join(ann_intbc_mod.lazy(), left_on='intBC', right_on='intBC', how='inner')
-    )
+        )
 
     # === PRE-FILTERING ===
     filter_metrics = {}
@@ -250,7 +472,7 @@ def plug_cassiopeia(
     # Option A: Load pre-generated whitelist
     if intbc_whitelist_path is not None:
         whitelist = read_file(intbc_whitelist_path)
-        cass_ldf = filter_by_whitelist(cass_ldf, whitelist, logger)
+        cass_ldf = filter_by_whitelist(cass_ldf, whitelist, modality=modality, cbc_len=cbc_len, logger=logger)
         filter_metrics['whitelist_source'] = 'file'
         filter_metrics['whitelist_path'] = str(intbc_whitelist_path)
 
@@ -261,11 +483,44 @@ def plug_cassiopeia(
             min_umis=min_molecules_per_group,
             min_proportion_of_sample=min_proportion_of_sample,
             min_ratio_to_max=min_ratio_to_max,
+            modality=modality,
+            cbc_len=cbc_len,
             logger=logger,
         )
-        cass_ldf = filter_by_whitelist(cass_ldf, whitelist, logger)
+        cass_ldf = filter_by_whitelist(cass_ldf, whitelist, modality=modality, cbc_len=cbc_len, logger=logger)
         filter_metrics['whitelist_source'] = 'generated'
         filter_metrics['valid_intbc_count'] = whitelist.height
+
+    # Cell-level filter: keep only top N cells by total UMI count (single-cell only)
+    if top_n_cells is not None and modality == 'single-cell':
+        top_cells = (
+            cass_ldf.group_by('cbc')
+            .len()
+            .sort('len', descending=True)
+            .head(top_n_cells)
+            .select('cbc')
+        )
+        n_before = cass_ldf.select(pl.col('cbc').n_unique()).collect().item()
+        cass_ldf = cass_ldf.join(top_cells.lazy(), on='cbc', how='semi')
+        n_after = cass_ldf.select(pl.col('cbc').n_unique()).collect().item()
+        if logger:
+            logger.info(f"top_n_cells filter: {n_before} -> {n_after} cells (top {top_n_cells})")
+        filter_metrics['top_n_cells'] = top_n_cells
+        filter_metrics['cells_before_topn'] = n_before
+        filter_metrics['cells_after_topn'] = n_after
+
+    # Filter intBCs with too few UMIs within each mod (across all cells)
+    # Always applied, including when using a whitelist
+    if min_molecules_per_group > 0:
+        n_before = cass_ldf.select(pl.len()).collect().item()
+        cass_ldf = cass_ldf.filter(
+            pl.len().over(['intBC', 'mod']) >= min_molecules_per_group
+        )
+        n_after = cass_ldf.select(pl.len()).collect().item()
+        if logger:
+            logger.info(f"min_molecules_per_group filter ({min_molecules_per_group}): {n_before} -> {n_after} rows")
+        filter_metrics['rows_before_partition_filter'] = n_before
+        filter_metrics['rows_after_partition_filter'] = n_after
 
     # === END PRE-FILTERING ===
 
@@ -273,8 +528,18 @@ def plug_cassiopeia(
     umi_tables = []
     nones = 0
 
+    # Determine partition columns based on modality
+    if modality == 'single-cell':
+        partition_cols = ['intBC', 'mod']
+    else:
+        partition_cols = ['intBC', 'mod', 'sbc']
 
-    for (intBC, mod, sbc), queries in cass_ldf.collect().partition_by('intBC', 'mod', 'sbc', as_dict=True).items():
+    for partition_key, queries in cass_ldf.collect().partition_by(*partition_cols, as_dict=True).items():
+        if modality == 'single-cell':
+            intBC, mod = partition_key
+            group_id = None
+        else:
+            intBC, mod, group_id = partition_key
         if mod is None:
             nones+=1
         else:
@@ -328,7 +593,8 @@ def plug_cassiopeia(
             # include colums dropped by cass?
             allele_table['intBC'] = intBC
             allele_table['mod'] = mod
-            allele_table['sbc'] = sbc
+            if modality != 'single-cell':
+                allele_table['sbc'] = group_id
 
             umi_tables.append(umi_table.copy())
             #self.xp.logger.info(f"found {umi_table['intBC'].n_unique()} integrations for {mod}")
@@ -337,9 +603,40 @@ def plug_cassiopeia(
                 pl.DataFrame(allele_table).with_columns(mod=pl.lit(mod), mols=allele_table.shape[0])
                 )
 
+    # Concatenate all partition results
+    alleles_pl = pl.concat(res) if res else pl.DataFrame()
+
+    # For single-cell: collapse UMIs to one allele per (cell, intBC)
+    # Keep both raw (per-UMI) and collapsed (per-cell) versions
+    collapse_metrics = {}
+    alleles_pl_collapsed = None
+    if modality == 'single-cell' and collapse_to_cells and alleles_pl.height > 0:
+        n_rows_before = alleles_pl.height
+        alleles_pl_collapsed = collapse_umis_to_cells(
+            alleles_pl,
+            cell_col='cellBC',
+            intbc_col='intBC',
+            min_umis_per_cell=min_umis_per_cell,
+            min_umi_agreement=min_umi_agreement,
+            logger=logger,
+        )
+        collapse_metrics = {
+            'collapse_enabled': True,
+            'rows_before_collapse': n_rows_before,
+            'rows_after_collapse': alleles_pl_collapsed.height,
+            'min_umis_per_cell': min_umis_per_cell,
+            'min_umi_agreement': min_umi_agreement,
+        }
+    else:
+        collapse_metrics = {'collapse_enabled': False}
+
     return StepResults(
-            results={"alleles_pl" : pl.concat(res) if res else pl.DataFrame(), "alleles_pd" : umi_tables},
-            metrics={"partitions_processed": len(res), "none_mod_skipped": nones, **filter_metrics}
+            results={
+                "alleles_pl": alleles_pl,                      # Raw per-UMI alleles
+                "alleles_pl_collapsed": alleles_pl_collapsed,  # Collapsed per-cell (single-cell only)
+                "alleles_pd": umi_tables,
+            },
+            metrics={"partitions_processed": len(res), "none_mod_skipped": nones, **filter_metrics, **collapse_metrics}
     )
 
 def save_ref_to_fasta(refs: pl.DataFrame, out_dir: str|Path = '.', field: str = 'mod') -> None:
@@ -667,6 +964,13 @@ class CassiopeiaConfig(ExtensionConfig):
     min_molecules_per_group: int = 10           # Absolute minimum UMIs per (sbc, intBC) group
     min_proportion_of_sample: float = 0.02      # % of sample total (e.g., 0.02 = 2%)
     min_ratio_to_max: float = 0.1               # % of largest group per sbc (e.g., 0.1 = 10%)
+    top_n_cells: Optional[int] = None            # Keep top N cells by total UMI count (single-cell only)
+
+    # Single-cell collapse parameters
+    # For single-cell lineage tracing, collapse multiple UMIs per cell to one allele per (cell, intBC)
+    collapse_to_cells: bool = True              # Enable collapse for single-cell modality
+    min_umis_per_cell: int = 4                  # Minimum UMIs for valid consensus (cells with fewer are filtered)
+    min_umi_agreement: float = 0.5              # Min fraction for consensus (below -> missing/None)
 
     # Runtime fields (populated during processing, not from config file)
     ann_intbc_mod: Optional[pl.DataFrame] = None  # intBC → mod mapping from classify_cassettes
@@ -772,8 +1076,18 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         if self.should_run_step(CassiopeiaStep.PLUG_CASSIOPEIA.value):
             self.xp.logger.info("Running plug_cassiopeia step")
             result = self._plug_cassiopeia()
+
+            # Save raw per-UMI alleles
             self.alleles_pl = result.results['alleles_pl']
             self.alleles_pl.write_parquet(f"{self.workdir}/alleles_pl.parquet")
+            self.xp.logger.io(f"Saved raw per-UMI alleles to {self.workdir}/alleles_pl.parquet")
+
+            # Save collapsed per-cell alleles (single-cell only)
+            self.alleles_pl_collapsed = result.results.get('alleles_pl_collapsed')
+            if self.alleles_pl_collapsed is not None:
+                self.alleles_pl_collapsed.write_parquet(f"{self.workdir}/alleles_pl_collapsed.parquet")
+                self.xp.logger.io(f"Saved collapsed per-cell alleles to {self.workdir}/alleles_pl_collapsed.parquet")
+
             self.xp.logger.io(f"Saving cassiopeia allele tables to {cass_allele_path}")
             self.ldf.sink_parquet(cass_allele_path)
 
@@ -858,9 +1172,9 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         segments_path = intermediate_dir / "segments.parquet"
         assembled_path = intermediate_dir / "assembled.parquet"
 
-        # Also try legacy path
+        # Also try legacy path (with _debug suffix in intermediate dir)
         if not segments_path.exists():
-            segments_path = self.workdir / "segments_debug.parquet"
+            segments_path = intermediate_dir / "segments_debug.parquet"
 
         if not segments_path.exists():
             self.xp.logger.warning(f"Segments file not found at {segments_path}, skipping filtered QC")
@@ -883,8 +1197,11 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
             assembled_df = segments_df.select(['umi', 'start_meta', 'end_meta']).unique()
 
         # Load contigs (check for both IPC and Parquet formats)
-        contigs_path = list(self.workdir.glob("contigs_segmented_*.arrow")) or \
-                       list(self.workdir.glob("contigs_segmented_*.parquet"))
+        # Use specific pattern to avoid matching intermediate files like _parsed or _cass_allele
+        contigs_path = list(self.workdir.glob("contigs_segmented_valid.arrow")) or \
+                       list(self.workdir.glob("contigs_segmented_valid.parquet")) or \
+                       list(self.workdir.glob("contigs_*.arrow")) or \
+                       list(self.workdir.glob("contigs_*.parquet"))
         if contigs_path:
             contigs_df = read_file(contigs_path[0])
             if 'stitched_seq' in contigs_df.columns and 'contig' not in contigs_df.columns:
@@ -972,22 +1289,33 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         self.config.ann_intbc_mod = self.ann_intbc_mod
         config = self.config.get_function_config(plug_cassiopeia)
 
+        # Get modality from experiment config
+        modality = getattr(self.xp, 'modality', 'single-molecule')
+        cbc_len = getattr(self.xp, 'cbc_len', 16)
+
         return plug_cassiopeia(ldf=self.ldf,
                                workdir=self.workdir,
                                logger=self.xp.logger,
+                               modality=modality,
+                               cbc_len=cbc_len,
                                **config)
 
     def _segmented_allele(self) -> StepResults:
         """
         Generate allele table directly from segments (no assembly needed).
 
-        Reads segments_debug.parquet from workdir and generates allele_table_segmented.parquet.
+        Reads segments_debug.parquet from workdir/intermediate and generates allele_table_segmented.parquet.
         """
-        segments_path = self.workdir / "segments_debug.parquet"
+        intermediate_dir = self.workdir / "intermediate"
+        segments_path = intermediate_dir / "segments_debug.parquet"
+
+        # Also try new naming convention
+        if not segments_path.exists():
+            segments_path = intermediate_dir / "segments.parquet"
 
         if not segments_path.exists():
             raise FileNotFoundError(
-                f"Segments file not found: {segments_path}. "
+                f"Segments file not found in {intermediate_dir}. "
                 "Run fracture with use_segmentation=True first."
             )
 

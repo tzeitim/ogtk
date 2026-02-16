@@ -770,19 +770,19 @@ def plot_meta_transition_heatmap(
     if ax is None:
         fig, ax = plt.subplots(figsize=(12, 10))
 
-    # Use log scale for better visualization
-    # Add small value to avoid log(0)
-    matrix_plot = matrix_pct + 0.001
-
+    # Linear scale with fixed range 0-100 (percentages)
     sns.heatmap(
-        matrix_plot,
-        annot=False,
-        cmap='YlOrRd',
-        norm=LogNorm(vmin=0.001, vmax=max(matrix_plot.max(), 1)),
+        matrix_pct,
+        annot=True,
+        fmt='.1f',
+        cmap='RdYlBu_r',
+        vmin=0,
+        vmax=100,
         xticklabels=existing_ends,
         yticklabels=row_labels,
         ax=ax,
-        cbar_kws={'label': '% of transitions (log scale)'}
+        cbar_kws={'label': '% of transitions'},
+        annot_kws={'size': 8}
     )
 
     ax.set_xlabel('End Meta')
