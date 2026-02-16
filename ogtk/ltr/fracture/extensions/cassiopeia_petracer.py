@@ -230,6 +230,76 @@ def flag_spanning_deletions(pl_allele: pl.DataFrame, rcols: list[str], mode: str
     return result
 
 
+def pivot_alleles_wide(allele_table: pl.DataFrame, rcols: list[str]) -> pl.DataFrame:
+    """Pivot allele table from long (one row per cell x intBC) to wide (one row per cell).
+
+    Creates columns named like 'TCTGAA..._r1', 'TCTGAA..._r2', etc.
+    When multiple UMIs exist per (cell, intBC), takes the mode per cutsite.
+    """
+    if allele_table.height == 0:
+        return pl.DataFrame({'cellBC': []})
+
+    intbc_order = allele_table.get_column('intBC').unique(maintain_order=True).sort().to_list()
+    col_order = [f'{ibc}_{r}' for ibc in intbc_order for r in rcols]
+
+    df = (
+        allele_table
+        .select('cellBC', 'intBC', *rcols)
+        .unpivot(index=['cellBC', 'intBC'], on=rcols)
+        .with_columns((pl.col('intBC') + '_' + pl.col('variable')).alias('col'))
+        .group_by('cellBC', 'col')
+        .agg(pl.col('value').mode().first())
+        .pivot(index='cellBC', on='col', values='value')
+    )
+    present = [c for c in col_order if c in df.columns]
+    return df.select('cellBC', *present)
+
+
+def add_depth(
+    tdata,
+    tree_key: str = 'nj',
+    depth_key: str = 'depth',
+    normalized_key: str = 'normalized_depth',
+) -> None:
+    """Compute depth and normalized depth (depth / n_leaves) on TreeData.
+
+    Args:
+        tdata: TreeData object with obst containing tree topology
+        tree_key: Key in tdata.obst for the tree
+        depth_key: Key in tdata.obs for the depth
+        normalized_key: Key to store depth / n_leaves in tdata.obs
+    """
+    import pycea as pc
+    if depth_key not in tdata.obs.columns:
+        pc.pp.add_depth(tdata, tree=tree_key, key_added=depth_key)
+
+    n_leaves = len(tdata.obs)
+    if n_leaves > 0:
+        tdata.obs[normalized_key] = tdata.obs[depth_key] / n_leaves
+
+
+def add_weighted_depth(tdata, tree_key: str, depth_key: str = 'depth', weight: str = 'length') -> None:
+    """Compute node depths using weighted edge lengths (e.g., from convexml).
+
+    Unlike add_depth/pycea.pp.add_depth which counts edges, this sums branch
+    lengths along the path from root to each node using Dijkstra.
+    """
+    import networkx as nx
+    tree = tdata.obst[tree_key]
+    root = [n for n in tree.nodes() if tree.in_degree(n) == 0][0]
+    depths = nx.single_source_dijkstra_path_length(tree, root, weight=weight)
+    nx.set_node_attributes(tree, depths, depth_key)
+    tdata.obs[depth_key] = tdata.obs.index.map(lambda x: depths.get(x, None))
+
+
+def write_done(outdir: Path, reason: str = None) -> None:
+    """Write done marker file. If reason, writes done_{reason} instead."""
+    if reason:
+        (outdir / f'done_{reason}').write_text(reason)
+    else:
+        (outdir / 'done').write_text('success')
+
+
 def generate_intbc_whitelist(
     ldf: pl.LazyFrame,
     min_umis: int = 100,
@@ -972,6 +1042,34 @@ class CassiopeiaConfig(ExtensionConfig):
     min_umis_per_cell: int = 4                  # Minimum UMIs for valid consensus (cells with fewer are filtered)
     min_umi_agreement: float = 0.5              # Min fraction for consensus (below -> missing/None)
 
+    # Tree generation
+    solver: str = 'nj'                          # nj | vanilla | mcgs
+    min_cells_for_tree: int = 10
+    skip_branch_lengths: bool = False
+    min_branch_length: float = 0.01
+    tree_mode: str = 'auto'                     # auto | sc | sm
+                                                # auto: sc if collapse_to_cells else sm
+    tree_group_by: list = field(default_factory=lambda: ['intBC', 'sbc'])
+                                                # SM mode only: columns to partition jobs by
+                                                # ['intBC'] = one tree per intBC (pool sbcs)
+                                                # ['intBC', 'sbc'] = one tree per (intBC, sbc)
+                                                # Ignored in SC mode
+    allele_rep_thresh: float = 1.0              # allele representation threshold for character matrix
+    tree_test_mode: bool = False                  # Enable subsampling for quick testing
+    tree_subsample: list = field(default_factory=list)
+    # Generic subsampling factors. Each entry is a dict:
+    #   column: str   — column to group by (e.g. 'intBC', 'cellBC', 'UMI')
+    #   top_x: int    — keep top X groups ranked by size
+    #   sample_n: int — then sample N from that pool (optional, keeps all if omitted)
+
+    # LSF submission for tree building (follows dorado pattern)
+    tree_use_lsf: bool = True
+    tree_lsf_queue: str = 'gsla-cpu'
+    tree_lsf_cores: int = 1
+    tree_lsf_mem: str = '4G'
+    tree_wait_for_completion: bool = False      # fire-and-forget by default
+    tree_conda_env: Optional[str] = None        # conda env for job script
+
     # Runtime fields (populated during processing, not from config file)
     ann_intbc_mod: Optional[pl.DataFrame] = None  # intBC → mod mapping from classify_cassettes
     
@@ -986,6 +1084,7 @@ class CassiopeiaStep(Enum):
     GENERATE_MATRIX = "generate_matrix"
     GENERATE_METADATA = "generate_metadata"
     SEGMENTED_ALLELE = "segmented_allele"  # Direct allele table from segments
+    BUILD_TREES = "build_trees"
 
 class CassiopeiaLineageExtension(PostProcessorExtension):
     xp: FractureXp
@@ -1095,6 +1194,12 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
             self.xp.logger.info("Running segmented_allele step")
             result = self._segmented_allele()
             self.alleles_segmented = result.results['allele_table_segmented']
+            final_results.update(result.results)
+            final_metrics.update(result.metrics)
+
+        if self.should_run_step(CassiopeiaStep.BUILD_TREES.value):
+            self.xp.logger.info("Running build_trees step")
+            result = self._build_trees()
             final_results.update(result.results)
             final_metrics.update(result.metrics)
 
@@ -1348,87 +1453,607 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
             }
         )
 
-    def _pycea_explore(self):
-        
-       """ """ 
-       solvers = ['vanilla', 'mcgs', 'nj']
-       solvers = ['vanilla']
-       #for index, n_cells in [(i, ii.shape) for i,ii in enumerate(umi_tables) if ii.shape[0]>200]:
-       for (index, intbc, mod, n_ori, well), allele_table in alg_df.partition_by('xid', 'intBC', 'mod', 'n_ori', 'well', as_dict=True).items():
-           allele_table = allele_table.to_pandas()
-           tdata = None
-           character_matrix, priors, state_2_indel = cas.pp.convert_alleletable_to_character_matrix(
-               allele_table,
-               allele_rep_thresh = 1.0)
-           
-           cas_tree = cas.data.CassiopeiaTree(character_matrix=character_matrix)
-           
-           print(f"{index = } {intbc=}\tnumber of cells {cas_tree.n_cell}, number of characters {cas_tree.n_character} ")
-           meta = '-'.join(pl.DataFrame(allele_table).select('xid', 'well', 'mod', 'intBC', 'n_ori').unique()[0].to_dummies(separator="_").columns)
-           collapse = False
-           collapse = True
-           
-           allele_colors_hex = dict(map(lambda x: (x, ColorHash(x).hex), pl.DataFrame(allele_table).unpivot(on=rcols, value_name="allele").get_column('allele').unique()))
-           
-           allele_matrix = pl.DataFrame(allele_table).select('UMI', '^r\d+$').to_pandas().set_index('UMI')
-           allele_matrix
-           for solver in solvers :
-               match solver:
-                   case "shared":
-                       solve = cas.solver.SharedMutationJoiningSolver()
-                   case "vanilla":
-                       solve = cas.solver.VanillaGreedySolver()
-                   case "UPGMA":
-                       solve = cas.solver.SharedMutationJoiningSolver()
-                   case "mcgs":
-                       solve = cas.solver.MaxCutGreedySolver()
-                   case "mc": # this one is very slow
-                       solve = cas.solver.MaxCutSolver()
-                   case "nj":
-                       solve = cas.solver.NeighborJoiningSolver(add_root=True)
+    def _get_solver(self, solver_name: str):
+        """Instantiate a Cassiopeia solver by name."""
+        import cassiopeia as cas
+        match solver_name:
+            case 'nj':
+                return cas.solver.NeighborJoiningSolver(
+                    dissimilarity_function=cas.solver.dissimilarity.weighted_hamming_distance,
+                    add_root=True,
+                )
+            case 'vanilla':
+                return cas.solver.VanillaGreedySolver()
+            case 'mcgs':
+                return cas.solver.MaxCutGreedySolver()
+            case _:
+                raise ValueError(f"Unknown solver: {solver_name}")
 
-               print(solver)
-               solve.solve(cas_tree, collapse_mutationless_edges=collapse)
-               if tdata is None:
-                   tdata = td.TreeData(
-                       X=None,  
-                       allow_overlap=True,
-                       obs=allele_matrix.loc[cas_tree.leaves], 
-                      # obsm={"alleles": character_matrix.loc[cas_tree.leaves].values}, # can't use this since must be encoded, e.g. character_matrix
-                       obst={solver: cas_tree.get_tree_topology()}
-                   )
-               
-               name = f'pctree_{cas_tree.n_cell}_{meta}_{solver}_{collapse}'
+    @staticmethod
+    def _sanitize_states(states):
+        """Flatten tuple/list character states to plain ints for convexml compatibility.
 
-               tdata.obst[solver] = cas_tree.get_tree_topology()
-               pycea.pp.add_depth(tdata, tree=solver)
+        Cassiopeia can produce tuple states like (1, 2) for ambiguous sites.
+        Convexml needs plain integers in a numpy float64 array.
+        Strategy: take first element of tuples; leave scalars as-is.
+        """
+        return [s[0] if isinstance(s, (tuple, list)) else s for s in states]
 
-               if True:
-                   fig, ax = plt.subplots(1,1, figsize=(10, 100))
-                   pc.pl.tree(tdata, 
-                          tree=solver,
-                     keys=rcols,
-                     polar=False, 
-                     extend_branches=True,
-                     palette=allele_colors_hex,
-                              branch_linewidth=0.15,
-                     ax=ax)
-                   fig.savefig(f'{name}.png')
-                   
-                   if False:
-                       fig, ax = plt.subplots(1,1, figsize=(10, 10), dpi=1200, subplot_kw={"projection": "polar"})
-                       pc.pl.tree(tdata, 
-                              tree=solver,
-                         keys=rcols,
-                         polar=True, 
-                         extend_branches=True,
-                                  branch_linewidth=0.15,
-                         palette=allele_colors_hex,
-                         ax=ax)
-                       fig.savefig(f'{name}_circ.png')
+    def _estimate_branch_lengths(self, cas_tree, config):
+        """Estimate branch lengths via convexml."""
+        import convexml
+        leaf_sequences = {
+            l: self._sanitize_states(cas_tree.get_character_states(l))
+            for l in cas_tree.leaves
+        }
+        tree_newick = convexml.convexml(
+            tree_newick=cas_tree.get_newick(record_branch_lengths=True),
+            leaf_sequences=leaf_sequences,
+            minimum_branch_length=config.min_branch_length,
+        )['tree_newick']
+        import cassiopeia as cas
+        return cas.data.CassiopeiaTree(
+            character_matrix=cas_tree.character_matrix,
+            tree=tree_newick,
+            missing_state_indicator=cas_tree.missing_state_indicator,
+        )
 
-                   plt.close('all')
+    @staticmethod
+    def _build_allele_palette(obs_df, ann_cols):
+        """Build allele -> hex color palette from obs DataFrame annotation columns.
+
+        Normalizes values to strings, assigns ColorHash colors,
+        then overrides unedited ('None') to white and missing (NaN) to light gray.
+        """
+        from colorhash import ColorHash
+        import pandas as pd
+
+        palette = {}
+        for col in ann_cols:
+            for v in obs_df[col].dropna().unique():
+                s = str(v)
+                if s in palette or s == 'nan':
+                    continue
+                palette[s] = '#FFFFFF' if 'None' in s else ColorHash(s).hex
+        # Ensure missing/nan entries are gray
+        palette['nan'] = '#E0E0E0'
+
+        # Stringify obs values so they match palette keys
+        for col in ann_cols:
+            obs_df[col] = obs_df[col].astype(str)
+
+        return palette
+
+    @staticmethod
+    def _save_legend(palette, ann_cols, obs_df, outpath, ncol=1):
+        """Save a standalone legend plot mapping allele values to colors.
+
+        Groups legend entries by annotation column so each cutsite/intBC
+        has its own section.
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Patch
+
+        # Collect per-column unique values (preserving order)
+        col_values = {}
+        for col in ann_cols:
+            vals = [str(v) for v in obs_df[col].dropna().unique() if str(v) != 'nan']
+            col_values[col] = sorted(set(vals))
+
+        handles = []
+        labels = []
+        for col, vals in col_values.items():
+            # Section header
+            handles.append(Patch(facecolor='none', edgecolor='none'))
+            labels.append(f'— {col} —')
+            for v in vals:
+                color = palette.get(v, '#CCCCCC')
+                handles.append(Patch(facecolor=color, edgecolor='#666666', linewidth=0.5))
+                labels.append(v)
+
+        n_entries = len(handles)
+        fig_height = max(2, n_entries * 0.18)
+        fig, ax = plt.subplots(figsize=(3 * ncol, fig_height))
+        ax.axis('off')
+        ax.legend(handles, labels, loc='center', ncol=ncol,
+                  fontsize=5, frameon=False, handlelength=1.2, handleheight=0.8)
+        fig.savefig(outpath, bbox_inches='tight', dpi=300)
+        plt.close(fig)
+
+    def _build_tree_sc(
+        self,
+        allele_table: pl.DataFrame,
+        rcols: list[str],
+        outdir: Path,
+    ) -> StepResults:
+        """Build a single tree from the full allele table (single-cell mode).
+
+        One tree per sample — all intBCs become characters in the matrix.
+        Follows the tested logic from build_tree_sc.py.
+        """
+        import cassiopeia as cas
+        import treedata as td
+        import pycea as pc
+        import hashlib
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from colorhash import ColorHash
+        import re as _re
+
+        config = self.config
+        outdir = Path(outdir)
+        outdir.mkdir(parents=True, exist_ok=True)
+
+        n_cells = allele_table['cellBC'].n_unique()
+        if n_cells < config.min_cells_for_tree:
+            self.xp.logger.warning(f"SC tree: only {n_cells} cells, need {config.min_cells_for_tree}. Skipping.")
+            write_done(outdir, f'too_few_entries_{n_cells}')
+            return StepResults(results={}, metrics={'skipped': True, 'reason': 'too_few_entries'})
+
+        # Handle spanning deletions
+        if config.spanning_deletions != 'use':
+            allele_table = flag_spanning_deletions(allele_table, rcols, mode=config.spanning_deletions)
+
+        # Fill nulls for cassiopeia
+        allele_table = allele_table.with_columns([pl.col(c).fill_null('None') for c in rcols])
+        pd_allele = allele_table.to_pandas()
+
+        # Character matrix
+        character_matrix, priors, state_2_indel = cas.pp.convert_alleletable_to_character_matrix(
+            pd_allele, allele_rep_thresh=config.allele_rep_thresh,
+        )
+        self.xp.logger.info(f"SC character matrix: {character_matrix.shape[0]} cells x {character_matrix.shape[1]} characters")
+        # Cast to str to avoid pyarrow ArrowInvalid with mixed list/non-list values in object columns
+        cm_out = character_matrix.reset_index()
+        cm_out = cm_out.astype({c: str for c in cm_out.columns if cm_out[c].dtype == object})
+        cm_out.to_parquet(outdir / 'character_matrix.parquet')
+
+        cas_tree = cas.data.CassiopeiaTree(character_matrix=character_matrix, priors=priors)
+
+        if cas_tree.n_cell < config.min_cells_for_tree:
+            write_done(outdir, f'too_few_entries_after_filter_{cas_tree.n_cell}')
+            return StepResults(results={}, metrics={'skipped': True, 'reason': 'too_few_after_filter'})
+
+        # Solve
+        self.xp.logger.info(f"SC: solving tree ({config.solver}, {cas_tree.n_cell} cells)...")
+        solver = self._get_solver(config.solver)
+        solver.solve(cas_tree, collapse_mutationless_edges=True)
+
+        # Branch length estimation
+        if not config.skip_branch_lengths:
+            self.xp.logger.info("SC: estimating branch lengths (convexml)...")
+            cas_tree = self._estimate_branch_lengths(cas_tree, config)
+        else:
+            self.xp.logger.info("SC: skipping branch length estimation")
+
+        # Save newick
+        newick = cas_tree.get_newick(record_branch_lengths=True)
+        (outdir / 'newick.txt').write_text(newick)
+
+        # Build wide allele obs for TreeData
+        allele_wide = pivot_alleles_wide(allele_table, rcols)
+        allele_wide_pd = allele_wide.to_pandas().set_index('cellBC')
+        leaves_in_obs = [l for l in cas_tree.leaves if l in allele_wide_pd.index]
+        obs = allele_wide_pd.loc[leaves_in_obs]
+
+        tdata = td.TreeData(
+            X=None, allow_overlap=True, obs=obs,
+            obst={config.solver: cas_tree.get_tree_topology()},
+        )
+        add_weighted_depth(tdata, tree_key=config.solver)
+        tdata.write_h5td(outdir / 'tdata.h5td')
+
+        md5 = hashlib.md5(str(tdata).encode()).hexdigest()[:8]
+        (outdir / 'tdata_md5.txt').write_text(md5)
+        self.xp.logger.info(f"SC: saved TreeData ({cas_tree.n_cell} cells, md5={md5}) -> {outdir}")
+
+        # Annotation columns and colors
+        ann_cols = [c for c in tdata.obs.columns if _re.search(r'_r\d+$', c)]
+        allele_colors_hex = self._build_allele_palette(tdata.obs, ann_cols)
+
+        sample_name = getattr(self.xp, 'target_sample', 'sample')
+        n_cells_tree = cas_tree.n_cell
+        n_ann = len(ann_cols)
+        dendrogram_ratio = 0.05
+        annotation_width = (1 - dendrogram_ratio) / (dendrogram_ratio * max(n_ann, 1))
+        base_name = f'sc_{n_cells_tree}_{sample_name}_{config.solver}_span-{config.spanning_deletions}'
+
+        # Circular
+        self.xp.logger.info(f"SC: plotting circular tree ({n_cells_tree} cells, {n_ann} annotations)...")
+        fig, ax = plt.subplots(1, 1, figsize=(8, 8), dpi=900, subplot_kw={'projection': 'polar'})
+        pc.pl.tree(tdata, tree=config.solver, keys=ann_cols, polar=True,
+                   depth_key='depth', extend_branches=False, branch_linewidth=0.15,
+                   annotation_width=0.01, palette=allele_colors_hex, ax=ax, legend=False)
+        fig.savefig(outdir / f'{base_name}_circ.png', bbox_inches='tight')
+        plt.close(fig)
+
+        # Linear
+        height_inches = max(5, (n_cells_tree / 1000) * 750 / 100)
+        self.xp.logger.info(f"SC: plotting linear tree ({height_inches:.0f}\" tall)...")
+        fig, ax = plt.subplots(1, 1, figsize=(5, height_inches), dpi=900)
+        pc.pl.tree(tdata, tree=config.solver, keys=ann_cols, polar=False,
+                   depth_key='depth', extend_branches=False, branch_linewidth=0.15,
+                   annotation_width=annotation_width, palette=allele_colors_hex, ax=ax, legend=False)
+        fig.savefig(outdir / f'{base_name}_linear.png', bbox_inches='tight')
+        plt.close(fig)
+
+        # Standalone legend
+        self._save_legend(allele_colors_hex, ann_cols, tdata.obs, outdir / f'{base_name}_legend.png')
+
+        write_done(outdir)
+        self.xp.logger.info(f"SC: done — {n_cells_tree} cells, {cas_tree.n_character} characters, output: {outdir}")
+        return StepResults(
+            results={'tdata_path': str(outdir / 'tdata.h5td')},
+            metrics={'n_cells': n_cells_tree, 'n_characters': cas_tree.n_character},
+        )
+
+    def _build_tree_sm(
+        self,
+        allele_table: pl.DataFrame,
+        rcols: list[str],
+        outdir: Path,
+        filter_dict: dict,
+    ) -> StepResults:
+        """Build a tree for a single group (single-molecule mode).
+
+        Args:
+            filter_dict: Column->value mapping to filter the allele table
+                         e.g. {'intBC': 'TCTGAA'} or {'intBC': 'TCTGAA', 'sbc': 'TCAAGT'}
+        """
+        import cassiopeia as cas
+        import treedata as td
+        import pycea as pc
+        import hashlib
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from colorhash import ColorHash
+
+        config = self.config
+        outdir = Path(outdir)
+        outdir.mkdir(parents=True, exist_ok=True)
+        group_label = '_'.join(str(v) for v in filter_dict.values())
+
+        # Filter to this group
+        sub = allele_table
+        for col, val in filter_dict.items():
+            sub = sub.filter(pl.col(col) == val)
+
+        # Per-group subsampling (SM test mode)
+        if config.tree_test_mode and config.tree_subsample:
+            sub = self._subsample(sub, config.tree_subsample, self.xp.logger)
+
+        if sub.height < config.min_cells_for_tree:
+            self.xp.logger.info(f"SM tree {group_label}: only {sub.height} molecules (need {config.min_cells_for_tree}), skipping")
+            write_done(outdir, f'too_few_entries_{sub.height}')
+            return StepResults(results={}, metrics={'skipped': True, 'reason': 'too_few_molecules'})
+
+        # Handle spanning deletions
+        if config.spanning_deletions != 'use':
+            sub = flag_spanning_deletions(sub, rcols, mode=config.spanning_deletions)
+
+        # Fill nulls for cassiopeia
+        sub = sub.with_columns([pl.col(c).fill_null('None') for c in rcols])
+        pd_allele = sub.to_pandas()
+
+        # Character matrix
+        self.xp.logger.info(f"SM tree {group_label}: {sub.height} molecules, building character matrix...")
+        character_matrix, priors, state_2_indel = cas.pp.convert_alleletable_to_character_matrix(
+            pd_allele, allele_rep_thresh=config.allele_rep_thresh,
+        )
+        self.xp.logger.info(f"SM tree {group_label}: character matrix {character_matrix.shape[0]} x {character_matrix.shape[1]}")
+        # Cast to str to avoid pyarrow ArrowInvalid with mixed list/non-list values in object columns
+        cm_out = character_matrix.reset_index()
+        cm_out = cm_out.astype({c: str for c in cm_out.columns if cm_out[c].dtype == object})
+        cm_out.to_parquet(outdir / 'character_matrix.parquet')
+
+        cas_tree = cas.data.CassiopeiaTree(character_matrix=character_matrix)
+
+        if cas_tree.n_cell < config.min_cells_for_tree:
+            self.xp.logger.info(f"SM tree {group_label}: only {cas_tree.n_cell} cells after filtering, skipping")
+            write_done(outdir, f'too_few_entries_after_filter_{cas_tree.n_cell}')
+            return StepResults(results={}, metrics={'skipped': True, 'reason': 'too_few_after_filter'})
+
+        # Solve
+        self.xp.logger.info(f"SM tree {group_label}: solving ({config.solver}, {cas_tree.n_cell} molecules)...")
+        solver = self._get_solver(config.solver)
+        solver.solve(cas_tree, collapse_mutationless_edges=True)
+
+        # Branch lengths
+        if not config.skip_branch_lengths:
+            self.xp.logger.info(f"SM tree {group_label}: estimating branch lengths (convexml)...")
+            cas_tree = self._estimate_branch_lengths(cas_tree, config)
+
+        # Save newick
+        newick = cas_tree.get_newick(record_branch_lengths=True)
+        (outdir / 'newick.txt').write_text(newick)
+
+        # Build obs from r columns
+        cell_id_col = 'UMI' if 'UMI' in sub.columns else 'cellBC'
+        allele_matrix = sub.select(cell_id_col, *rcols).to_pandas().set_index(cell_id_col)
+
+        tdata = td.TreeData(
+            X=None, allow_overlap=True,
+            obs=allele_matrix.loc[cas_tree.leaves],
+            obst={config.solver: cas_tree.get_tree_topology()},
+        )
+        add_weighted_depth(tdata, tree_key=config.solver)
+        tdata.write_h5td(outdir / 'tdata.h5td')
+
+        md5 = hashlib.md5(str(tdata).encode()).hexdigest()[:8]
+        (outdir / 'tdata_md5.txt').write_text(md5)
+        self.xp.logger.info(f"SM tree {group_label}: saved TreeData ({cas_tree.n_cell} molecules, md5={md5})")
+
+        # Plot
+        allele_colors_hex = self._build_allele_palette(tdata.obs, rcols)
+
+        n_mols = cas_tree.n_cell
+        dendrogram_ratio = 0.05
+        annotation_width = (1 - dendrogram_ratio) / (dendrogram_ratio * len(rcols))
+        base_name = f'sm_{n_mols}_{group_label}_{config.solver}'
+
+        # Circular
+        self.xp.logger.info(f"SM tree {group_label}: plotting ({n_mols} molecules)...")
+        fig, ax = plt.subplots(1, 1, figsize=(5, 5), dpi=900, subplot_kw={'projection': 'polar'})
+        pc.pl.tree(tdata, tree=config.solver, keys=rcols, polar=True,
+                   depth_key='depth', extend_branches=True, branch_linewidth=0.05,
+                   annotation_width=0.02, palette=allele_colors_hex, ax=ax, legend=False)
+        fig.savefig(outdir / f'{base_name}_circ.png', bbox_inches='tight')
+        plt.close(fig)
+
+        # Linear
+        height_inches = max(5, (n_mols / 1000) * 750 / 100)
+        fig, ax = plt.subplots(1, 1, figsize=(2, height_inches), dpi=900)
+        pc.pl.tree(tdata, tree=config.solver, keys=rcols, polar=False,
+                   depth_key='depth', extend_branches=True, branch_linewidth=0.05,
+                   annotation_width=annotation_width, palette=allele_colors_hex, ax=ax, legend=False)
+        fig.savefig(outdir / f'{base_name}_linear.png', bbox_inches='tight')
+        plt.close(fig)
+
+        # Standalone legend
+        self._save_legend(allele_colors_hex, rcols, tdata.obs, outdir / f'{base_name}_legend.png')
+
+        write_done(outdir)
+        self.xp.logger.info(f"SM tree {group_label}: done — {n_mols} molecules, {cas_tree.n_character} characters, output: {outdir}")
+        return StepResults(
+            results={'tdata_path': str(outdir / 'tdata.h5td')},
+            metrics={'n_molecules': n_mols, 'n_characters': cas_tree.n_character},
+        )
                 
+    def _subsample(self, allele_table: pl.DataFrame, factors: list, logger=None) -> pl.DataFrame:
+        """Apply subsampling factors to an allele table.
+
+        Each factor is a dict with keys:
+          column: str           — column to filter/subsample on
+          values: list          — explicit whitelist (skips top_x/sample_n)
+          top_x: int            — keep top X groups ranked by size
+          sample_n: int         — then sample N from that pool (optional)
+        Factors are applied in order.
+        """
+        for factor in factors:
+            col = factor['column']
+            if col not in allele_table.columns:
+                if logger:
+                    logger.info(f"  {col}: column not found, skipping")
+                continue
+
+            n_unique = allele_table.select(col).n_unique()
+            values = factor.get('values')
+
+            if values is not None:
+                # Explicit whitelist
+                pool = pl.DataFrame({col: values})
+                allele_table = allele_table.join(pool, on=col, how='semi')
+                if logger:
+                    matched = allele_table.select(col).n_unique()
+                    logger.info(f"  {col}: {n_unique} unique | values: {len(values)} requested, {matched} matched | -> {allele_table.height} rows")
+            else:
+                # Statistical subsampling
+                top_x = factor.get('top_x')
+                sample_n = factor.get('sample_n')
+                pool = (
+                    allele_table.group_by(col).len()
+                    .sort('len', descending=True)
+                    .head(top_x)
+                    .select(col)
+                )
+                n_after_top = pool.height
+                if sample_n is not None:
+                    actual_n = min(sample_n, pool.height)
+                    pool = pool.sample(n=actual_n, seed=42)
+                allele_table = allele_table.join(pool, on=col, how='semi')
+                if logger:
+                    parts = [f"{col}: {n_unique} unique"]
+                    parts.append(f"top {top_x} -> {n_after_top}")
+                    if sample_n is not None:
+                        parts.append(f"sampled {actual_n}/{sample_n}")
+                    parts.append(f"-> {allele_table.height} rows")
+                    logger.info(f"  {' | '.join(parts)}")
+        return allele_table
+
+    def _build_trees(self) -> StepResults:
+        """BUILD_TREES step: prepare tree jobs and optionally submit via LSF."""
+        import re
+
+        config = self.config
+        workdir = self.workdir
+
+        # Load allele table (collapsed for SC, raw for SM)
+        if config.collapse_to_cells and (workdir / 'alleles_pl_collapsed.parquet').exists():
+            allele_path = workdir / 'alleles_pl_collapsed.parquet'
+        else:
+            allele_path = workdir / 'alleles_pl.parquet'
+
+        allele_table = pl.read_parquet(allele_path)
+        rcols = [c for c in allele_table.columns if re.match(r'^r\d+$', c)]
+
+        n_cells = allele_table['cellBC'].n_unique() if 'cellBC' in allele_table.columns else allele_table.height
+        n_intbcs = allele_table['intBC'].n_unique() if 'intBC' in allele_table.columns else 0
+        self.xp.logger.info(
+            f"Loaded allele table: {allele_table.height} rows, {n_cells} cells, "
+            f"{n_intbcs} intBCs, {len(rcols)} cutsites — from {allele_path.name}"
+        )
+
+        # Determine mode
+        mode = config.tree_mode
+        if mode == 'auto':
+            mode = 'sc' if config.collapse_to_cells else 'sm'
+
+        tree_base = workdir / 'trees'
+        if config.tree_test_mode:
+            tree_base = tree_base / 'test'
+        tree_outdir = tree_base / f'span_{config.spanning_deletions}'
+        tree_outdir.mkdir(parents=True, exist_ok=True)
+        self.xp.logger.info(
+            f"Tree mode: {mode} | solver: {config.solver} | "
+            f"spanning: {config.spanning_deletions} | "
+            f"branch_lengths: {'skip' if config.skip_branch_lengths else 'convexml'} | "
+            f"execution: {'lsf' if config.tree_use_lsf else 'inline'}"
+        )
+        self.xp.logger.info(f"Output dir: {tree_outdir}")
+
+        # Subsample for testing (SC: global, SM: per-group in _build_tree_sm)
+        if config.tree_test_mode and config.tree_subsample:
+            self.xp.logger.info("Tree test mode enabled — subsampling data"
+                                + (" (globally for SC)" if mode == 'sc' else " (per-group for SM)"))
+
+        if mode == 'sc':
+            if config.tree_test_mode and config.tree_subsample:
+                allele_table = self._subsample(allele_table, config.tree_subsample, self.xp.logger)
+            jobs = [{'mode': 'sc', 'outdir': tree_outdir}]
+        else:
+            group_cols = [c for c in config.tree_group_by if c in allele_table.columns]
+            if not group_cols:
+                group_cols = ['intBC']
+            groups = allele_table.select(group_cols).unique()
+            self.xp.logger.info(f"SM grouping by {group_cols}: {groups.height} groups")
+            jobs = []
+            for row in groups.iter_rows(named=True):
+                label = '_'.join(str(row[c]) for c in group_cols)
+                job_outdir = tree_outdir / label
+                job = {'mode': 'sm', 'outdir': job_outdir, 'filter': {c: row[c] for c in group_cols}}
+                jobs.append(job)
+
+        # Filter out already-done jobs
+        force = getattr(config, 'force', False)
+        pending = [j for j in jobs if not (Path(j['outdir']) / 'done').exists() or force]
+
+        if not pending:
+            self.xp.logger.info(f"All {len(jobs)} trees already built (cached)")
+            return StepResults(
+                results={'tree_outdir': str(tree_outdir)},
+                metrics={'trees_cached': len(jobs), 'trees_pending': 0},
+            )
+
+        self.xp.logger.info(f"Tree building: {len(pending)} pending, {len(jobs) - len(pending)} cached")
+
+        if config.tree_use_lsf:
+            job_ids = self._submit_tree_jobs_lsf(pending, allele_path, rcols)
+            return StepResults(
+                results={'tree_outdir': str(tree_outdir), 'lsf_job_ids': job_ids},
+                metrics={'trees_submitted': len(pending), 'trees_cached': len(jobs) - len(pending)},
+            )
+        else:
+            # Inline execution
+            for job in pending:
+                if job['mode'] == 'sc':
+                    self._build_tree_sc(allele_table, rcols, job['outdir'])
+                else:
+                    self._build_tree_sm(allele_table, rcols, job['outdir'], job['filter'])
+            return StepResults(
+                results={'tree_outdir': str(tree_outdir)},
+                metrics={'trees_built': len(pending), 'trees_cached': len(jobs) - len(pending)},
+            )
+
+    def _make_tree_cmd(self, job: dict, allele_path: Path, rcols: list[str]) -> str:
+        """Build the CLI command for a single tree-building LSF job."""
+        config = self.config
+        n_rcols = len(rcols)
+        parts = [
+            'python', '-m', 'ogtk.ltr.fracture.extensions.cassiopeia_petracer',
+            'build-tree',
+            '--input', str(allele_path),
+            '--outdir', str(job['outdir']),
+            '--mode', job['mode'],
+            '--solver', config.solver,
+            '--n-rcols', str(n_rcols),
+            '--spanning-deletions', config.spanning_deletions,
+            '--allele-rep-thresh', str(config.allele_rep_thresh),
+            '--min-cells', str(config.min_cells_for_tree),
+            '--min-branch', str(config.min_branch_length),
+        ]
+        if config.skip_branch_lengths:
+            parts.append('--skip-branch-lengths')
+        if job['mode'] == 'sm' and 'filter' in job:
+            import json
+            parts.extend(['--filter', json.dumps(job['filter'])])
+        if hasattr(self.xp, 'target_sample'):
+            parts.extend(['--sample-name', self.xp.target_sample])
+        if config.tree_test_mode and config.tree_subsample:
+            import json
+            parts.append('--test-mode')
+            parts.extend(['--subsample', json.dumps(config.tree_subsample)])
+
+        return ' '.join(parts)
+
+    def _submit_tree_jobs_lsf(self, jobs: list, allele_path: Path, rcols: list[str]) -> list[str]:
+        """Generate and submit LSF jobs for tree building."""
+        import re
+        import subprocess
+
+        config = self.config
+
+        # Ensure log directory exists
+        log_dir = self.workdir / 'logs'
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        job_ids = []
+        for job in jobs:
+            cmd = self._make_tree_cmd(job, allele_path, rcols)
+
+            job_name = Path(job['outdir']).name if job['mode'] == 'sm' else 'sc_tree'
+
+            # Build job script (follows tree_qc pattern: heredoc via stdin)
+            conda_activate = ''
+            if config.tree_conda_env:
+                conda_activate = (
+                    f'eval "$(/home/projects/nyosef/pedro/miniforge3/bin/conda shell.bash hook)"\n'
+                    f'source ~/miniforge3/etc/profile.d/mamba.sh\n'
+                    f'conda activate {config.tree_conda_env}\n'
+                )
+
+            job_script = f'#!/bin/bash\n{conda_activate}{cmd}\n'
+
+            bsub_cmd = [
+                'bsub',
+                '-q', config.tree_lsf_queue,
+                '-n', str(config.tree_lsf_cores),
+                '-R', 'span[hosts=1]',
+                '-R', f'rusage[mem={config.tree_lsf_mem}]',
+                '-o', str(log_dir / f'tree_{job_name}.out'),
+                '-e', str(log_dir / f'tree_{job_name}.err'),
+                '-J', f'tree_{job_name}',
+            ]
+
+            result = subprocess.run(bsub_cmd, input=job_script, capture_output=True, text=True)
+            if result.returncode == 0:
+                match = re.search(r'Job <(\d+)>', result.stdout)
+                if match:
+                    job_ids.append(match.group(1))
+                    self.xp.logger.info(f"Submitted tree job {job_name}: {match.group(1)}")
+            else:
+                self.xp.logger.error(f"Failed to submit tree job {job_name}: {result.stderr}")
+
+        if config.tree_wait_for_completion and job_ids:
+            from ...ltr.fracture.post.tree_qc import _wait_for_lsf_jobs
+            self.xp.logger.info(f"Waiting for {len(job_ids)} tree jobs to complete...")
+            _wait_for_lsf_jobs(job_ids)
+
+        return job_ids
+
     def _extract_barcodes(self) -> StepResults:
         """Extract integration and sample barcodes"""
         xp = self.temp_data['xp']
@@ -1473,3 +2098,214 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
 
 # Register the extension
 extension_registry.register(CassiopeiaLineageExtension)
+
+
+def _build_tree_standalone(args):
+    """Entry point for LSF-submitted tree jobs. Mirrors build_tree_sc.py / build_tree_single.py."""
+    import re
+    import hashlib
+    import cassiopeia as cas
+    import treedata as td
+    import pycea as pc
+    import convexml
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from colorhash import ColorHash
+
+    outdir = Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    allele_table = pl.read_parquet(args.input)
+    rcols = [f'r{i}' for i in range(1, args.n_rcols + 1)]
+    rcols = [c for c in rcols if c in allele_table.columns]
+
+    # Filter for SM mode
+    if args.mode == 'sm' and args.filter:
+        import json
+        filter_dict = json.loads(args.filter) if isinstance(args.filter, str) else args.filter
+        for col, val in filter_dict.items():
+            allele_table = allele_table.filter(pl.col(col) == val)
+
+    # Subsample for testing
+    if args.test_mode and args.subsample:
+        import json
+        factors = json.loads(args.subsample) if isinstance(args.subsample, str) else args.subsample
+        for factor in factors:
+            col = factor['column']
+            top_x = factor.get('top_x')
+            sample_n = factor.get('sample_n')
+            if col not in allele_table.columns:
+                print(f"  {col}: column not found, skipping")
+                continue
+            pool = (
+                allele_table.group_by(col).len()
+                .sort('len', descending=True)
+                .head(top_x)
+                .select(col)
+            )
+            if sample_n is not None:
+                pool = pool.sample(n=min(sample_n, pool.height), seed=42)
+            allele_table = allele_table.join(pool, on=col, how='semi')
+            print(f"  {col}: top {top_x}{f' -> sampled {sample_n}' if sample_n else ''} -> {allele_table.height} rows")
+
+    n_cells = allele_table['cellBC'].n_unique() if args.mode == 'sc' else allele_table.height
+    if n_cells < args.min_cells:
+        print(f"Only {n_cells} rows, need {args.min_cells}. Skipping.")
+        write_done(outdir, f'too_few_entries_{n_cells}')
+        return
+
+    # Handle spanning deletions
+    if args.spanning_deletions != 'use':
+        allele_table = flag_spanning_deletions(allele_table, rcols, mode=args.spanning_deletions)
+
+    # Fill nulls for cassiopeia
+    allele_table = allele_table.with_columns([pl.col(c).fill_null('None') for c in rcols])
+    pd_allele = allele_table.to_pandas()
+
+    # Character matrix
+    character_matrix, priors, state_2_indel = cas.pp.convert_alleletable_to_character_matrix(
+        pd_allele, allele_rep_thresh=args.allele_rep_thresh,
+    )
+    print(f"Character matrix: {character_matrix.shape[0]} x {character_matrix.shape[1]}")
+    # Cast to str to avoid pyarrow ArrowInvalid with mixed list/non-list values in object columns
+    cm_out = character_matrix.reset_index()
+    cm_out = cm_out.astype({c: str for c in cm_out.columns if cm_out[c].dtype == object})
+    cm_out.to_parquet(outdir / 'character_matrix.parquet')
+
+    cas_tree = cas.data.CassiopeiaTree(character_matrix=character_matrix, priors=priors)
+
+    if cas_tree.n_cell < args.min_cells:
+        print(f"Only {cas_tree.n_cell} cells after filtering. Skipping.")
+        write_done(outdir, f'too_few_entries_after_filter_{cas_tree.n_cell}')
+        return
+
+    # Solve
+    match args.solver:
+        case 'nj':
+            solver = cas.solver.NeighborJoiningSolver(
+                dissimilarity_function=cas.solver.dissimilarity.weighted_hamming_distance,
+                add_root=True,
+            )
+        case 'vanilla':
+            solver = cas.solver.VanillaGreedySolver()
+        case 'mcgs':
+            solver = cas.solver.MaxCutGreedySolver()
+        case _:
+            raise ValueError(f"Unknown solver: {args.solver}")
+
+    print(f"Solving tree ({args.solver}, {cas_tree.n_cell} cells)...")
+    solver.solve(cas_tree, collapse_mutationless_edges=True)
+
+    # Branch length estimation
+    if not args.skip_branch_lengths:
+        print("Estimating branch lengths...")
+        sanitize = lambda states: [s[0] if isinstance(s, (tuple, list)) else s for s in states]
+        tree_newick = convexml.convexml(
+            tree_newick=cas_tree.get_newick(record_branch_lengths=True),
+            leaf_sequences={l: sanitize(cas_tree.get_character_states(l)) for l in cas_tree.leaves},
+            minimum_branch_length=args.min_branch,
+        )['tree_newick']
+        print("Updating branch lengths...")
+        cas_tree = cas.data.CassiopeiaTree(
+            character_matrix=cas_tree.character_matrix,
+            tree=tree_newick,
+            missing_state_indicator=cas_tree.missing_state_indicator,
+        )
+
+    newick = cas_tree.get_newick(record_branch_lengths=True)
+    (outdir / 'newick.txt').write_text(newick)
+
+    # Build obs
+    if args.mode == 'sc':
+        allele_wide = pivot_alleles_wide(allele_table, rcols)
+        obs_df = allele_wide.to_pandas().set_index('cellBC')
+        leaves_in_obs = [l for l in cas_tree.leaves if l in obs_df.index]
+        obs_df = obs_df.loc[leaves_in_obs]
+    else:
+        cell_id_col = 'UMI' if 'UMI' in allele_table.columns else 'cellBC'
+        obs_df = allele_table.select(cell_id_col, *rcols).to_pandas().set_index(cell_id_col)
+        obs_df = obs_df.loc[cas_tree.leaves]
+
+    tdata = td.TreeData(
+        X=None, allow_overlap=True, obs=obs_df,
+        obst={args.solver: cas_tree.get_tree_topology()},
+    )
+    add_weighted_depth(tdata, tree_key=args.solver)
+    tdata.write_h5td(outdir / 'tdata.h5td')
+
+    md5 = hashlib.md5(str(tdata).encode()).hexdigest()[:8]
+    (outdir / 'tdata_md5.txt').write_text(md5)
+
+    n_cells_tree = cas_tree.n_cell
+    sample = getattr(args, 'sample_name', 'sample') or 'sample'
+
+    # Annotation columns and colors
+    if args.mode == 'sc':
+        ann_cols = [c for c in tdata.obs.columns if re.search(r'_r\d+$', c)]
+    else:
+        ann_cols = rcols
+
+    allele_colors_hex = CassiopeiaLineageExtension._build_allele_palette(tdata.obs, ann_cols)
+
+    n_ann = len(ann_cols)
+    dendrogram_ratio = 0.05
+    annotation_width = (1 - dendrogram_ratio) / (dendrogram_ratio * max(n_ann, 1))
+    prefix = f'{"sc" if args.mode == "sc" else "sm"}_{n_cells_tree}_{sample}_{args.solver}_span-{args.spanning_deletions}'
+
+    # Circular
+    print(f"Plotting circular tree ({n_cells_tree} cells, {n_ann} annotation columns)...")
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8), dpi=900, subplot_kw={'projection': 'polar'})
+    pc.pl.tree(tdata, tree=args.solver, keys=ann_cols, polar=True,
+               depth_key='depth', extend_branches=False, branch_linewidth=0.15,
+               annotation_width=0.01, palette=allele_colors_hex, ax=ax, legend=False)
+    fig.savefig(outdir / f'{prefix}_circ.png', bbox_inches='tight')
+    plt.close(fig)
+
+    # Linear
+    height_inches = max(5, (n_cells_tree / 1000) * 750 / 100)
+    print(f"Plotting linear tree ({height_inches:.0f} inches tall)...")
+    fig, ax = plt.subplots(1, 1, figsize=(5, height_inches), dpi=900)
+    pc.pl.tree(tdata, tree=args.solver, keys=ann_cols, polar=False,
+               depth_key='depth', extend_branches=False, branch_linewidth=0.15,
+               annotation_width=annotation_width, palette=allele_colors_hex, ax=ax, legend=False)
+    fig.savefig(outdir / f'{prefix}_linear.png', bbox_inches='tight')
+    plt.close(fig)
+
+    # Standalone legend
+    CassiopeiaLineageExtension._save_legend(allele_colors_hex, ann_cols, tdata.obs, outdir / f'{prefix}_legend.png')
+
+    write_done(outdir)
+    print(f"Done: {outdir}")
+
+
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Cassiopeia PEtracer tree building')
+    sub = parser.add_subparsers(dest='command')
+
+    tree_p = sub.add_parser('build-tree', help='Build a phylogenetic tree from allele table')
+    tree_p.add_argument('--input', required=True, help='Path to allele table parquet')
+    tree_p.add_argument('--outdir', required=True, help='Output directory')
+    tree_p.add_argument('--mode', choices=['sc', 'sm'], required=True, help='sc=single-cell, sm=single-molecule')
+    tree_p.add_argument('--filter', type=str, default=None,
+                        help='JSON dict of column filters for SM mode: {"intBC":"TCTGAA","sbc":"TCAAGT"}')
+    tree_p.add_argument('--solver', default='nj', choices=['nj', 'vanilla', 'mcgs'])
+    tree_p.add_argument('--n-rcols', type=int, default=15, help='Number of r columns')
+    tree_p.add_argument('--spanning-deletions', default='unedited')
+    tree_p.add_argument('--allele-rep-thresh', type=float, default=1.0)
+    tree_p.add_argument('--min-cells', type=int, default=10, help='Minimum cells/molecules for tree')
+    tree_p.add_argument('--min-branch', type=float, default=0.01, help='Minimum branch length')
+    tree_p.add_argument('--skip-branch-lengths', action='store_true')
+    tree_p.add_argument('--sample-name', default='sample', help='Sample name for plot filenames')
+    tree_p.add_argument('--test-mode', action='store_true', help='Enable subsampling for testing')
+    tree_p.add_argument('--subsample', type=str, default=None,
+                        help='JSON list of subsample factors: [{"column":"intBC","top_x":10,"sample_n":3}, ...]')
+
+    args = parser.parse_args()
+
+    if args.command == 'build-tree':
+        _build_tree_standalone(args)
+    else:
+        parser.print_help()
