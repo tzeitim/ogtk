@@ -290,6 +290,7 @@ def add_weighted_depth(tdata, tree_key: str, depth_key: str = 'depth', weight: s
     depths = nx.single_source_dijkstra_path_length(tree, root, weight=weight)
     nx.set_node_attributes(tree, depths, depth_key)
     tdata.obs[depth_key] = tdata.obs.index.map(lambda x: depths.get(x, None))
+    tdata.obs = tdata.obs.copy()  # defragment after column insertions
 
 
 def write_done(outdir: Path, reason: str = None) -> None:
@@ -467,7 +468,6 @@ def plug_cassiopeia(
         gap_open_penalty: Optional[int] = None,
         gap_extend_penalty: Optional[int] = None,
         alignment_method: str = 'global',
-        spanning_deletions: str = 'unedited',
         # Partition filtering parameters
         intbc_whitelist_path: Optional[str] = None,
         min_molecules_per_group: int = 10,
@@ -477,10 +477,6 @@ def plug_cassiopeia(
         # Modality parameters
         modality: str = 'single-molecule',
         cbc_len: int = 16,
-        # Single-cell collapse parameters
-        collapse_to_cells: bool = True,
-        min_umis_per_cell: int = 4,
-        min_umi_agreement: float = 0.5,
         ) -> StepResults:
     """
     readName - A unique identifier for each row/sequence
@@ -598,6 +594,13 @@ def plug_cassiopeia(
     umi_tables = []
     nones = 0
 
+    # Alignment threading: use half of available CPUs
+    import os
+    _available_cpus = len(os.sched_getaffinity(0))
+    _align_threads = max(1, _available_cpus // 2)
+    if logger:
+        logger.warning(f"Alignment using {_align_threads} threads (half of {_available_cpus} available CPUs)")
+
     # Determine partition columns based on modality
     if modality == 'single-cell':
         partition_cols = ['intBC', 'mod']
@@ -620,7 +623,7 @@ def plug_cassiopeia(
             align_kwargs = {
                 'queries': queries.to_pandas(),
                 'ref_filepath': f'{workdir}/{mod}.fasta',
-                'n_threads': 1,
+                'n_threads': _align_threads,
                 'method': alignment_method,
             }
             if gap_open_penalty is not None:
@@ -636,18 +639,22 @@ def plug_cassiopeia(
                             **allele_params,
                         )
 
+
             # Enrich allele columns with actual insertion sequences from CIGAR
             # allele_table already contains Seq and CIGAR columns from umi_table
             pl_allele = pl.DataFrame(allele_table)
             rcols = pl_allele.select(pl.col('^r\\d+$')).columns
+
+            # Sanitize "rcols" for proper alphanumeric sorting
+            rcols_zf = {c: f'r{int(c[1:]):03d}' for c in rcols}
+            pl_allele = pl_allele.rename(rcols_zf)
+            rcols = list(rcols_zf.values())
+
             if rcols and 'Seq' in pl_allele.columns and 'CIGAR' in pl_allele.columns:
                 pl_allele = pl_allele.with_columns([
                     pl.col(col).cigar.enrich_insertions(pl.col('Seq'), pl.col('CIGAR'))
                     for col in rcols
                 ])
-
-            # Handle deletions spanning multiple cutsites
-            pl_allele = flag_spanning_deletions(pl_allele, rcols, mode=spanning_deletions)
 
             # Fill any remaining null values in r columns with "None" string
             # (nulls come from cas.pp.call_alleles when it can't determine a cutsite allele)
@@ -676,37 +683,12 @@ def plug_cassiopeia(
     # Concatenate all partition results
     alleles_pl = pl.concat(res) if res else pl.DataFrame()
 
-    # For single-cell: collapse UMIs to one allele per (cell, intBC)
-    # Keep both raw (per-UMI) and collapsed (per-cell) versions
-    collapse_metrics = {}
-    alleles_pl_collapsed = None
-    if modality == 'single-cell' and collapse_to_cells and alleles_pl.height > 0:
-        n_rows_before = alleles_pl.height
-        alleles_pl_collapsed = collapse_umis_to_cells(
-            alleles_pl,
-            cell_col='cellBC',
-            intbc_col='intBC',
-            min_umis_per_cell=min_umis_per_cell,
-            min_umi_agreement=min_umi_agreement,
-            logger=logger,
-        )
-        collapse_metrics = {
-            'collapse_enabled': True,
-            'rows_before_collapse': n_rows_before,
-            'rows_after_collapse': alleles_pl_collapsed.height,
-            'min_umis_per_cell': min_umis_per_cell,
-            'min_umi_agreement': min_umi_agreement,
-        }
-    else:
-        collapse_metrics = {'collapse_enabled': False}
-
     return StepResults(
             results={
                 "alleles_pl": alleles_pl,                      # Raw per-UMI alleles
-                "alleles_pl_collapsed": alleles_pl_collapsed,  # Collapsed per-cell (single-cell only)
                 "alleles_pd": umi_tables,
             },
-            metrics={"partitions_processed": len(res), "none_mod_skipped": nones, **filter_metrics, **collapse_metrics}
+            metrics={"partitions_processed": len(res), "none_mod_skipped": nones, **filter_metrics}
     )
 
 def save_ref_to_fasta(refs: pl.DataFrame, out_dir: str|Path = '.', field: str = 'mod') -> None:
@@ -1036,9 +1018,10 @@ class CassiopeiaConfig(ExtensionConfig):
     min_ratio_to_max: float = 0.1               # % of largest group per sbc (e.g., 0.1 = 10%)
     top_n_cells: Optional[int] = None            # Keep top N cells by total UMI count (single-cell only)
 
-    # Single-cell collapse parameters
-    # For single-cell lineage tracing, collapse multiple UMIs per cell to one allele per (cell, intBC)
-    collapse_to_cells: bool = True              # Enable collapse for single-cell modality
+    # Molecule size filtering
+    min_molecule_len: Optional[int] = None      # Min sequence length to include in allele table (None = no filter)
+
+    # Single-cell collapse parameters (SC mode collapses multiple UMIs per cell to one allele per (cell, intBC))
     min_umis_per_cell: int = 4                  # Minimum UMIs for valid consensus (cells with fewer are filtered)
     min_umi_agreement: float = 0.5              # Min fraction for consensus (below -> missing/None)
 
@@ -1048,7 +1031,7 @@ class CassiopeiaConfig(ExtensionConfig):
     skip_branch_lengths: bool = False
     min_branch_length: float = 0.01
     tree_mode: str = 'auto'                     # auto | sc | sm
-                                                # auto: sc if collapse_to_cells else sm
+                                                # auto: sc if single-cell modality else sm
     tree_group_by: list = field(default_factory=lambda: ['intBC', 'sbc'])
                                                 # SM mode only: columns to partition jobs by
                                                 # ['intBC'] = one tree per intBC (pool sbcs)
@@ -1176,16 +1159,10 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
             self.xp.logger.info("Running plug_cassiopeia step")
             result = self._plug_cassiopeia()
 
-            # Save raw per-UMI alleles
+            # Save raw per-UMI alleles (collapse happens downstream in _build_trees)
             self.alleles_pl = result.results['alleles_pl']
             self.alleles_pl.write_parquet(f"{self.workdir}/alleles_pl.parquet")
             self.xp.logger.io(f"Saved raw per-UMI alleles to {self.workdir}/alleles_pl.parquet")
-
-            # Save collapsed per-cell alleles (single-cell only)
-            self.alleles_pl_collapsed = result.results.get('alleles_pl_collapsed')
-            if self.alleles_pl_collapsed is not None:
-                self.alleles_pl_collapsed.write_parquet(f"{self.workdir}/alleles_pl_collapsed.parquet")
-                self.xp.logger.io(f"Saved collapsed per-cell alleles to {self.workdir}/alleles_pl_collapsed.parquet")
 
             self.xp.logger.io(f"Saving cassiopeia allele tables to {cass_allele_path}")
             self.ldf.sink_parquet(cass_allele_path)
@@ -1593,11 +1570,7 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
             write_done(outdir, f'too_few_entries_{n_cells}')
             return StepResults(results={}, metrics={'skipped': True, 'reason': 'too_few_entries'})
 
-        # Handle spanning deletions
-        if config.spanning_deletions != 'use':
-            allele_table = flag_spanning_deletions(allele_table, rcols, mode=config.spanning_deletions)
-
-        # Fill nulls for cassiopeia
+        # Fill nulls for cassiopeia (spanning deletions already handled by _build_trees orchestrator)
         allele_table = allele_table.with_columns([pl.col(c).fill_null('None') for c in rcols])
         pd_allele = allele_table.to_pandas()
 
@@ -1640,7 +1613,7 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         obs = allele_wide_pd.loc[leaves_in_obs]
 
         tdata = td.TreeData(
-            X=None, allow_overlap=True, obs=obs,
+            X=None, allow_overlap=True, obs=obs.copy(),
             obst={config.solver: cas_tree.get_tree_topology()},
         )
         add_weighted_depth(tdata, tree_key=config.solver)
@@ -1731,11 +1704,7 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
             write_done(outdir, f'too_few_entries_{sub.height}')
             return StepResults(results={}, metrics={'skipped': True, 'reason': 'too_few_molecules'})
 
-        # Handle spanning deletions
-        if config.spanning_deletions != 'use':
-            sub = flag_spanning_deletions(sub, rcols, mode=config.spanning_deletions)
-
-        # Fill nulls for cassiopeia
+        # Fill nulls for cassiopeia (spanning deletions already handled by _build_trees orchestrator)
         sub = sub.with_columns([pl.col(c).fill_null('None') for c in rcols])
         pd_allele = sub.to_pandas()
 
@@ -1777,7 +1746,7 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
 
         tdata = td.TreeData(
             X=None, allow_overlap=True,
-            obs=allele_matrix.loc[cas_tree.leaves],
+            obs=allele_matrix.loc[cas_tree.leaves].copy(),
             obst={config.solver: cas_tree.get_tree_topology()},
         )
         add_weighted_depth(tdata, tree_key=config.solver)
@@ -1881,14 +1850,46 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         config = self.config
         workdir = self.workdir
 
-        # Load allele table (collapsed for SC, raw for SM)
-        if config.collapse_to_cells and (workdir / 'alleles_pl_collapsed.parquet').exists():
-            allele_path = workdir / 'alleles_pl_collapsed.parquet'
-        else:
-            allele_path = workdir / 'alleles_pl.parquet'
-
+        # Always load raw per-UMI alleles — filters and collapse happen here
+        allele_path = workdir / 'alleles_pl.parquet'
         allele_table = pl.read_parquet(allele_path)
         rcols = [c for c in allele_table.columns if re.match(r'^r\d+$', c)]
+
+        # Apply min_molecule_len filter on raw per-UMI data (before collapse)
+        if config.min_molecule_len is not None and 'Seq' in allele_table.columns:
+            n_before = allele_table.height
+            allele_table = allele_table.filter(pl.col('Seq').str.len_chars() >= config.min_molecule_len)
+            self.xp.logger.info(
+                f"min_molecule_len filter ({config.min_molecule_len}): {n_before} -> {allele_table.height} rows"
+            )
+
+        # Handle spanning deletions on raw data (before collapse so mode() isn't biased)
+        allele_table = flag_spanning_deletions(allele_table, rcols, mode=config.spanning_deletions)
+
+        # Determine mode
+        modality = getattr(self.xp, 'modality', 'single-molecule')
+        mode = config.tree_mode
+        if mode == 'auto':
+            mode = 'sc' if modality == 'single-cell' else 'sm'
+
+        # Collapse UMIs to cells for SC mode (on filtered data)
+        if mode == 'sc' and allele_table.height > 0:
+            n_before = allele_table.height
+            allele_table = collapse_umis_to_cells(
+                allele_table,
+                cell_col='cellBC',
+                intbc_col='intBC',
+                min_umis_per_cell=config.min_umis_per_cell,
+                min_umi_agreement=config.min_umi_agreement,
+                logger=self.xp.logger,
+            )
+            self.xp.logger.info(
+                f"Collapsed UMIs to cells: {n_before} -> {allele_table.height} rows"
+            )
+            # Save collapsed table for postmortem
+            collapsed_path = workdir / 'alleles_pl_collapsed.parquet'
+            allele_table.write_parquet(collapsed_path)
+            self.xp.logger.io(f"Saved collapsed alleles to {collapsed_path}")
 
         n_cells = allele_table['cellBC'].n_unique() if 'cellBC' in allele_table.columns else allele_table.height
         n_intbcs = allele_table['intBC'].n_unique() if 'intBC' in allele_table.columns else 0
@@ -1896,11 +1897,6 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
             f"Loaded allele table: {allele_table.height} rows, {n_cells} cells, "
             f"{n_intbcs} intBCs, {len(rcols)} cutsites — from {allele_path.name}"
         )
-
-        # Determine mode
-        mode = config.tree_mode
-        if mode == 'auto':
-            mode = 'sc' if config.collapse_to_cells else 'sm'
 
         tree_base = workdir / 'trees'
         if config.tree_test_mode:
@@ -2228,7 +2224,7 @@ def _build_tree_standalone(args):
         obs_df = obs_df.loc[cas_tree.leaves]
 
     tdata = td.TreeData(
-        X=None, allow_overlap=True, obs=obs_df,
+        X=None, allow_overlap=True, obs=obs_df.copy(),
         obst={args.solver: cas_tree.get_tree_topology()},
     )
     add_weighted_depth(tdata, tree_key=args.solver)
