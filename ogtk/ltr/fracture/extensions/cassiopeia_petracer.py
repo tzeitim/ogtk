@@ -17,29 +17,31 @@ def collapse_umis_to_cells(
     cell_col: str = 'cellBC',
     intbc_col: str = 'intBC',
     min_umis_per_cell: int = 4,
-    min_umi_agreement: float = 0.5,
+    min_umi_agreement: Optional[float] = 0.5,
+    method: str = 'mode_site',
     logger: Optional[CustomLogger] = None,
 ) -> pl.DataFrame:
     """
     Collapse multiple UMIs per cell into one consensus allele per (cell, intBC).
 
-    For single-cell lineage tracing, each cell may have multiple UMIs for the same
-    integration barcode. This function collapses them to one consensus row per
-    (cell, intBC) using mode-based voting.
+    Dispatches to one of two strategies:
+      - 'mode_site': per-cutsite mode voting across UMIs (independent per r column)
+      - 'mode_umi': pick the allele pattern from the most frequent whole-UMI,
+                    using readCount as tiebreaker
 
     Args:
-        allele_df: DataFrame with cellBC, intBC, r1, r2, ..., readCount columns
+        allele_df: DataFrame with cellBC, intBC, r001..r015, readCount columns
         cell_col: Column name for cell barcode
         intbc_col: Column name for integration barcode
-        min_umis_per_cell: Minimum UMIs required for valid consensus (default 4).
+        min_umis_per_cell: Minimum UMIs required per (cell, intBC) group.
                           Groups with fewer UMIs are filtered out.
-        min_umi_agreement: Minimum fraction for consensus (default 0.5).
-                          If the mode has support below this threshold, mark as None (missing).
+        min_umi_agreement: (mode_site only) Minimum fraction for consensus.
+                          If the mode has support below this threshold, mark as None.
+        method: Collapse strategy — 'mode_site' or 'mode_umi'
         logger: Optional logger for info messages
 
     Returns:
         DataFrame with one row per (cell, intBC), adds n_umis column.
-        Cells with fewer than min_umis_per_cell UMIs are excluded.
     """
     if allele_df.height == 0:
         return allele_df.with_columns(pl.lit(0).alias('n_umis'))
@@ -51,15 +53,9 @@ def collapse_umis_to_cells(
             logger.warning("No r columns found in allele_df, returning as-is with n_umis=1")
         return allele_df.with_columns(pl.lit(1).alias('n_umis'))
 
-    # Columns to preserve (take first value per group)
-    preserve_cols = [c for c in allele_df.columns if c not in rcols + [cell_col, intbc_col]]
-
-    # Add row index for tracking
-    df = allele_df.with_row_index('_row_idx')
-
     # Step 1: Get group sizes and filter by min_umis_per_cell
     group_sizes = (
-        df.group_by([cell_col, intbc_col])
+        allele_df.group_by([cell_col, intbc_col])
         .agg(pl.len().alias('n_umis'))
     )
 
@@ -72,19 +68,56 @@ def collapse_umis_to_cells(
                    f"with < {min_umis_per_cell} UMIs ({n_groups_after} remaining)")
 
     if valid_groups.height == 0:
-        # Return empty DataFrame with expected columns
+        preserve_cols = [c for c in allele_df.columns if c not in rcols + [cell_col, intbc_col]]
         empty_cols = [cell_col, intbc_col, 'n_umis'] + rcols + preserve_cols
         return pl.DataFrame(schema={c: allele_df.schema.get(c, pl.Utf8) for c in empty_cols if c in allele_df.columns or c == 'n_umis'})
 
-    # Filter to only valid groups
-    df = df.join(valid_groups.select([cell_col, intbc_col]), on=[cell_col, intbc_col], how='semi')
+    # Filter to valid groups
+    df = allele_df.join(valid_groups.select([cell_col, intbc_col]), on=[cell_col, intbc_col], how='semi')
 
-    # Step 2: For each r column, compute mode and support using native Polars
-    # Use unpivot -> group -> compute -> pivot approach for efficiency
+    # Step 2: Dispatch to strategy
+    if method == 'mode_site':
+        result = _collapse_mode_site(df, rcols, cell_col, intbc_col, min_umi_agreement)
+    elif method == 'mode_umi':
+        result = _collapse_mode_umi(df, rcols, cell_col, intbc_col)
+    else:
+        raise ValueError(f"Unknown collapse method: {method!r}. Use 'mode_site' or 'mode_umi'.")
+
+    # Add n_umis column
+    result = result.join(valid_groups, on=[cell_col, intbc_col], how='left')
+
+    # Reorder columns: group keys + n_umis + rcols + anything else
+    output_cols = [cell_col, intbc_col, 'n_umis'] + rcols
+    output_cols += [c for c in result.columns if c not in output_cols]
+    result = result.select(output_cols)
+
+    if logger:
+        logger.info(f"UMI collapse ({method}): {allele_df.height} rows -> {result.height} (cell, intBC) pairs")
+
+    return result
+
+
+def _collapse_mode_site(
+    df: pl.DataFrame,
+    rcols: list[str],
+    cell_col: str,
+    intbc_col: str,
+    min_umi_agreement: Optional[float],
+) -> pl.DataFrame:
+    """Per-cutsite mode voting.
+
+    For each (cell, intBC, cutsite), independently picks the most frequent
+    allele value across UMIs. Positions where the mode has support below
+    min_umi_agreement are set to None (missing data).
+    """
+    # Columns to preserve (take first value per group)
+    preserve_cols = [c for c in df.columns if c not in rcols + [cell_col, intbc_col]]
+
+    df_idx = df.with_row_index('_row_idx')
 
     # Unpivot r columns to long format
     id_cols = [cell_col, intbc_col, '_row_idx'] + preserve_cols
-    unpivoted = df.unpivot(
+    unpivoted = df_idx.unpivot(
         on=rcols,
         index=id_cols,
         variable_name='_rcol',
@@ -97,24 +130,21 @@ def collapse_umis_to_cells(
         .group_by([cell_col, intbc_col, '_rcol'])
         .agg([
             pl.len().alias('_n_total'),
-            # Get value counts and extract mode info
             pl.col('_allele').value_counts(sort=True).first().alias('_mode_struct'),
         ])
         .with_columns([
-            # Extract mode value
             pl.col('_mode_struct').struct.field('_allele').alias('_mode_value'),
-            # Extract mode count
             pl.col('_mode_struct').struct.field('count').alias('_mode_count'),
         ])
         .with_columns(
-            # Calculate support fraction
             (pl.col('_mode_count') / pl.col('_n_total')).alias('_support')
         )
         .with_columns(
-            # Apply threshold: if support < min_umi_agreement, set to None
-            pl.when(pl.col('_support') >= min_umi_agreement)
-            .then(pl.col('_mode_value'))
-            .otherwise(pl.lit(None))
+            # When min_umi_agreement is None, keep all mode values (no threshold)
+            (pl.col('_mode_value') if min_umi_agreement is None else
+             pl.when(pl.col('_support') >= min_umi_agreement)
+             .then(pl.col('_mode_value'))
+             .otherwise(pl.lit(None)))
             .alias('_consensus_value')
         )
         .select([cell_col, intbc_col, '_rcol', '_consensus_value'])
@@ -127,24 +157,96 @@ def collapse_umis_to_cells(
         values='_consensus_value'
     )
 
-    # Add n_umis column
-    result = result.join(valid_groups, on=[cell_col, intbc_col], how='left')
-
     # Add preserved columns (take first value per group)
     if preserve_cols:
         preserved = (
-            df.group_by([cell_col, intbc_col])
+            df_idx.group_by([cell_col, intbc_col])
             .agg([pl.col(c).first().alias(c) for c in preserve_cols])
         )
         result = result.join(preserved, on=[cell_col, intbc_col], how='left')
 
-    # Reorder columns to match expected output
-    output_cols = [cell_col, intbc_col, 'n_umis'] + rcols + preserve_cols
-    output_cols = [c for c in output_cols if c in result.columns]
-    result = result.select(output_cols)
+    return result
 
-    if logger:
-        logger.info(f"UMI collapse: {allele_df.height} rows -> {result.height} (cell, intBC) pairs")
+
+def _collapse_mode_umi(
+    df: pl.DataFrame,
+    rcols: list[str],
+    cell_col: str,
+    intbc_col: str,
+) -> pl.DataFrame:
+    """Whole-UMI consensus: pick the most frequent allele pattern.
+
+    Instead of voting independently per cutsite, this treats the entire
+    r-column vector of each UMI as an atomic unit. For each (cell, intBC)
+    group, it finds the most common allele pattern across UMIs.
+
+    Ranking (descending): total_molecule_len > n_umis > total_readCount.
+    sum(mol_len) naturally encodes both frequency and quality — many long
+    molecules dominate over many short chimeras or few long artifacts.
+
+    This avoids the fragmentation problem where ONT errors in flanking
+    context create many unique per-site strings that dilute mode() votes.
+    """
+    # Build a composite key from all r columns to identify unique patterns
+    # Use "|" as separator — safe since allele strings don't contain it
+    has_seq = 'Seq' in df.columns
+    has_readcount = 'readCount' in df.columns
+
+    df_keyed = df.with_columns(
+        pl.concat_str(rcols, separator='|').alias('_pattern'),
+        *([pl.col('Seq').str.len_chars().alias('_mol_len')] if has_seq else []),
+    )
+
+    # Aggregate: count UMIs per pattern, sum molecule length and readCount as tiebreakers
+    agg_exprs = [
+        pl.len().alias('_n_umis'),
+    ]
+    if has_seq:
+        agg_exprs.append(pl.col('_mol_len').sum().alias('_total_mol_len'))
+    if has_readcount:
+        agg_exprs.append(pl.col('readCount').sum().alias('_total_reads'))
+
+    pattern_counts = (
+        df_keyed
+        .group_by([cell_col, intbc_col, '_pattern'])
+        .agg(agg_exprs)
+    )
+
+    # For each (cell, intBC), pick the pattern with the highest total
+    # molecule length, breaking ties by UMI count, then readCount
+    sort_cols = []
+    if has_seq:
+        sort_cols.append('_total_mol_len')
+    sort_cols.append('_n_umis')
+    if has_readcount:
+        sort_cols.append('_total_reads')
+
+    best_patterns = (
+        pattern_counts
+        .sort(sort_cols, descending=True)
+        .group_by([cell_col, intbc_col])
+        .first()
+        .select([cell_col, intbc_col, '_pattern'])
+    )
+
+    # Explode the pattern back into individual r columns
+    result = best_patterns.with_columns(
+        pl.col('_pattern').str.split('|').alias('_parts')
+    )
+
+    # Assign each element back to its r column
+    for i, rcol in enumerate(rcols):
+        result = result.with_columns(
+            pl.col('_parts').list.get(i).alias(rcol)
+        )
+
+    # Replace "null" strings that came from concat_str with actual nulls
+    result = result.with_columns([
+        pl.when(pl.col(c) == 'null').then(pl.lit(None)).otherwise(pl.col(c)).alias(c)
+        for c in rcols
+    ])
+
+    result = result.drop(['_pattern', '_parts'])
 
     return result
 
@@ -152,16 +254,18 @@ def collapse_umis_to_cells(
 def flag_spanning_deletions(pl_allele: pl.DataFrame, rcols: list[str], mode: str = 'unedited') -> pl.DataFrame:
     """Handle alleles spanning multiple cutsites.
 
-    Detects when the same non-empty allele value appears in multiple r columns
-    for the same row, indicating a deletion that spans multiple cutsites.
+    Detects spanning deletions by checking for identical non-empty allele values
+    at *adjacent* cutsite positions within the same row. The same allele at
+    non-adjacent positions is treated as independent edits and left untouched.
 
     Args:
         pl_allele: DataFrame with r1, r2, ... columns containing allele values
-        rcols: List of r column names (e.g., ['r1', 'r2', 'r3', ...])
+        rcols: List of r column names in order (e.g., ['r001', 'r002', 'r003', ...])
         mode: How to handle spanning deletions:
             - 'unedited': mark as unedited ("None" string, Cassiopeia state 0)
             - 'missing': mark as missing data (null)
             - 'use': leave as-is (keep the deletion allele value)
+            Note: 'both' is resolved by the caller (_build_trees) before reaching here.
 
     Returns:
         DataFrame with spanning deletions handled according to mode
@@ -169,62 +273,52 @@ def flag_spanning_deletions(pl_allele: pl.DataFrame, rcols: list[str], mode: str
     if not rcols or mode == 'use':
         return pl_allele
 
-    # Cassiopeia treats "NONE" or strings containing "None" as uncut (state 0)
-    # Missing data requires passing missing_data_allele to convert_alleletable_to_character_matrix
     replacement_value = 'None' if mode == 'unedited' else None
 
-    # Add row index for tracking
-    df = pl_allele.with_row_index('_row_idx')
+    # For each row, mark positions where the allele equals the adjacent
+    # neighbor's allele (non-empty, non-"None" values only)
+    # A position is spanning if it matches its left OR right neighbor.
+    is_spanning_exprs = []
+    for i, rcol in enumerate(rcols):
+        neighbors = []
+        if i > 0:
+            neighbors.append(pl.col(rcol) == pl.col(rcols[i - 1]))
+        if i < len(rcols) - 1:
+            neighbors.append(pl.col(rcol) == pl.col(rcols[i + 1]))
 
-    # Unpivot r columns to long format
-    unpivoted = df.unpivot(
-        on=rcols,
-        index='_row_idx',
-        variable_name='cutsite',
-        value_name='allele'
-    )
+        # Combine neighbor checks with OR
+        is_adj_match = neighbors[0]
+        for n in neighbors[1:]:
+            is_adj_match = is_adj_match | n
 
-    # Find alleles that appear in multiple cutsites for the same row
-    # (non-empty values only)
-    spanning = (
-        unpivoted
-        .filter(pl.col('allele').is_not_null())
-        .filter(pl.col('allele') != '')
-        .group_by(['_row_idx', 'allele'])
-        .agg(pl.len().alias('count'))
-        .filter(pl.col('count') > 1)
-        .select(['_row_idx', 'allele'])
-        .with_columns(pl.lit(True).alias('_is_spanning'))
-    )
-
-    # Mark spanning deletions according to mode
-    unpivoted = (
-        unpivoted
-        .join(spanning, on=['_row_idx', 'allele'], how='left')
-        .with_columns(
-            pl.when(pl.col('_is_spanning') == True)
-            .then(pl.lit(replacement_value))
-            .otherwise(pl.col('allele'))
-            .alias('allele')
+        # Only flag non-null, non-empty, non-"None" alleles
+        is_real_allele = (
+            pl.col(rcol).is_not_null()
+            & (pl.col(rcol) != '')
+            & (~pl.col(rcol).str.contains('(?i)^None$'))
         )
-        .with_columns(pl.col('allele').cast(pl.Utf8))  # Ensure string type preserved through pivot
-        .drop('_is_spanning')
-    )
 
-    # Pivot back to wide format
-    pivoted = unpivoted.pivot(
-        on='cutsite',
-        index='_row_idx',
-        values='allele'
-    )
+        is_spanning_exprs.append(
+            (is_real_allele & is_adj_match).alias(f'_span_{rcol}')
+        )
 
-    # Restore original column order and merge with non-r columns
-    other_cols = [c for c in pl_allele.columns if c not in rcols]
+    df = pl_allele.with_columns(is_spanning_exprs)
+
+    # Replace spanning positions according to mode
+    replace_exprs = []
+    for rcol in rcols:
+        replace_exprs.append(
+            pl.when(pl.col(f'_span_{rcol}'))
+            .then(pl.lit(replacement_value))
+            .otherwise(pl.col(rcol))
+            .cast(pl.Utf8)
+            .alias(rcol)
+        )
+
     result = (
-        df.select(['_row_idx'] + other_cols)
-        .join(pivoted, on='_row_idx')
-        .drop('_row_idx')
-        .select(pl_allele.columns)  # restore original column order
+        df
+        .with_columns(replace_exprs)
+        .drop([f'_span_{rcol}' for rcol in rcols])
     )
 
     return result
@@ -1003,6 +1097,7 @@ class CassiopeiaConfig(ExtensionConfig):
     # - 'unedited': mark as unedited ("None" string, Cassiopeia state 0)
     # - 'missing': mark as missing data (null)
     # - 'use': leave as-is (keep the deletion allele value)
+    # - 'both': run trees for both 'unedited' and 'use' (separate output dirs)
     spanning_deletions: str = 'unedited'
 
     # Segmented allele extraction fields
@@ -1022,8 +1117,10 @@ class CassiopeiaConfig(ExtensionConfig):
     min_molecule_len: Optional[int] = None      # Min sequence length to include in allele table (None = no filter)
 
     # Single-cell collapse parameters (SC mode collapses multiple UMIs per cell to one allele per (cell, intBC))
+    collapse_method: str = 'mode_site'          # 'mode_site' = per-cutsite mode voting, 'mode_umi' = most frequent whole-UMI pattern
     min_umis_per_cell: int = 4                  # Minimum UMIs for valid consensus (cells with fewer are filtered)
-    min_umi_agreement: float = 0.5              # Min fraction for consensus (below -> missing/None)
+    min_umi_agreement: Optional[float] = 0.5     # Min fraction for consensus (below -> missing/None, null = no threshold)
+                                                 # Only used by mode_site
 
     # Tree generation
     solver: str = 'nj'                          # nj | vanilla | mcgs
@@ -1852,116 +1949,131 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
 
         # Always load raw per-UMI alleles — filters and collapse happen here
         allele_path = workdir / 'alleles_pl.parquet'
-        allele_table = pl.read_parquet(allele_path)
-        rcols = [c for c in allele_table.columns if re.match(r'^r\d+$', c)]
+        allele_table_raw = pl.read_parquet(allele_path)
+        rcols = [c for c in allele_table_raw.columns if re.match(r'^r\d+$', c)]
 
         # Apply min_molecule_len filter on raw per-UMI data (before collapse)
-        if config.min_molecule_len is not None and 'Seq' in allele_table.columns:
-            n_before = allele_table.height
-            allele_table = allele_table.filter(pl.col('Seq').str.len_chars() >= config.min_molecule_len)
+        if config.min_molecule_len is not None and 'Seq' in allele_table_raw.columns:
+            n_before = allele_table_raw.height
+            allele_table_raw = allele_table_raw.filter(pl.col('Seq').str.len_chars() >= config.min_molecule_len)
             self.xp.logger.info(
-                f"min_molecule_len filter ({config.min_molecule_len}): {n_before} -> {allele_table.height} rows"
+                f"min_molecule_len filter ({config.min_molecule_len}): {n_before} -> {allele_table_raw.height} rows"
             )
 
-        # Handle spanning deletions on raw data (before collapse so mode() isn't biased)
-        allele_table = flag_spanning_deletions(allele_table, rcols, mode=config.spanning_deletions)
-
-        # Determine mode
+        # Determine tree mode
         modality = getattr(self.xp, 'modality', 'single-molecule')
         mode = config.tree_mode
         if mode == 'auto':
             mode = 'sc' if modality == 'single-cell' else 'sm'
 
-        # Collapse UMIs to cells for SC mode (on filtered data)
-        if mode == 'sc' and allele_table.height > 0:
-            n_before = allele_table.height
-            allele_table = collapse_umis_to_cells(
-                allele_table,
-                cell_col='cellBC',
-                intbc_col='intBC',
-                min_umis_per_cell=config.min_umis_per_cell,
-                min_umi_agreement=config.min_umi_agreement,
-                logger=self.xp.logger,
-            )
-            self.xp.logger.info(
-                f"Collapsed UMIs to cells: {n_before} -> {allele_table.height} rows"
-            )
-            # Save collapsed table for postmortem
-            collapsed_path = workdir / 'alleles_pl_collapsed.parquet'
-            allele_table.write_parquet(collapsed_path)
-            self.xp.logger.io(f"Saved collapsed alleles to {collapsed_path}")
-
-        n_cells = allele_table['cellBC'].n_unique() if 'cellBC' in allele_table.columns else allele_table.height
-        n_intbcs = allele_table['intBC'].n_unique() if 'intBC' in allele_table.columns else 0
-        self.xp.logger.info(
-            f"Loaded allele table: {allele_table.height} rows, {n_cells} cells, "
-            f"{n_intbcs} intBCs, {len(rcols)} cutsites — from {allele_path.name}"
-        )
+        # Resolve spanning deletion modes to iterate over
+        span_modes = ['unedited', 'use'] if config.spanning_deletions == 'both' else [config.spanning_deletions]
 
         tree_base = workdir / 'trees'
         if config.tree_test_mode:
             tree_base = tree_base / 'test'
-        tree_outdir = tree_base / f'span_{config.spanning_deletions}'
-        tree_outdir.mkdir(parents=True, exist_ok=True)
-        self.xp.logger.info(
-            f"Tree mode: {mode} | solver: {config.solver} | "
-            f"spanning: {config.spanning_deletions} | "
-            f"branch_lengths: {'skip' if config.skip_branch_lengths else 'convexml'} | "
-            f"execution: {'lsf' if config.tree_use_lsf else 'inline'}"
-        )
-        self.xp.logger.info(f"Output dir: {tree_outdir}")
 
-        # Subsample for testing (SC: global, SM: per-group in _build_tree_sm)
-        if config.tree_test_mode and config.tree_subsample:
-            self.xp.logger.info("Tree test mode enabled — subsampling data"
-                                + (" (globally for SC)" if mode == 'sc' else " (per-group for SM)"))
+        all_results = {}
+        all_metrics: Dict[str, int] = {'trees_built': 0, 'trees_cached': 0, 'trees_submitted': 0}
 
-        if mode == 'sc':
+        for span_mode in span_modes:
+            self.xp.logger.info(
+                f"Tree mode: {mode} | solver: {config.solver} | "
+                f"spanning: {span_mode} | "
+                f"branch_lengths: {'skip' if config.skip_branch_lengths else 'convexml'} | "
+                f"execution: {'lsf' if config.tree_use_lsf else 'inline'}"
+            )
+
+            # Handle spanning deletions on raw data (before collapse so mode() isn't biased)
+            allele_table = flag_spanning_deletions(allele_table_raw, rcols, mode=span_mode)
+
+            # Collapse UMIs to cells for SC mode (on filtered data)
+            if mode == 'sc' and allele_table.height > 0:
+                n_before = allele_table.height
+                allele_table = collapse_umis_to_cells(
+                    allele_table,
+                    cell_col='cellBC',
+                    intbc_col='intBC',
+                    min_umis_per_cell=config.min_umis_per_cell,
+                    min_umi_agreement=config.min_umi_agreement,
+                    method=config.collapse_method,
+                    logger=self.xp.logger,
+                )
+                self.xp.logger.info(
+                    f"Collapsed UMIs to cells: {n_before} -> {allele_table.height} rows"
+                )
+                # Save collapsed table for postmortem (tagged by span mode)
+                suffix = f'_span_{span_mode}' if len(span_modes) > 1 else ''
+                collapsed_path = workdir / f'alleles_pl_collapsed{suffix}.parquet'
+                allele_table.write_parquet(collapsed_path)
+                self.xp.logger.io(f"Saved collapsed alleles to {collapsed_path}")
+
+            n_cells = allele_table['cellBC'].n_unique() if 'cellBC' in allele_table.columns else allele_table.height
+            n_intbcs = allele_table['intBC'].n_unique() if 'intBC' in allele_table.columns else 0
+            self.xp.logger.info(
+                f"Loaded allele table: {allele_table.height} rows, {n_cells} cells, "
+                f"{n_intbcs} intBCs, {len(rcols)} cutsites — from {allele_path.name}"
+            )
+
+            tree_outdir = tree_base / f'span_{span_mode}'
+            tree_outdir.mkdir(parents=True, exist_ok=True)
+            self.xp.logger.info(f"Output dir: {tree_outdir}")
+
+            # Subsample for testing (SC: global, SM: per-group in _build_tree_sm)
             if config.tree_test_mode and config.tree_subsample:
-                allele_table = self._subsample(allele_table, config.tree_subsample, self.xp.logger)
-            jobs = [{'mode': 'sc', 'outdir': tree_outdir}]
-        else:
-            group_cols = [c for c in config.tree_group_by if c in allele_table.columns]
-            if not group_cols:
-                group_cols = ['intBC']
-            groups = allele_table.select(group_cols).unique()
-            self.xp.logger.info(f"SM grouping by {group_cols}: {groups.height} groups")
-            jobs = []
-            for row in groups.iter_rows(named=True):
-                label = '_'.join(str(row[c]) for c in group_cols)
-                job_outdir = tree_outdir / label
-                job = {'mode': 'sm', 'outdir': job_outdir, 'filter': {c: row[c] for c in group_cols}}
-                jobs.append(job)
+                self.xp.logger.info("Tree test mode enabled — subsampling data"
+                                    + (" (globally for SC)" if mode == 'sc' else " (per-group for SM)"))
 
-        # Filter out already-done jobs
-        force = getattr(config, 'force', False)
-        pending = [j for j in jobs if not (Path(j['outdir']) / 'done').exists() or force]
+            if mode == 'sc':
+                allele_for_trees = allele_table
+                if config.tree_test_mode and config.tree_subsample:
+                    allele_for_trees = self._subsample(allele_table, config.tree_subsample, self.xp.logger)
+                jobs = [{'mode': 'sc', 'outdir': tree_outdir}]
+            else:
+                allele_for_trees = allele_table
+                group_cols = [c for c in config.tree_group_by if c in allele_table.columns]
+                if not group_cols:
+                    group_cols = ['intBC']
+                groups = allele_table.select(group_cols).unique()
+                self.xp.logger.info(f"SM grouping by {group_cols}: {groups.height} groups")
+                jobs = []
+                for row in groups.iter_rows(named=True):
+                    label = '_'.join(str(row[c]) for c in group_cols)
+                    job_outdir = tree_outdir / label
+                    job = {'mode': 'sm', 'outdir': job_outdir, 'filter': {c: row[c] for c in group_cols}}
+                    jobs.append(job)
 
-        if not pending:
-            self.xp.logger.info(f"All {len(jobs)} trees already built (cached)")
-            return StepResults(
-                results={'tree_outdir': str(tree_outdir)},
-                metrics={'trees_cached': len(jobs), 'trees_pending': 0},
-            )
+            # Filter out already-done jobs
+            force = getattr(config, 'force', False)
+            pending = [j for j in jobs if not (Path(j['outdir']) / 'done').exists() or force]
 
-        self.xp.logger.info(f"Tree building: {len(pending)} pending, {len(jobs) - len(pending)} cached")
+            if not pending:
+                self.xp.logger.info(f"All {len(jobs)} trees already built (cached) for span_{span_mode}")
+                all_metrics['trees_cached'] += len(jobs)
+                continue
 
-        if config.tree_use_lsf:
-            job_ids = self._submit_tree_jobs_lsf(pending, allele_path, rcols)
-            return StepResults(
-                results={'tree_outdir': str(tree_outdir), 'lsf_job_ids': job_ids},
-                metrics={'trees_submitted': len(pending), 'trees_cached': len(jobs) - len(pending)},
-            )
-        else:
-            # Inline execution
-            for job in pending:
-                if job['mode'] == 'sc':
-                    self._build_tree_sc(allele_table, rcols, job['outdir'])
-                else:
-                    self._build_tree_sm(allele_table, rcols, job['outdir'], job['filter'])
-            return StepResults(
-                results={'tree_outdir': str(tree_outdir)},
-                metrics={'trees_built': len(pending), 'trees_cached': len(jobs) - len(pending)},
+            self.xp.logger.info(f"Tree building: {len(pending)} pending, {len(jobs) - len(pending)} cached")
+
+            if config.tree_use_lsf:
+                job_ids = self._submit_tree_jobs_lsf(pending, allele_path, rcols)
+                all_results[f'lsf_job_ids_{span_mode}'] = job_ids
+                all_metrics['trees_submitted'] += len(pending)
+                all_metrics['trees_cached'] += len(jobs) - len(pending)
+            else:
+                # Inline execution
+                for job in pending:
+                    if job['mode'] == 'sc':
+                        self._build_tree_sc(allele_for_trees, rcols, job['outdir'])
+                    else:
+                        self._build_tree_sm(allele_for_trees, rcols, job['outdir'], job['filter'])
+                all_metrics['trees_built'] += len(pending)
+                all_metrics['trees_cached'] += len(jobs) - len(pending)
+
+            all_results[f'tree_outdir_{span_mode}'] = str(tree_outdir)
+
+        return StepResults(
+            results=all_results,
+            metrics={k: v for k, v in all_metrics.items() if v > 0},
             )
 
     def _make_tree_cmd(self, job: dict, allele_path: Path, rcols: list[str]) -> str:
