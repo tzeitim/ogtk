@@ -1,0 +1,212 @@
+# Plan: Segment-Based Allele Table Generation for PE Tracer
+
+## Goal
+Create cassiopeia-compatible allele tables directly from segmentation data, bypassing full assembly. This avoids assembly artifacts and handles the unexpected variation found in PE tracer data.
+
+## Background
+- Current pipeline: segments → assembly → contigs → cassiopeia alignment → alleles
+- New approach: segments → direct insertion extraction → allele table
+- PE tracer structure: `start - triplet - META01 - triplet - META02 - ... - META(N) - end`
+- Each triplet contains: RNF2 → HEK3 → EMX1 (3 TARGET sites)
+- Cassette types: 5mer (4 METAs, 12 TARGETs), 10mer (9 METAs, 27 TARGETs), 20mer (19 METAs, 57 TARGETs)
+
+## Files to Modify
+
+### Primary: `ogtk/ltr/fracture/cassiopeia_petracer.py`
+Add new step `SEGMENTED_ALLELE` and supporting functions.
+
+### Reference (read-only):
+- `ogtk/ltr/fracture/extensions/PEtracer_metas_flanks.csv` - TARGET flanks for insertion extraction
+- `ogtk/ltr/fracture/pipeline/segmentation.py` - Segment structure reference
+
+## Implementation Steps
+
+### Step 1: Add new enum value
+```python
+class CassiopeiaStep(Enum):
+    # ... existing steps ...
+    SEGMENTED_ALLELE = "segmented_allele"  # NEW
+```
+
+### Step 2: Add config fields
+```python
+@dataclass
+class CassiopeiaConfig(ExtensionConfig):
+    # ... existing fields ...
+    # New fields for segmented allele extraction
+    intbc_anchor1: str = "CTCCAGCTTAATT"
+    intbc_anchor2: str = "AATGGCAGTCA"
+    metas_flanks_csv: Optional[str] = None  # Path to PEtracer_metas_flanks.csv
+    cassette_type: str = "5mer"  # Options: 5mer, 10mer, 20mer
+    min_consensus_support: float = 0.5
+```
+
+### Step 3: Create helper functions
+
+#### 3a. `extract_intbc_from_segment()`
+```python
+def extract_intbc_from_segment(
+    segment_seq: str,
+    anchor1: str,
+    anchor2: str
+) -> str | None:
+    """Extract intBC from segment containing the intBC region."""
+```
+
+#### 3b. `build_target_position_map()`
+```python
+def build_target_position_map(
+    metas: pl.DataFrame,
+    cassette_type: str
+) -> dict[tuple[str, str], tuple[str, int]]:
+    """
+    Map (start_meta, end_meta) → (target_name, position_index).
+
+    For 5mer: 4 triplets before each META = 12 positions
+    Position 1-3: before META01 (RNF2, HEK3, EMX1)
+    Position 4-6: between META01-META02
+    ...
+    """
+```
+
+#### 3c. `extract_insertion()`
+```python
+def extract_insertion(
+    segment_seq: str,
+    target_name: str,
+    left_flank: str,
+    right_flank: str,
+) -> str | None:
+    """
+    Extract insertion between left_flank and right_flank in segment.
+
+    Returns:
+    - "" (empty string) for wild-type (no insertion)
+    - Insertion sequence (e.g., "ACTGT") if present
+    - None if flanks not found (missing/error)
+    """
+```
+
+#### 3d. `consensus_insertions()`
+```python
+def consensus_insertions(
+    insertions: list[str | None],
+    min_support: float = 0.5
+) -> str | None:
+    """Determine consensus insertion from multiple reads."""
+```
+
+### Step 4: Create main function `segments_to_allele_table()`
+```python
+def segments_to_allele_table(
+    segments_df: pl.DataFrame,
+    metas: pl.DataFrame,
+    intbc_anchor1: str,
+    intbc_anchor2: str,
+    cassette_type: str = "5mer",
+    min_consensus_support: float = 0.5,
+    logger: CustomLogger | None = None,
+) -> pl.DataFrame:
+    """
+    Transform segmentation table to cassiopeia allele table format.
+
+    Input: segments_debug.parquet with columns [sbc, umi, start_meta, end_meta, segment_seq]
+
+    Output: Allele table with columns:
+    - cellBC, UMI, readCount, intBC, sbc, mod
+    - r1, r2, r3, ... rN (one per TARGET position)
+
+    Algorithm:
+    1. Group segments by (sbc, umi)
+    2. Extract intBC from first segment
+    3. For each segment, identify TARGET position and extract insertion
+    4. Consensus across multiple reads for same position
+    5. Pivot to wide format with rN columns
+    """
+```
+
+### Step 5: Add method to extension class
+```python
+def _segmented_allele(self) -> StepResults:
+    """Generate allele table directly from segments (no assembly needed)."""
+    segments_path = self.workdir / "segments_debug.parquet"
+
+    if not segments_path.exists():
+        raise FileNotFoundError(
+            f"Segments file not found: {segments_path}. "
+            "Run fracture with use_segmentation=True first."
+        )
+
+    segments_df = pl.read_parquet(segments_path)
+    metas_df = pl.read_csv(self.config.metas_flanks_csv)
+
+    allele_table = segments_to_allele_table(
+        segments_df=segments_df,
+        metas=metas_df,
+        intbc_anchor1=self.config.intbc_anchor1,
+        intbc_anchor2=self.config.intbc_anchor2,
+        cassette_type=self.config.cassette_type,
+        min_consensus_support=self.config.min_consensus_support,
+        logger=self.xp.logger,
+    )
+
+    output_path = self.workdir / "allele_table_segmented.parquet"
+    allele_table.write_parquet(output_path)
+
+    return StepResults(
+        results={'allele_table_segmented': allele_table},
+        metrics={
+            'total_molecules': allele_table.height,
+            'unique_intbcs': allele_table['intBC'].n_unique(),
+        }
+    )
+```
+
+### Step 6: Wire up in process() method
+Add conditional execution for the new step in `process()`:
+```python
+if self.should_run_step(CassiopeiaStep.SEGMENTED_ALLELE.value):
+    self.xp.logger.info("Running segmented_allele step")
+    result = self._segmented_allele()
+    self.alleles_segmented = result.results['allele_table_segmented']
+    final_results.update(result.results)
+    final_metrics.update(result.metrics)
+```
+
+## Allele Table Output Schema
+
+| Column | Type | Description |
+|--------|------|-------------|
+| cellBC | str | Same as sbc (single-molecule mode) |
+| UMI | str | Unique molecular identifier |
+| readCount | int | Number of segments/reads |
+| intBC | str | Integration barcode |
+| sbc | str | Sample barcode |
+| mod | str | Cassette type (e.g., "5mer") |
+| r1 | str | TARGET position 1 insertion |
+| r2 | str | TARGET position 2 insertion |
+| ... | ... | ... |
+| rN | str | TARGET position N insertion |
+
+**Values in rN columns:**
+- `""` (empty): Wild-type, no insertion
+- `"ACTGT"`: Insertion sequence (lineage mark)
+- `None`: Missing data (segment not found)
+
+## Segment-to-TARGET Mapping Logic
+
+For cassette structure: `start - [triplet] - META01 - [triplet] - META02 - ...`
+
+The segment `(start_meta, end_meta)` maps to TARGETs as follows:
+- `(_CASSETTE_START_, META01)` → first triplet positions 1-3
+- `(META01, META02)` → second triplet positions 4-6
+- `(META02, META03)` → third triplet positions 7-9
+- etc.
+
+Within each triplet, the order is: RNF2 (pos 1), HEK3 (pos 2), EMX1 (pos 3)
+
+## Testing Approach
+1. Run on existing segments_debug.parquet from group_008
+2. Verify intBC extraction matches known patterns
+3. Compare insertion calls with manual inspection
+4. Validate allele table format compatibility with cassiopeia
