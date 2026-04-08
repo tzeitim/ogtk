@@ -7,6 +7,7 @@ from .registry import extension_registry
 from .config import ExtensionConfig
 from ..pipeline.types import StepResults,FractureXp
 from ..pipeline.formats import scan_file, read_file
+from ..pipeline import api_ext  # noqa: F401  registers the `dna` namespace
 from dataclasses import dataclass, field
 from ogtk.utils.log import CustomLogger
 from ogtk.utils.general import fuzzy_match_str
@@ -704,9 +705,8 @@ def parse_contigs(
     # 2. Extract intBC and trim contig to remove the intBC region
     ldf = (
         ldf
+        .pp.extract_intbc(int_anchor1, int_anchor2, seq_col='contig')
         .with_columns(
-            pl.col('contig').str
-            .extract(f'{int_anchor1}(.+?){int_anchor2}', 1).alias('intBC'),
             pl.col('contig').str.replace(f'.*{int_anchor2}', '').alias('contig')
         )
     )

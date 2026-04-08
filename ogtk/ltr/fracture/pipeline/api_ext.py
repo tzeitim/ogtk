@@ -153,7 +153,15 @@ class PlPipeline:
     """
     def __init__(self, df: pl.DataFrame) -> None:
         self._df = df
-   
+
+    def extract_intbc(self,
+         int_anchor1: str,
+         int_anchor2: str,
+         seq_col: str = "contig",
+         out_col: str = "intBC") -> pl.DataFrame:
+        """Extract intBC as the substring between two anchor sequences."""
+        return self._df.lazy().pp.extract_intbc(int_anchor1, int_anchor2, seq_col=seq_col, out_col=out_col).collect() #pyright: ignore
+
     @call
     def assembly_with_opt(self,
                          start_k: int = 25,
@@ -512,6 +520,31 @@ class PllPipeline:
     def __init__(self, ldf: pl.LazyFrame) -> None:
         self._ldf = ldf
         self.logger = Rlogger().get_logger()
+
+    def extract_intbc(self,
+         int_anchor1: str,
+         int_anchor2: str,
+         seq_col: str = "contig",
+         out_col: str = "intBC") -> pl.LazyFrame:
+        """Extract intBC as the substring between ``int_anchor1`` and ``int_anchor2``.
+
+        Centralized intBC extraction so the same regex can be applied either to
+        raw reads (``seq_col`` set to the read sequence column) for pre-assembly
+        library QC, or to assembled contigs (``seq_col='contig'``) on the
+        standard post-assembly path.
+
+        Args:
+            int_anchor1 (str): 5' flanking anchor sequence.
+            int_anchor2 (str): 3' flanking anchor sequence.
+            seq_col (str): Column holding the sequence to scan.
+            out_col (str): Name of the output column.
+
+        Returns:
+            pl.LazyFrame: Input frame with ``out_col`` added.
+        """
+        return self._ldf.with_columns(
+            pl.col(seq_col).str.extract(f"{int_anchor1}(.+?){int_anchor2}", 1).alias(out_col)
+        )
 
     def enrich_allele_insertions(self,
                                   allele_cols: list[str] | None = None,
