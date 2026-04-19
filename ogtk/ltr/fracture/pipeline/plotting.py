@@ -260,6 +260,14 @@ class PlotDB():
                 pl.col('intbc_assigned').first().alias('assigned'),
                 pl.col('reads_intbc').first().alias('reads_valid'),
                 pl.len().alias('reads_total'),
+                pl.col('r2_seq').str.len_chars().mean().alias('mean_len_all'),
+                pl.col('r2_seq').str.len_chars().std().alias('std_len_all'),
+                pl.col('r2_seq').str.len_chars()
+                    .filter(pl.col('intbc_valid_read'))
+                    .mean().alias('mean_len_valid'),
+                pl.col('r2_seq').str.len_chars()
+                    .filter(pl.col('intbc_valid_read'))
+                    .std().alias('std_len_valid'),
             )
             .collect(engine='streaming')
         )
@@ -308,6 +316,112 @@ class PlotDB():
         ax.set_ylabel('UMIs')
         ax.set_title(f'{xp.target_sample} — per-UMI intBC confidence')
         ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.savefig(str(out_path), bbox_inches='tight')
+        plt.close(fig)
+        xp.logger.info(f"saved {out_path}")
+
+        # ---- Variance / coverage plots (A, B, C) ----
+        # Sample cap for the scatter / read-level views so renders stay fast
+        # and points are actually visible instead of one black blob.
+        N_MAX = 50_000
+
+        # Plot A: read-length distribution, before vs after intBC filter
+        # Sampled at the read level since the full set can be millions of rows.
+        out_path = figs_dir / f'{xp.target_sample}_intbc_read_length.png'
+        read_lens = (
+            ldf.select(
+                pl.col('r2_seq').str.len_chars().alias('length'),
+                pl.col('intbc_valid_read'),
+            )
+            .collect(engine='streaming')
+        )
+        if read_lens.height > N_MAX:
+            read_lens = read_lens.sample(n=N_MAX, seed=0)
+
+        plot_df = pl.concat([
+            read_lens.with_columns(pl.lit('before (all valid-UMI reads)').alias('phase')),
+            read_lens.filter(pl.col('intbc_valid_read'))
+                     .with_columns(pl.lit('after (intBC-valid only)').alias('phase')),
+        ])
+        fig, ax = plt.subplots(figsize=(9, 5))
+        if plot_df.height:
+            sns.histplot(
+                data=plot_df,
+                x='length', hue='phase',
+                hue_order=['before (all valid-UMI reads)', 'after (intBC-valid only)'],
+                bins=60, element='step', stat='density', common_norm=False,
+                ax=ax,
+            )
+        ax.set_xlabel('r2_seq length (bp)')
+        ax.set_ylabel('density')
+        ax.set_title(
+            f'{xp.target_sample} — read-length distribution, before vs after intBC filter '
+            f'(sampled n={min(read_lens.height, N_MAX):,})'
+        )
+        ax.grid(True, alpha=0.3)
+        fig.savefig(str(out_path), bbox_inches='tight')
+        plt.close(fig)
+        xp.logger.info(f"saved {out_path}")
+
+        # Sample UMIs once; reuse for both scatters.
+        if umi_level.height > N_MAX:
+            umi_sample = umi_level.sample(n=N_MAX, seed=0)
+        else:
+            umi_sample = umi_level
+
+        # Plot B: reads_total vs reads_intbc — "cleanliness diagonal"
+        out_path = figs_dir / f'{xp.target_sample}_intbc_scatter_coverage.png'
+        fig, ax = plt.subplots(figsize=(9, 5))
+        if umi_sample.height:
+            dom = umi_sample['dominant_fraction'].fill_null(0).to_numpy()
+            sc = ax.scatter(
+                umi_sample['reads_total'].to_numpy(),
+                umi_sample['reads_valid'].to_numpy(),
+                c=dom, cmap='viridis', s=3, alpha=0.4,
+                vmin=0, vmax=1,
+            )
+            lim_hi = max(umi_sample['reads_total'].max() or 1, 1)
+            ax.plot([1, lim_hi], [1, lim_hi], 'k--', lw=0.6, alpha=0.5, label='diagonal')
+            ax.set_xscale('log')
+            ax.set_yscale('symlog', linthresh=1)
+            cbar = fig.colorbar(sc, ax=ax)
+            cbar.set_label('dominant_fraction')
+        ax.set_xlabel('reads per UMI (total, pre-filter)')
+        ax.set_ylabel('reads_intbc (post-filter)')
+        ax.set_title(
+            f'{xp.target_sample} — per-UMI cleanliness (n={umi_sample.height:,} UMIs sampled)'
+        )
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper left')
+        fig.savefig(str(out_path), bbox_inches='tight')
+        plt.close(fig)
+        xp.logger.info(f"saved {out_path}")
+
+        # Plot C: mean vs std read-length per UMI (post-filter) — allele-coherence
+        out_path = figs_dir / f'{xp.target_sample}_intbc_scatter_length_variance.png'
+        coherence_df = umi_sample.filter(
+            pl.col('mean_len_valid').is_not_null()
+            & pl.col('std_len_valid').is_not_null()
+            & (pl.col('reads_valid') >= 2)
+        )
+        fig, ax = plt.subplots(figsize=(9, 5))
+        if coherence_df.height:
+            dom = coherence_df['dominant_fraction'].fill_null(0).to_numpy()
+            sc = ax.scatter(
+                coherence_df['mean_len_valid'].to_numpy(),
+                coherence_df['std_len_valid'].to_numpy(),
+                c=dom, cmap='viridis', s=3, alpha=0.4,
+                vmin=0, vmax=1,
+            )
+            cbar = fig.colorbar(sc, ax=ax)
+            cbar.set_label('dominant_fraction')
+        ax.set_xlabel('mean r2_seq length per UMI (post-filter)')
+        ax.set_ylabel('std r2_seq length per UMI (post-filter)')
+        ax.set_title(
+            f'{xp.target_sample} — allele-coherence diagnostic '
+            f'(n={coherence_df.height:,} UMIs with ≥2 valid reads)'
+        )
         ax.grid(True, alpha=0.3)
         fig.savefig(str(out_path), bbox_inches='tight')
         plt.close(fig)
