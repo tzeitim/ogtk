@@ -89,6 +89,39 @@ samples:
 export OGTK_SYSPREFIX="/path/to/workspace"
 ```
 
+## Extensions
+
+After the core pipeline (parquet, preprocess, fracture), extensions run additional analysis on assembled contigs. Extensions are configured in YAML under `extensions` and `extension_steps`.
+
+### cassiopeia_petracer
+
+Lineage tracing extension for PEtracer data. Processes assembled contigs through allele calling and optional tree generation.
+
+**Steps:**
+
+| Step | Description |
+|---|---|
+| `parse_contigs` | Parse assembled contigs, extract integration barcodes and alleles |
+| `classify_cassettes` | Classify cassette types and filter |
+| `plug_cassiopeia` | Build allele tables compatible with Cassiopeia |
+| `build_trees` | Build phylogenetic trees from allele tables (SC or SM mode) |
+
+**Standalone tree building** (without the full pipeline):
+
+```bash
+python -m ogtk.ltr.fracture.extensions.cassiopeia_petracer build-tree \
+  --input alleles_pl_collapsed.parquet \
+  --outdir trees/ --mode sc --solver nj
+
+# With test subsampling
+python -m ogtk.ltr.fracture.extensions.cassiopeia_petracer build-tree \
+  --input alleles_pl_collapsed.parquet \
+  --outdir /tmp/test_tree --mode sc --solver nj --skip-branch-lengths \
+  --test-mode --top-x-cells 200 --sample-n-cells 50
+```
+
+See `docs/tree_building_plan.md` for full details on tree configuration and output structure.
+
 ## Advanced Features
 
 - Progress tracking with rich progress bars

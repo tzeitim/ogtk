@@ -295,6 +295,10 @@ class StepResults(NamedTuple):
 4. **Extensions** - Post-processing analysis (optional)
    - Input: `contigs_{strategy}_{key}.parquet` (auto-detected)
    - Output: Extension-specific results
+   - Example: `cassiopeia_petracer` extension with steps `parse_contigs`, `classify_cassettes`, `plug_cassiopeia`, `build_trees`
+   - Extensions are registered via `extension_registry` and configured in YAML under `extensions`, `extension_config`, and `extension_steps`
+   - The `build_trees` step supports both inline execution (`tree_use_lsf: false`) and LSF job submission, with `done`-file caching
+   - See `docs/tree_building_plan.md` for the cassiopeia tree generation details
 
 ## API Reference
 
