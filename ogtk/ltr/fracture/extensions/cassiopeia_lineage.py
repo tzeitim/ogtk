@@ -7,6 +7,7 @@ from .registry import extension_registry
 from .config import ExtensionConfig
 from ..pipeline.types import StepResults,FractureXp
 from ..pipeline.masking import generate_mask_PEtracer_expression
+from ..pipeline import api_ext  # noqa: F401  registers the `dna` namespace
 from dataclasses import dataclass, field
 from ogtk.utils.log import CustomLogger
 from ogtk.utils.general import fuzzy_match_str
@@ -208,13 +209,7 @@ def parse_contigs(
         ldf = ldf.with_columns(pl.col('sbc').replace(sbc_dict).alias(annotation))
     
     # 2. Extract intBC
-    ldf = (
-        ldf   
-        .with_columns(
-            pl.col('contig').str
-            .extract(f'{int_anchor1}(.+?){int_anchor2}', 1).alias('intBC')
-        )
-    )
+    ldf = ldf.pp.extract_intbc(int_anchor1, int_anchor2, seq_col='contig')
     
     return StepResults(results={'ldf':ldf},
                        metrics={'n_parsed_contigs':ldf.select(pl.len()).collect().item()})

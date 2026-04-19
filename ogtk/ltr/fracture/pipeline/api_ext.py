@@ -153,7 +153,15 @@ class PlPipeline:
     """
     def __init__(self, df: pl.DataFrame) -> None:
         self._df = df
-   
+
+    def extract_intbc(self,
+         int_anchor1: str,
+         int_anchor2: str,
+         seq_col: str = "contig",
+         out_col: str = "intBC") -> pl.DataFrame:
+        """Extract intBC as the substring between two anchor sequences."""
+        return self._df.lazy().pp.extract_intbc(int_anchor1, int_anchor2, seq_col=seq_col, out_col=out_col).collect() #pyright: ignore
+
     @call
     def assembly_with_opt(self,
                          start_k: int = 25,
@@ -512,6 +520,121 @@ class PllPipeline:
     def __init__(self, ldf: pl.LazyFrame) -> None:
         self._ldf = ldf
         self.logger = Rlogger().get_logger()
+
+    def extract_intbc(self,
+         int_anchor1: str,
+         int_anchor2: str,
+         seq_col: str = "contig",
+         out_col: str = "intBC") -> pl.LazyFrame:
+        """Extract intBC as the substring between ``int_anchor1`` and ``int_anchor2``.
+
+        Centralized intBC extraction so the same regex can be applied either to
+        raw reads (``seq_col`` set to the read sequence column) for pre-assembly
+        library QC, or to assembled contigs (``seq_col='contig'``) on the
+        standard post-assembly path.
+
+        Args:
+            int_anchor1 (str): 5' flanking anchor sequence.
+            int_anchor2 (str): 3' flanking anchor sequence.
+            seq_col (str): Column holding the sequence to scan.
+            out_col (str): Name of the output column.
+
+        Returns:
+            pl.LazyFrame: Input frame with ``out_col`` added.
+        """
+        return self._ldf.with_columns(
+            pl.col(seq_col).str.extract(f"{int_anchor1}(.+?){int_anchor2}", 1).alias(out_col)
+        )
+
+    def assign_umi_intbc(self,
+                         int_anchor1: str,
+                         int_anchor2: str,
+                         seq_col: str = "r2_seq",
+                         min_fraction: float = 0.6,
+                         group_cols: list[str] | None = None) -> pl.LazyFrame:
+        """Assign dominant intBC per UMI group and flag chimeric reads.
+
+        Extracts the intBC from each read, determines the dominant intBC per
+        UMI group by read count among non-null extractions, and flags reads
+        whose extracted intBC matches the group's assigned intBC. Reads that
+        do not span the intBC locus yield a null extraction and are always
+        flagged invalid.
+
+        Reads are grouped by ``group_cols``. When ``group_cols`` is None the
+        default mirrors ``assemble_segmented``: ``['sbc', 'umi']`` when an
+        ``sbc`` column exists, otherwise ``['umi']``.
+
+        Args:
+            int_anchor1: 5' flanking anchor of the intBC locus.
+            int_anchor2: 3' flanking anchor of the intBC locus.
+            seq_col: Column holding the sequence to scan.
+            min_fraction: Minimum share the dominant intBC must hold among
+                non-null extractions in a group for reads to pass.
+            group_cols: Columns defining UMI identity; defaults chosen from
+                schema as described above.
+
+        Returns:
+            LazyFrame with these columns added:
+                - ``intbc``: per-read extracted intBC (nullable).
+                - ``intbc_assigned``: per-group dominant intBC (nullable when
+                  no read in the group spans the locus).
+                - ``intbc_dominant_fraction``: dominant read share among
+                  non-null extractions (nullable when group has no non-null).
+                - ``intbc_valid_read``: per-read match flag (False for null
+                  extractions, minority reads, and low-confidence groups).
+                - ``reads_intbc``: per-group count of valid reads (clean
+                  coverage after chimera trimming).
+        """
+        if group_cols is None:
+            names = self._ldf.collect_schema().names()
+            group_cols = ['sbc', 'umi'] if 'sbc' in names else ['umi']
+
+        return (
+            self._ldf
+            .pp.extract_intbc(
+                int_anchor1=int_anchor1,
+                int_anchor2=int_anchor2,
+                seq_col=seq_col,
+                out_col='intbc',
+            )
+            .with_columns(
+                pl.col('intbc').count().over([*group_cols, 'intbc']).alias('_intbc_count'),
+                pl.col('intbc').count().over(group_cols).alias('_intbc_nonnull'),
+            )
+            .with_columns(
+                pl.col('_intbc_count').max().over(group_cols).alias('_intbc_max'),
+            )
+            .with_columns(
+                pl.when(
+                    pl.col('intbc').is_not_null()
+                    & (pl.col('_intbc_count') == pl.col('_intbc_max'))
+                    & (pl.col('_intbc_max') > 0)
+                )
+                .then(pl.col('intbc'))
+                .otherwise(None)
+                .alias('_intbc_candidate'),
+            )
+            .with_columns(
+                pl.col('_intbc_candidate').max().over(group_cols).alias('intbc_assigned'),
+                pl.when(pl.col('_intbc_nonnull') > 0)
+                .then(pl.col('_intbc_max') / pl.col('_intbc_nonnull'))
+                .otherwise(None)
+                .alias('intbc_dominant_fraction'),
+            )
+            .with_columns(
+                (
+                    pl.col('intbc').is_not_null()
+                    & (pl.col('intbc') == pl.col('intbc_assigned'))
+                    & (pl.col('intbc_dominant_fraction') >= min_fraction)
+                )
+                .fill_null(False)
+                .alias('intbc_valid_read'),
+            )
+            .with_columns(
+                pl.col('intbc_valid_read').sum().over(group_cols).alias('reads_intbc'),
+            )
+            .drop('_intbc_count', '_intbc_nonnull', '_intbc_max', '_intbc_candidate')
+        )
 
     def enrich_allele_insertions(self,
                                   allele_cols: list[str] | None = None,
@@ -1337,51 +1460,16 @@ class PllPipeline:
             (pl.col('_has_start_meta_anchor') & pl.col('_has_end_meta_anchor')).alias('_is_valid_assembly')
         )
 
-        # Count invalid assemblies
+        # Drop invalid / unassembled segments. No raw-segment fallback: every
+        # molecule gets the same treatment — a proper de Bruijn consensus with
+        # both boundary anchors, or nothing. Losing a segment here means the
+        # molecule contributes a truncated or empty stitched contig downstream.
         n_invalid = assembled_df.filter(~pl.col('_is_valid_assembly')).height
         if n_invalid > 0:
-            self.logger.warning(f"Found {n_invalid} truncated assemblies (missing anchors)")
-
-        # Fallback for failed/invalid assemblies: use most common raw segment
-        # Identify UMI groups that have segments but no valid assembly
-        segment_groups = segments_df.select(group_cols).unique()
-        valid_assembled_groups = assembled_df.filter(pl.col('_is_valid_assembly')).select(group_cols).unique()
-        missing_groups = segment_groups.join(valid_assembled_groups, on=group_cols, how='anti')
-
-        if missing_groups.height > 0:
-            self.logger.info(f"Falling back to raw segments for {missing_groups.height} failed/invalid assemblies")
-
-            # For each missing group, select the most common segment sequence
-            # If tied, the first one (effectively random based on data order) is selected
-            fallback_df = (
-                segments_df
-                .join(missing_groups, on=group_cols, how='inner')
-                .group_by(group_cols + ['segment_seq'])
-                .agg(pl.len().alias('_seq_count'))
-                .sort('_seq_count', descending=True)
-                .group_by(group_cols)
-                .first()  # Take most common (or first if tied)
-                .rename({'segment_seq': 'consensus_seq'})
-                .with_columns([
-                    pl.lit(True).alias('_is_fallback'),
-                    pl.lit(True).alias('_has_start_meta_anchor'),  # Raw segments have anchors by construction
-                    pl.lit(True).alias('_has_end_meta_anchor'),
-                    pl.lit(True).alias('_is_valid_assembly'),
-                ])
-                .drop('_seq_count')
+            self.logger.warning(
+                f"Dropping {n_invalid} truncated/unassembled segments (missing anchors)"
             )
-
-            # Remove invalid assemblies and merge with fallbacks
-            assembled_df = (
-                assembled_df
-                .filter(pl.col('_is_valid_assembly'))
-                .with_columns(pl.lit(False).alias('_is_fallback'))
-            )
-            assembled_df = pl.concat([assembled_df, fallback_df], how='diagonal')
-            self.logger.info(f"Total assembled after fallback: {assembled_df.height}")
-        else:
-            # No fallbacks needed, just add the column
-            assembled_df = assembled_df.with_columns(pl.lit(False).alias('_is_fallback'))
+        assembled_df = assembled_df.filter(pl.col('_is_valid_assembly'))
 
         # Add segment count per molecule (how many segments does this UMI have?)
         molecule_cols = ['sbc', 'umi'] if 'sbc' in group_cols else ['umi']

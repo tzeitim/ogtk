@@ -28,6 +28,10 @@ class FractureXp(Xp):
     force_tab: bool
     allow_wildcards: bool
     intbc_5prime: str
+    int_anchor1: str
+    int_anchor2: str
+    intbc_filter: bool
+    intbc_min_fraction: float
     parse_read1: bool
     extensions: List[str]
     extension_steps: Dict[str, List[str]]

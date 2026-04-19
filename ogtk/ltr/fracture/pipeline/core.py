@@ -687,7 +687,10 @@ class Pipeline:
             out_file_qc = f"{self.xp.sample_wd}/parsed_reads_qc.parquet"  # QC stays parquet (small file)
             total_reads = self.get_metric_from_summary("parquet", 'total_reads')
 
-            self.logger.info(f"reading from {in_file} with {total_reads/1e6:0.2f} M reads")
+            if total_reads is not None:
+                self.logger.info(f"reading from {in_file} with {total_reads/1e6:0.2f} M reads")
+            else:
+                self.logger.info(f"reading from {in_file} (parquet metrics unavailable)")
 
 
             if not self.xp.dry:
@@ -706,51 +709,58 @@ class Pipeline:
                     .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                  )
 
-                # save without gc fields
-                if not self.xp.parse_read1:
-                    self.logger.info(f"Exporting lazily to {out_file}")
-                    sink_file(
-                            ldf
-                            .filter(pl.col('valid_umi'))
-                            .filter(pl.col('ont')),
-                            out_file
-                    )
+                valid_ldf = ldf.filter(pl.col('valid_umi')).filter(pl.col('ont'))
+                invalid_ldf = ldf.filter((~pl.col('valid_umi')) | (~pl.col('ont')))
 
-                    self.logger.info(f"Exporting lazily to {out_file_inv}")
-                    sink_file(
-                            ldf
-                            .filter((~pl.col('valid_umi')) | (~pl.col('ont'))),
-                            out_file_inv
-                    )
-                else:
+                if self.xp.parse_read1:
                     # TODO change the logics to an adaptive expression instead of boiler plate
                     # if r1 is long and informative: e.g long paired-end
                     self.logger.warning(f"extracting juice from R1")
-                    sink_file(
-                        pl.concat(
-                            [
-                                ldf
-                                .filter(pl.col('valid_umi'))
-                                .filter(pl.col('ont')),
-                                ldf
-                                .filter(pl.col('valid_umi'))
-                                .filter(pl.col('ont'))
-                                .pp.parse_read1(anchor_ont=self.xp.anchor_ont),
-                            ]
-                        ), out_file
-                     )
+                    valid_ldf = pl.concat([
+                        valid_ldf,
+                        valid_ldf.pp.parse_read1(anchor_ont=self.xp.anchor_ont),
+                    ])
+                    invalid_ldf = pl.concat([
+                        invalid_ldf,
+                        invalid_ldf.pp.parse_read1(anchor_ont=self.xp.anchor_ont),
+                    ])
 
-                    sink_file(
-                        pl.concat(
-                            [
-                                ldf
-                                .filter((~pl.col('valid_umi')) | (~pl.col('ont'))),
-                                ldf
-                                .filter((~pl.col('valid_umi')) | (~pl.col('ont')))
-                                .pp.parse_read1(anchor_ont=self.xp.anchor_ont),
-                            ]
-                        ), out_file_inv
-                     )
+                intbc_filter_enabled = getattr(self.xp, 'intbc_filter', False)
+                if intbc_filter_enabled:
+                    int_anchor1 = getattr(self.xp, 'int_anchor1', None)
+                    int_anchor2 = getattr(self.xp, 'int_anchor2', None)
+                    anchor_source = 'top-level config'
+                    if not int_anchor1 or not int_anchor2:
+                        ext_cfg = getattr(self.xp, 'extension_config', {}) or {}
+                        for ext_name, cfg in ext_cfg.items():
+                            if not isinstance(cfg, dict):
+                                continue
+                            ea1, ea2 = cfg.get('int_anchor1'), cfg.get('int_anchor2')
+                            if ea1 and ea2:
+                                int_anchor1, int_anchor2 = ea1, ea2
+                                anchor_source = f'extension_config.{ext_name}'
+                                break
+                    if not int_anchor1 or not int_anchor2:
+                        raise ValueError(
+                            "intbc_filter requires 'int_anchor1' and 'int_anchor2' — "
+                            "set at top level or under extension_config.<extension>"
+                        )
+                    intbc_min_fraction = getattr(self.xp, 'intbc_min_fraction', 0.6)
+                    self.logger.info(
+                        f"Assigning per-UMI intBC (min_fraction={intbc_min_fraction}, "
+                        f"anchors from {anchor_source})"
+                    )
+                    valid_ldf = valid_ldf.pp.assign_umi_intbc(  #pyright: ignore
+                        int_anchor1=int_anchor1,
+                        int_anchor2=int_anchor2,
+                        min_fraction=intbc_min_fraction,
+                    )
+
+                self.logger.info(f"Exporting lazily to {out_file}")
+                sink_file(valid_ldf, out_file)
+
+                self.logger.info(f"Exporting lazily to {out_file_inv}")
+                sink_file(invalid_ldf, out_file_inv)
 
                 # extract QC fields and compute UMI-level metrics
                 metrics_df = (
@@ -767,8 +777,34 @@ class Pipeline:
 
                 metrics_df = metrics_df
                 
-                metrics = {f.replace('metric_', ''):metrics_df[f][0] 
+                metrics = {f.replace('metric_', ''):metrics_df[f][0]
                            for f in metrics_df.columns}
+
+                if intbc_filter_enabled:
+                    intbc_stats = (
+                        scan_file(out_file)
+                        .select(
+                            pl.len().alias('intbc_reads_total'),
+                            pl.col('intbc_valid_read').sum().alias('intbc_reads_valid'),
+                            pl.col('umi').n_unique().alias('intbc_umis_total'),
+                            pl.col('umi').filter(pl.col('intbc_assigned').is_not_null())
+                                         .n_unique().alias('intbc_umis_assigned'),
+                            pl.col('umi').filter(pl.col('reads_intbc') > 0)
+                                         .n_unique().alias('intbc_umis_passing'),
+                        )
+                        .collect()
+                    )
+                    for col in intbc_stats.columns:
+                        metrics[col] = int(intbc_stats[col][0])
+                    if metrics['intbc_reads_total']:
+                        metrics['intbc_reads_valid_fraction'] = (
+                            metrics['intbc_reads_valid'] / metrics['intbc_reads_total']
+                        )
+                    self.logger.info(
+                        f"intBC filter: {metrics['intbc_umis_passing']}/"
+                        f"{metrics['intbc_umis_total']} UMIs pass, "
+                        f"{metrics['intbc_reads_valid']}/{metrics['intbc_reads_total']} reads kept"
+                    )
 
                 (
                     metrics_df.
@@ -841,6 +877,17 @@ class Pipeline:
                     self.logger.info(f'Reading {in_file}')
 
                     ldf = scan_file(in_file)
+                    schema_names = ldf.collect_schema().names()
+                    has_intbc_filter = (
+                        'intbc_valid_read' in schema_names
+                        and 'reads_intbc' in schema_names
+                    )
+                    reads_col = 'reads_intbc' if has_intbc_filter else 'reads'
+                    if has_intbc_filter:
+                        self.logger.info(
+                            f"intBC filter columns detected; using {reads_col} for min_reads "
+                            f"and gating by intbc_valid_read"
+                        )
 
                     # Apply masking if configured (skip if using segmentation - they're alternative strategies)
                     if hasattr(self.xp, 'features_csv') and self.xp.features_csv and not use_segmentation:
@@ -875,7 +922,9 @@ class Pipeline:
                             sink_file(ldf, str(masked_file))
                             ldf = scan_file(str(masked_file))
 
-                    filter_expr= pl.col('reads')>=self.xp.fracture['min_reads']
+                    filter_expr = pl.col(reads_col) >= self.xp.fracture['min_reads']
+                    if has_intbc_filter:
+                        filter_expr = filter_expr & pl.col('intbc_valid_read')
 
                     # Determine strategy name for output file
                     if use_segmentation:
@@ -915,8 +964,8 @@ class Pipeline:
                             .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                             .join(
                                 scan_file(in_file)
-                                  .select('umi','reads')
                                   .filter(filter_expr)
+                                  .select('umi', pl.col(reads_col).alias('reads'))
                                   .unique(),
                                left_on='umi', right_on='umi', how='left')
                         )
@@ -941,10 +990,9 @@ class Pipeline:
                                 .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                                 .join(
                                     scan_file(in_file)
-                                      .select('umi','reads')
                                       .filter(filter_expr)
+                                      .select('umi', pl.col(reads_col).alias('reads'))
                                       .unique(),
-                                      #.collect(),
                                    left_on='umi', right_on='umi', how='left')
                                 )
 
@@ -1270,7 +1318,7 @@ class Pipeline:
             self.fracture()
         #self.run_qcs()
 
-    def get_metric_from_summary(self, step: str, metric: str):
+    def get_metric_from_summary(self, step: str, metric: str, default=None):
         import json
         summary_path = Path(f"{self.xp.pro_workdir}/{self.xp.target_sample}/pipeline_summary.json")
         if summary_path.exists():
@@ -1281,7 +1329,7 @@ class Pipeline:
                 summary = {}
         else:
             summary = {}
-        return summary[step]['metrics'][metric]
+        return summary.get(step, {}).get('metrics', {}).get(metric, default)
 
 
     def update_pipeline_summary(self, step: PipelineStep, results: StepResults) -> None:

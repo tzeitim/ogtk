@@ -7,6 +7,7 @@ from .registry import extension_registry
 from .config import ExtensionConfig
 from ..pipeline.types import StepResults,FractureXp
 from ..pipeline.formats import scan_file, read_file
+from ..pipeline import api_ext  # noqa: F401  registers the `dna` namespace
 from dataclasses import dataclass, field
 from ogtk.utils.log import CustomLogger
 from ogtk.utils.general import fuzzy_match_str
@@ -739,10 +740,13 @@ def plug_cassiopeia(
             pl_allele = pl.DataFrame(allele_table)
             rcols = pl_allele.select(pl.col('^r\\d+$')).columns
 
-            # Sanitize "rcols" for proper alphanumeric sorting
-            rcols_zf = {c: f'r{int(c[1:]):03d}' for c in rcols}
-            pl_allele = pl_allele.rename(rcols_zf)
-            rcols = list(rcols_zf.values())
+            # Zero-pad cutsite column names (r1 -> r001, ... r15 -> r015) so
+            # default lexicographic sort gives the biological order. Cassiopeia
+            # itself emits r1/r2/... unpadded.
+            if rcols:
+                rcols_zf = {c: f'r{int(c[1:]):03d}' for c in rcols}
+                pl_allele = pl_allele.rename(rcols_zf)
+                rcols = list(rcols_zf.values())
 
             if rcols and 'Seq' in pl_allele.columns and 'CIGAR' in pl_allele.columns:
                 pl_allele = pl_allele.with_columns([
@@ -774,8 +778,19 @@ def plug_cassiopeia(
                 pl.DataFrame(allele_table).with_columns(mod=pl.lit(mod), mols=allele_table.shape[0])
                 )
 
-    # Concatenate all partition results
-    alleles_pl = pl.concat(res) if res else pl.DataFrame()
+    # Concatenate all partition results. Cassiopeia returns pandas DataFrames
+    # with per-partition index naming — when the index has the name 'readName'
+    # that becomes a real column; when it is a default RangeIndex polars
+    # conversion can materialise an 'index' / 'level_0' column instead. Drop
+    # only the truly artificial pandas-index leftovers ('index', 'level_0')
+    # and keep 'readName' as legitimate data; diagonal_relaxed fills nulls in
+    # partitions that don't have it.
+    if res:
+        drop_cols = ('index', 'level_0')
+        res = [df.drop([c for c in drop_cols if c in df.columns]) for df in res]
+        alleles_pl = pl.concat(res, how='diagonal_relaxed')
+    else:
+        alleles_pl = pl.DataFrame()
 
     return StepResults(
             results={
@@ -850,9 +865,8 @@ def parse_contigs(
     # 2. Extract intBC and trim contig to remove the intBC region
     ldf = (
         ldf
+        .pp.extract_intbc(int_anchor1, int_anchor2, seq_col='contig')
         .with_columns(
-            pl.col('contig').str
-            .extract(f'{int_anchor1}(.+?){int_anchor2}', 1).alias('intBC'),
             pl.col('contig').str.replace(f'.*{int_anchor2}', '').alias('contig')
         )
     )
@@ -1368,12 +1382,22 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         metas = pl.read_csv(metas_csv)
         segments_df = read_file(segments_path)
 
-        # Load assembled if available
+        # Load assembled if available. assemble_segmented writes with the
+        # suffix "assembled_debug.parquet" (derived from the segments debug
+        # path), so check the legacy plain name and the _debug variant.
+        if not assembled_path.exists():
+            assembled_path = intermediate_dir / "assembled_debug.parquet"
+
         if assembled_path.exists():
             assembled_df = read_file(assembled_path)
         else:
-            # Create minimal assembled_df from segments
-            assembled_df = segments_df.select(['umi', 'start_meta', 'end_meta']).unique()
+            # Create minimal assembled_df from segments, keeping whichever
+            # molecule-identifying columns segments_df has (sbc + umi, or just
+            # umi). This keeps the schema consistent with segments_df so that
+            # downstream per-molecule joins in generate_segmentation_report
+            # (e.g. the missing-segments rollup) find the columns they expect.
+            mol_cols = ['sbc', 'umi'] if 'sbc' in segments_df.columns else ['umi']
+            assembled_df = segments_df.select(mol_cols + ['start_meta', 'end_meta']).unique()
 
         # Load contigs (check for both IPC and Parquet formats)
         # Use specific pattern to avoid matching intermediate files like _parsed or _cass_allele

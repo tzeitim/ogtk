@@ -550,10 +550,61 @@ def generate_segmentation_report(
             'success_rate_pct': round(success_rate, 1),
         }
 
+    # Per-molecule missing-segment count: transitions that existed in
+    # segments_df but did not survive the validity filter in assembled_df.
+    # With the raw-segment fallback removed, these gaps translate directly
+    # into truncated / empty stitched contigs.
+    expected_per_mol = (
+        segments_df
+        .select(molecule_cols + ['start_meta', 'end_meta'])
+        .unique()
+        .group_by(molecule_cols)
+        .len()
+        .rename({'len': 'n_expected'})
+    )
+    assembled_per_mol = (
+        assembled_df
+        .group_by(molecule_cols)
+        .len()
+        .rename({'len': 'n_assembled'})
+    )
+    missing_per_mol = (
+        expected_per_mol
+        .join(assembled_per_mol, on=molecule_cols, how='left')
+        .with_columns(pl.col('n_assembled').fill_null(0))
+        .with_columns((pl.col('n_expected') - pl.col('n_assembled')).alias('n_missing'))
+    )
+
+    missing_dist = (
+        missing_per_mol
+        .group_by('n_missing')
+        .len()
+        .sort('n_missing')
+        .to_dicts()
+    )
+
+    n_molecules_with_segments = missing_per_mol.height
+    n_full = missing_per_mol.filter(pl.col('n_missing') == 0).height
+    n_empty = missing_per_mol.filter(pl.col('n_missing') == pl.col('n_expected')).height
+    n_partial = n_molecules_with_segments - n_full - n_empty
+    mean_missing = missing_per_mol['n_missing'].mean() or 0
+    median_missing = missing_per_mol['n_missing'].median() or 0
+    max_missing = missing_per_mol['n_missing'].max() or 0
+
     report['assembly'] = {
         'total_assembled': total_assembled,
         'unique_umis': unique_umis_assembled,
         'by_type': assembly_success,
+        'missing_segments': {
+            'molecules_total': n_molecules_with_segments,
+            'molecules_full': n_full,
+            'molecules_partial': n_partial,
+            'molecules_empty': n_empty,
+            'mean_missing': round(mean_missing, 2),
+            'median_missing': median_missing,
+            'max_missing': max_missing,
+            'distribution': missing_dist,
+        },
     }
 
     # Stitching stats
@@ -679,6 +730,26 @@ def format_segmentation_report(report: dict) -> str:
     for seg_type, stats in sorted(asm['by_type'].items(), key=lambda x: -x[1]['assembled']):
         if stats['assembled'] > 0:
             lines.append(f"    {seg_type:>22}: {stats['assembled']:>6,} / {stats['input_umi_groups']:>6,} ({stats['success_rate_pct']:>5.1f}%)")
+
+    # Missing-segments-per-molecule rollup (only when the key is present to
+    # stay back-compat with older reports dumped to disk).
+    miss = asm.get('missing_segments')
+    if miss:
+        total = miss['molecules_total'] or 1
+        full_pct = miss['molecules_full'] / total * 100
+        partial_pct = miss['molecules_partial'] / total * 100
+        empty_pct = miss['molecules_empty'] / total * 100
+        lines.append("\n  Missing segments per molecule:")
+        lines.append(f"    Molecules (had any segments): {miss['molecules_total']:>8,}")
+        lines.append(f"    Fully assembled (0 missing):  {miss['molecules_full']:>8,} ({full_pct:>5.1f}%)")
+        lines.append(f"    Partially assembled:          {miss['molecules_partial']:>8,} ({partial_pct:>5.1f}%)")
+        lines.append(f"    All segments lost:            {miss['molecules_empty']:>8,} ({empty_pct:>5.1f}%)")
+        lines.append(f"    Mean / median missing:        {miss['mean_missing']:>8.2f} / {miss['median_missing']}")
+        lines.append(f"    Max missing:                  {miss['max_missing']:>8}")
+        top = [d for d in miss['distribution'][:6]]
+        if top:
+            dist_str = ", ".join(f"{d['n_missing']}→{d['len']:,}" for d in top)
+            lines.append(f"    Distribution (first 6):       {dist_str}")
 
     meta = report['meta_presence']
     lines.append("\n## META Presence in Contigs")
