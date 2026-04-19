@@ -1199,12 +1199,22 @@ class CassiopeiaLineageExtension(PostProcessorExtension):
         metas = pl.read_csv(metas_csv)
         segments_df = read_file(segments_path)
 
-        # Load assembled if available
+        # Load assembled if available. assemble_segmented writes with the
+        # suffix "assembled_debug.parquet" (derived from the segments debug
+        # path), so check the legacy plain name and the _debug variant.
+        if not assembled_path.exists():
+            assembled_path = intermediate_dir / "assembled_debug.parquet"
+
         if assembled_path.exists():
             assembled_df = read_file(assembled_path)
         else:
-            # Create minimal assembled_df from segments
-            assembled_df = segments_df.select(['umi', 'start_meta', 'end_meta']).unique()
+            # Create minimal assembled_df from segments, keeping whichever
+            # molecule-identifying columns segments_df has (sbc + umi, or just
+            # umi). This keeps the schema consistent with segments_df so that
+            # downstream per-molecule joins in generate_segmentation_report
+            # (e.g. the missing-segments rollup) find the columns they expect.
+            mol_cols = ['sbc', 'umi'] if 'sbc' in segments_df.columns else ['umi']
+            assembled_df = segments_df.select(mol_cols + ['start_meta', 'end_meta']).unique()
 
         # Load contigs (check for both IPC and Parquet formats)
         # Use specific pattern to avoid matching intermediate files like _parsed or _cass_allele
