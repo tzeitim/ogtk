@@ -861,6 +861,17 @@ class Pipeline:
                     self.logger.info(f'Reading {in_file}')
 
                     ldf = scan_file(in_file)
+                    schema_names = ldf.collect_schema().names()
+                    has_intbc_filter = (
+                        'intbc_valid_read' in schema_names
+                        and 'reads_intbc' in schema_names
+                    )
+                    reads_col = 'reads_intbc' if has_intbc_filter else 'reads'
+                    if has_intbc_filter:
+                        self.logger.info(
+                            f"intBC filter columns detected; using {reads_col} for min_reads "
+                            f"and gating by intbc_valid_read"
+                        )
 
                     # Apply masking if configured (skip if using segmentation - they're alternative strategies)
                     if hasattr(self.xp, 'features_csv') and self.xp.features_csv and not use_segmentation:
@@ -895,7 +906,9 @@ class Pipeline:
                             sink_file(ldf, str(masked_file))
                             ldf = scan_file(str(masked_file))
 
-                    filter_expr= pl.col('reads')>=self.xp.fracture['min_reads']
+                    filter_expr = pl.col(reads_col) >= self.xp.fracture['min_reads']
+                    if has_intbc_filter:
+                        filter_expr = filter_expr & pl.col('intbc_valid_read')
 
                     # Determine strategy name for output file
                     if use_segmentation:
@@ -935,8 +948,8 @@ class Pipeline:
                             .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                             .join(
                                 scan_file(in_file)
-                                  .select('umi','reads')
                                   .filter(filter_expr)
+                                  .select('umi', reads_col)
                                   .unique(),
                                left_on='umi', right_on='umi', how='left')
                         )
@@ -961,10 +974,9 @@ class Pipeline:
                                 .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                                 .join(
                                     scan_file(in_file)
-                                      .select('umi','reads')
                                       .filter(filter_expr)
+                                      .select('umi', reads_col)
                                       .unique(),
-                                      #.collect(),
                                    left_on='umi', right_on='umi', how='left')
                                 )
 
