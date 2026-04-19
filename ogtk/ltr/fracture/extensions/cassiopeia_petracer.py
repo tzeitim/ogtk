@@ -604,8 +604,18 @@ def plug_cassiopeia(
                 pl.DataFrame(allele_table).with_columns(mod=pl.lit(mod), mols=allele_table.shape[0])
                 )
 
-    # Concatenate all partition results
-    alleles_pl = pl.concat(res) if res else pl.DataFrame()
+    # Concatenate all partition results. Cassiopeia returns pandas DataFrames
+    # whose index name can differ across partitions ("readName" vs "index"),
+    # and the pandas -> polars conversion turns the index into a column — so a
+    # plain vstack fails on schema mismatches. Drop the known pandas-index
+    # leftover columns before concat to keep the schema clean, and fall back
+    # to diagonal_relaxed for any remaining mismatch.
+    if res:
+        drop_cols = ('index', 'readName', 'level_0')
+        res = [df.drop([c for c in drop_cols if c in df.columns]) for df in res]
+        alleles_pl = pl.concat(res, how='diagonal_relaxed')
+    else:
+        alleles_pl = pl.DataFrame()
 
     # For single-cell: collapse UMIs to one allele per (cell, intBC)
     # Keep both raw (per-UMI) and collapsed (per-cell) versions
