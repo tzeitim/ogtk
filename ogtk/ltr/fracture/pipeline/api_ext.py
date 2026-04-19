@@ -1460,51 +1460,16 @@ class PllPipeline:
             (pl.col('_has_start_meta_anchor') & pl.col('_has_end_meta_anchor')).alias('_is_valid_assembly')
         )
 
-        # Count invalid assemblies
+        # Drop invalid / unassembled segments. No raw-segment fallback: every
+        # molecule gets the same treatment — a proper de Bruijn consensus with
+        # both boundary anchors, or nothing. Losing a segment here means the
+        # molecule contributes a truncated or empty stitched contig downstream.
         n_invalid = assembled_df.filter(~pl.col('_is_valid_assembly')).height
         if n_invalid > 0:
-            self.logger.warning(f"Found {n_invalid} truncated assemblies (missing anchors)")
-
-        # Fallback for failed/invalid assemblies: use most common raw segment
-        # Identify UMI groups that have segments but no valid assembly
-        segment_groups = segments_df.select(group_cols).unique()
-        valid_assembled_groups = assembled_df.filter(pl.col('_is_valid_assembly')).select(group_cols).unique()
-        missing_groups = segment_groups.join(valid_assembled_groups, on=group_cols, how='anti')
-
-        if missing_groups.height > 0:
-            self.logger.info(f"Falling back to raw segments for {missing_groups.height} failed/invalid assemblies")
-
-            # For each missing group, select the most common segment sequence
-            # If tied, the first one (effectively random based on data order) is selected
-            fallback_df = (
-                segments_df
-                .join(missing_groups, on=group_cols, how='inner')
-                .group_by(group_cols + ['segment_seq'])
-                .agg(pl.len().alias('_seq_count'))
-                .sort('_seq_count', descending=True)
-                .group_by(group_cols)
-                .first()  # Take most common (or first if tied)
-                .rename({'segment_seq': 'consensus_seq'})
-                .with_columns([
-                    pl.lit(True).alias('_is_fallback'),
-                    pl.lit(True).alias('_has_start_meta_anchor'),  # Raw segments have anchors by construction
-                    pl.lit(True).alias('_has_end_meta_anchor'),
-                    pl.lit(True).alias('_is_valid_assembly'),
-                ])
-                .drop('_seq_count')
+            self.logger.warning(
+                f"Dropping {n_invalid} truncated/unassembled segments (missing anchors)"
             )
-
-            # Remove invalid assemblies and merge with fallbacks
-            assembled_df = (
-                assembled_df
-                .filter(pl.col('_is_valid_assembly'))
-                .with_columns(pl.lit(False).alias('_is_fallback'))
-            )
-            assembled_df = pl.concat([assembled_df, fallback_df], how='diagonal')
-            self.logger.info(f"Total assembled after fallback: {assembled_df.height}")
-        else:
-            # No fallbacks needed, just add the column
-            assembled_df = assembled_df.with_columns(pl.lit(False).alias('_is_fallback'))
+        assembled_df = assembled_df.filter(pl.col('_is_valid_assembly'))
 
         # Add segment count per molecule (how many segments does this UMI have?)
         molecule_cols = ['sbc', 'umi'] if 'sbc' in group_cols else ['umi']
