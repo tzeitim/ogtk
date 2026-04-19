@@ -605,13 +605,14 @@ def plug_cassiopeia(
                 )
 
     # Concatenate all partition results. Cassiopeia returns pandas DataFrames
-    # whose index name can differ across partitions ("readName" vs "index"),
-    # and the pandas -> polars conversion turns the index into a column — so a
-    # plain vstack fails on schema mismatches. Drop the known pandas-index
-    # leftover columns before concat to keep the schema clean, and fall back
-    # to diagonal_relaxed for any remaining mismatch.
+    # with per-partition index naming — when the index has the name 'readName'
+    # that becomes a real column; when it is a default RangeIndex polars
+    # conversion can materialise an 'index' / 'level_0' column instead. Drop
+    # only the truly artificial pandas-index leftovers ('index', 'level_0')
+    # and keep 'readName' as legitimate data; diagonal_relaxed fills nulls in
+    # partitions that don't have it.
     if res:
-        drop_cols = ('index', 'readName', 'level_0')
+        drop_cols = ('index', 'level_0')
         res = [df.drop([c for c in drop_cols if c in df.columns]) for df in res]
         alleles_pl = pl.concat(res, how='diagonal_relaxed')
     else:
