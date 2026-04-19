@@ -965,7 +965,7 @@ class Pipeline:
                             .join(
                                 scan_file(in_file)
                                   .filter(filter_expr)
-                                  .select('umi', reads_col)
+                                  .select('umi', pl.col(reads_col).alias('reads'))
                                   .unique(),
                                left_on='umi', right_on='umi', how='left')
                         )
@@ -991,7 +991,7 @@ class Pipeline:
                                 .join(
                                     scan_file(in_file)
                                       .filter(filter_expr)
-                                      .select('umi', reads_col)
+                                      .select('umi', pl.col(reads_col).alias('reads'))
                                       .unique(),
                                    left_on='umi', right_on='umi', how='left')
                                 )
