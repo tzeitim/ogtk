@@ -271,6 +271,15 @@ def flag_spanning_deletions(pl_allele: pl.DataFrame, rcols: list[str], mode: str
     Returns:
         DataFrame with spanning deletions handled according to mode
     """
+    valid_modes = ('unedited', 'missing', 'use')
+    if mode not in valid_modes:
+        raise ValueError(
+            f"flag_spanning_deletions: unsupported mode {mode!r}. "
+            f"Expected one of {valid_modes}. "
+            f"If the caller is resolving a higher-level value like 'both', "
+            f"do the expansion before calling this helper."
+        )
+
     if not rcols or mode == 'use':
         return pl_allele
 
