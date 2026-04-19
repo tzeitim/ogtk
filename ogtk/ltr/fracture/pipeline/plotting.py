@@ -220,6 +220,117 @@ class PlotDB():
         # Checkhealth QC - screen raw reads for expected features
         self._plot_checkhealth(ppi, results)
 
+        # intBC chimera diagnostics - only when the filter is active
+        self._plot_intbc_qc(ppi, results)
+
+    def _plot_intbc_qc(self, ppi, results):
+        """Per-UMI intBC diversity and filter-confidence plots.
+
+        Runs only when preprocess populated the assign_umi_intbc columns.
+        Produces:
+          - <sample>_intbc_per_umi.png: histogram of distinct non-null intBCs
+            per UMI, stacked by total-read coverage bin.
+          - <sample>_intbc_dominant_fraction.png: distribution of the per-UMI
+            dominant-intBC read share, with the configured cutoff marked.
+          - <sample>_intbc_stats.csv: rollup of the counts going into the
+            plots (UMIs total / assigned / passing, reads total / valid,
+            mean & median n_intbc per UMI, n_umis with >1 intBC).
+        """
+        xp = ppi.xp
+        plt = ppi.plt
+        sns = ppi.sns
+
+        ifn = results.results.get('parsed_reads')
+        if not ifn:
+            return
+        ldf = scan_file(ifn)
+        schema = ldf.collect_schema().names()
+        if 'intbc_assigned' not in schema or 'intbc_valid_read' not in schema:
+            xp.logger.info("intBC columns absent, skipping intBC QC plot")
+            return
+
+        group_cols = ['sbc', 'umi'] if 'sbc' in schema else ['umi']
+
+        umi_level = (
+            ldf
+            .group_by(group_cols)
+            .agg(
+                pl.col('intbc').drop_nulls().n_unique().alias('n_intbc_nonnull'),
+                pl.col('intbc_dominant_fraction').first().alias('dominant_fraction'),
+                pl.col('intbc_assigned').first().alias('assigned'),
+                pl.col('reads_intbc').first().alias('reads_valid'),
+                pl.len().alias('reads_total'),
+            )
+            .collect(engine='streaming')
+        )
+
+        cov_breaks = [2, 4, 10, 100]
+        cov_labels = ['1', '2-3', '4-9', '10-99', '100+']
+        umi_level = umi_level.with_columns(
+            pl.col('reads_total').cut(cov_breaks, labels=cov_labels).alias('cov_bin')
+        )
+
+        figs_dir = Path(xp.sample_figs)
+        figs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Plot 1: distinct intBCs per UMI, split by coverage bin
+        out_path = figs_dir / f'{xp.target_sample}_intbc_per_umi.png'
+        fig, ax = plt.subplots(figsize=(9, 5))
+        plot_df = umi_level.filter(pl.col('n_intbc_nonnull') > 0)
+        if plot_df.height:
+            sns.histplot(
+                data=plot_df,
+                x='n_intbc_nonnull',
+                hue='cov_bin',
+                hue_order=cov_labels,
+                bins=range(1, max(int(plot_df['n_intbc_nonnull'].max()) + 2, 3)),
+                multiple='stack',
+                discrete=True,
+                ax=ax,
+            )
+        ax.set_xlabel('Distinct non-null intBCs per UMI')
+        ax.set_ylabel('UMIs')
+        ax.set_title(f'{xp.target_sample} — intBC diversity per UMI')
+        ax.grid(True, alpha=0.3)
+        fig.savefig(str(out_path), bbox_inches='tight')
+        plt.close(fig)
+        xp.logger.info(f"saved {out_path}")
+
+        # Plot 2: dominant_fraction distribution with cutoff
+        out_path = figs_dir / f'{xp.target_sample}_intbc_dominant_fraction.png'
+        fig, ax = plt.subplots(figsize=(9, 5))
+        plot_df = umi_level.filter(pl.col('dominant_fraction').is_not_null())
+        if plot_df.height:
+            sns.histplot(data=plot_df, x='dominant_fraction', bins=40, ax=ax)
+        min_frac = getattr(xp, 'intbc_min_fraction', 0.6)
+        ax.axvline(x=min_frac, color='r', linestyle='--', label=f'min_fraction={min_frac}')
+        ax.set_xlabel('Dominant intBC read share per UMI')
+        ax.set_ylabel('UMIs')
+        ax.set_title(f'{xp.target_sample} — per-UMI intBC confidence')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.savefig(str(out_path), bbox_inches='tight')
+        plt.close(fig)
+        xp.logger.info(f"saved {out_path}")
+
+        # Stats CSV
+        stats = umi_level.select(
+            pl.len().alias('n_umis'),
+            pl.col('assigned').is_not_null().sum().alias('n_umis_assigned'),
+            ((pl.col('dominant_fraction') >= min_frac) & pl.col('assigned').is_not_null())
+                .sum().alias('n_umis_passing'),
+            (pl.col('n_intbc_nonnull') > 1).sum().alias('n_umis_multi_intbc'),
+            pl.col('reads_total').sum().alias('reads_total'),
+            pl.col('reads_valid').sum().alias('reads_valid'),
+            pl.col('n_intbc_nonnull').mean().alias('mean_intbc_per_umi'),
+            pl.col('n_intbc_nonnull').median().alias('median_intbc_per_umi'),
+        )
+        stats_path = figs_dir / f'{xp.target_sample}_intbc_stats.csv'
+        stats.write_csv(str(stats_path))
+        xp.logger.info(f"saved {stats_path}")
+        for col, val in zip(stats.columns, stats.row(0)):
+            xp.logger.info(f"  intBC QC {col}: {val}")
+
     def _plot_checkhealth(self, ppi, results):
         """Run checkhealth QC on raw reads to verify expected features are present."""
         from . import qc
