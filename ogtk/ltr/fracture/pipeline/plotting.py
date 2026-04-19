@@ -281,16 +281,22 @@ class PlotDB():
         figs_dir = Path(xp.sample_figs)
         figs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Plot 1: distinct intBCs per UMI, split by coverage bin
+        # Plot 1: distinct intBCs per UMI, split by coverage bin.
+        # Drop cov_bin == '1' (single-read UMIs) — by construction they can
+        # only contribute one intBC, so they pile up in the x=1 column
+        # without carrying chimera signal.
         out_path = figs_dir / f'{xp.target_sample}_intbc_per_umi.png'
         fig, ax = plt.subplots(figsize=(9, 5))
-        plot_df = umi_level.filter(pl.col('n_intbc_nonnull') > 0)
+        plot_df = umi_level.filter(
+            (pl.col('n_intbc_nonnull') > 0) & (pl.col('reads_total') >= 2)
+        )
+        multi_read_cov_labels = [lbl for lbl in cov_labels if lbl != '1']
         if plot_df.height:
             sns.histplot(
                 data=plot_df,
                 x='n_intbc_nonnull',
                 hue='cov_bin',
-                hue_order=cov_labels,
+                hue_order=multi_read_cov_labels,
                 bins=range(1, max(int(plot_df['n_intbc_nonnull'].max()) + 2, 3)),
                 multiple='stack',
                 discrete=True,
@@ -298,7 +304,7 @@ class PlotDB():
             )
         ax.set_xlabel('Distinct non-null intBCs per UMI')
         ax.set_ylabel('UMIs')
-        ax.set_title(f'{xp.target_sample} — intBC diversity per UMI')
+        ax.set_title(f'{xp.target_sample} — intBC diversity per UMI (≥2 reads)')
         ax.grid(True, alpha=0.3)
         fig.savefig(str(out_path), bbox_inches='tight')
         plt.close(fig)
