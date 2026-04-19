@@ -571,6 +571,15 @@ def plug_cassiopeia(
             # allele_table already contains Seq and CIGAR columns from umi_table
             pl_allele = pl.DataFrame(allele_table)
             rcols = pl_allele.select(pl.col('^r\\d+$')).columns
+
+            # Zero-pad cutsite column names (r1 -> r001, ... r15 -> r015) so
+            # default lexicographic sort gives the biological order. Cassiopeia
+            # itself emits r1/r2/... unpadded.
+            if rcols:
+                rcols_zf = {c: f'r{int(c[1:]):03d}' for c in rcols}
+                pl_allele = pl_allele.rename(rcols_zf)
+                rcols = list(rcols_zf.values())
+
             if rcols and 'Seq' in pl_allele.columns and 'CIGAR' in pl_allele.columns:
                 pl_allele = pl_allele.with_columns([
                     pl.col(col).cigar.enrich_insertions(pl.col('Seq'), pl.col('CIGAR'))
