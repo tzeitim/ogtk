@@ -687,7 +687,10 @@ class Pipeline:
             out_file_qc = f"{self.xp.sample_wd}/parsed_reads_qc.parquet"  # QC stays parquet (small file)
             total_reads = self.get_metric_from_summary("parquet", 'total_reads')
 
-            self.logger.info(f"reading from {in_file} with {total_reads/1e6:0.2f} M reads")
+            if total_reads is not None:
+                self.logger.info(f"reading from {in_file} with {total_reads/1e6:0.2f} M reads")
+            else:
+                self.logger.info(f"reading from {in_file} (parquet metrics unavailable)")
 
 
             if not self.xp.dry:
@@ -1302,7 +1305,7 @@ class Pipeline:
             self.fracture()
         #self.run_qcs()
 
-    def get_metric_from_summary(self, step: str, metric: str):
+    def get_metric_from_summary(self, step: str, metric: str, default=None):
         import json
         summary_path = Path(f"{self.xp.pro_workdir}/{self.xp.target_sample}/pipeline_summary.json")
         if summary_path.exists():
@@ -1313,7 +1316,7 @@ class Pipeline:
                 summary = {}
         else:
             summary = {}
-        return summary[step]['metrics'][metric]
+        return summary.get(step, {}).get('metrics', {}).get(metric, default)
 
 
     def update_pipeline_summary(self, step: PipelineStep, results: StepResults) -> None:
