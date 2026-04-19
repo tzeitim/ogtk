@@ -546,6 +546,96 @@ class PllPipeline:
             pl.col(seq_col).str.extract(f"{int_anchor1}(.+?){int_anchor2}", 1).alias(out_col)
         )
 
+    def assign_umi_intbc(self,
+                         int_anchor1: str,
+                         int_anchor2: str,
+                         seq_col: str = "r2_seq",
+                         min_fraction: float = 0.6,
+                         group_cols: list[str] | None = None) -> pl.LazyFrame:
+        """Assign dominant intBC per UMI group and flag chimeric reads.
+
+        Extracts the intBC from each read, determines the dominant intBC per
+        UMI group by read count among non-null extractions, and flags reads
+        whose extracted intBC matches the group's assigned intBC. Reads that
+        do not span the intBC locus yield a null extraction and are always
+        flagged invalid.
+
+        Reads are grouped by ``group_cols``. When ``group_cols`` is None the
+        default mirrors ``assemble_segmented``: ``['sbc', 'umi']`` when an
+        ``sbc`` column exists, otherwise ``['umi']``.
+
+        Args:
+            int_anchor1: 5' flanking anchor of the intBC locus.
+            int_anchor2: 3' flanking anchor of the intBC locus.
+            seq_col: Column holding the sequence to scan.
+            min_fraction: Minimum share the dominant intBC must hold among
+                non-null extractions in a group for reads to pass.
+            group_cols: Columns defining UMI identity; defaults chosen from
+                schema as described above.
+
+        Returns:
+            LazyFrame with these columns added:
+                - ``intbc``: per-read extracted intBC (nullable).
+                - ``intbc_assigned``: per-group dominant intBC (nullable when
+                  no read in the group spans the locus).
+                - ``intbc_dominant_fraction``: dominant read share among
+                  non-null extractions (nullable when group has no non-null).
+                - ``intbc_valid_read``: per-read match flag (False for null
+                  extractions, minority reads, and low-confidence groups).
+                - ``reads_intbc``: per-group count of valid reads (clean
+                  coverage after chimera trimming).
+        """
+        if group_cols is None:
+            names = self._ldf.collect_schema().names()
+            group_cols = ['sbc', 'umi'] if 'sbc' in names else ['umi']
+
+        return (
+            self._ldf
+            .pp.extract_intbc(
+                int_anchor1=int_anchor1,
+                int_anchor2=int_anchor2,
+                seq_col=seq_col,
+                out_col='intbc',
+            )
+            .with_columns(
+                pl.col('intbc').count().over([*group_cols, 'intbc']).alias('_intbc_count'),
+                pl.col('intbc').count().over(group_cols).alias('_intbc_nonnull'),
+            )
+            .with_columns(
+                pl.col('_intbc_count').max().over(group_cols).alias('_intbc_max'),
+            )
+            .with_columns(
+                pl.when(
+                    pl.col('intbc').is_not_null()
+                    & (pl.col('_intbc_count') == pl.col('_intbc_max'))
+                    & (pl.col('_intbc_max') > 0)
+                )
+                .then(pl.col('intbc'))
+                .otherwise(None)
+                .alias('_intbc_candidate'),
+            )
+            .with_columns(
+                pl.col('_intbc_candidate').max().over(group_cols).alias('intbc_assigned'),
+                pl.when(pl.col('_intbc_nonnull') > 0)
+                .then(pl.col('_intbc_max') / pl.col('_intbc_nonnull'))
+                .otherwise(None)
+                .alias('intbc_dominant_fraction'),
+            )
+            .with_columns(
+                (
+                    pl.col('intbc').is_not_null()
+                    & (pl.col('intbc') == pl.col('intbc_assigned'))
+                    & (pl.col('intbc_dominant_fraction') >= min_fraction)
+                )
+                .fill_null(False)
+                .alias('intbc_valid_read'),
+            )
+            .with_columns(
+                pl.col('intbc_valid_read').sum().over(group_cols).alias('reads_intbc'),
+            )
+            .drop('_intbc_count', '_intbc_nonnull', '_intbc_max', '_intbc_candidate')
+        )
+
     def enrich_allele_insertions(self,
                                   allele_cols: list[str] | None = None,
                                   seq_col: str = 'Seq',
