@@ -729,13 +729,26 @@ class Pipeline:
                 if intbc_filter_enabled:
                     int_anchor1 = getattr(self.xp, 'int_anchor1', None)
                     int_anchor2 = getattr(self.xp, 'int_anchor2', None)
+                    anchor_source = 'top-level config'
+                    if not int_anchor1 or not int_anchor2:
+                        ext_cfg = getattr(self.xp, 'extension_config', {}) or {}
+                        for ext_name, cfg in ext_cfg.items():
+                            if not isinstance(cfg, dict):
+                                continue
+                            ea1, ea2 = cfg.get('int_anchor1'), cfg.get('int_anchor2')
+                            if ea1 and ea2:
+                                int_anchor1, int_anchor2 = ea1, ea2
+                                anchor_source = f'extension_config.{ext_name}'
+                                break
                     if not int_anchor1 or not int_anchor2:
                         raise ValueError(
-                            "intbc_filter requires 'int_anchor1' and 'int_anchor2' in config"
+                            "intbc_filter requires 'int_anchor1' and 'int_anchor2' — "
+                            "set at top level or under extension_config.<extension>"
                         )
                     intbc_min_fraction = getattr(self.xp, 'intbc_min_fraction', 0.6)
                     self.logger.info(
-                        f"Assigning per-UMI intBC (min_fraction={intbc_min_fraction})"
+                        f"Assigning per-UMI intBC (min_fraction={intbc_min_fraction}, "
+                        f"anchors from {anchor_source})"
                     )
                     valid_ldf = valid_ldf.pp.assign_umi_intbc(  #pyright: ignore
                         int_anchor1=int_anchor1,
