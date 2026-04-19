@@ -706,51 +706,45 @@ class Pipeline:
                     .with_columns(pl.lit(self.xp.target_sample).alias('sample_id'))
                  )
 
-                # save without gc fields
-                if not self.xp.parse_read1:
-                    self.logger.info(f"Exporting lazily to {out_file}")
-                    sink_file(
-                            ldf
-                            .filter(pl.col('valid_umi'))
-                            .filter(pl.col('ont')),
-                            out_file
-                    )
+                valid_ldf = ldf.filter(pl.col('valid_umi')).filter(pl.col('ont'))
+                invalid_ldf = ldf.filter((~pl.col('valid_umi')) | (~pl.col('ont')))
 
-                    self.logger.info(f"Exporting lazily to {out_file_inv}")
-                    sink_file(
-                            ldf
-                            .filter((~pl.col('valid_umi')) | (~pl.col('ont'))),
-                            out_file_inv
-                    )
-                else:
+                if self.xp.parse_read1:
                     # TODO change the logics to an adaptive expression instead of boiler plate
                     # if r1 is long and informative: e.g long paired-end
                     self.logger.warning(f"extracting juice from R1")
-                    sink_file(
-                        pl.concat(
-                            [
-                                ldf
-                                .filter(pl.col('valid_umi'))
-                                .filter(pl.col('ont')),
-                                ldf
-                                .filter(pl.col('valid_umi'))
-                                .filter(pl.col('ont'))
-                                .pp.parse_read1(anchor_ont=self.xp.anchor_ont),
-                            ]
-                        ), out_file
-                     )
+                    valid_ldf = pl.concat([
+                        valid_ldf,
+                        valid_ldf.pp.parse_read1(anchor_ont=self.xp.anchor_ont),
+                    ])
+                    invalid_ldf = pl.concat([
+                        invalid_ldf,
+                        invalid_ldf.pp.parse_read1(anchor_ont=self.xp.anchor_ont),
+                    ])
 
-                    sink_file(
-                        pl.concat(
-                            [
-                                ldf
-                                .filter((~pl.col('valid_umi')) | (~pl.col('ont'))),
-                                ldf
-                                .filter((~pl.col('valid_umi')) | (~pl.col('ont')))
-                                .pp.parse_read1(anchor_ont=self.xp.anchor_ont),
-                            ]
-                        ), out_file_inv
-                     )
+                intbc_filter_enabled = getattr(self.xp, 'intbc_filter', False)
+                if intbc_filter_enabled:
+                    int_anchor1 = getattr(self.xp, 'int_anchor1', None)
+                    int_anchor2 = getattr(self.xp, 'int_anchor2', None)
+                    if not int_anchor1 or not int_anchor2:
+                        raise ValueError(
+                            "intbc_filter requires 'int_anchor1' and 'int_anchor2' in config"
+                        )
+                    intbc_min_fraction = getattr(self.xp, 'intbc_min_fraction', 0.6)
+                    self.logger.info(
+                        f"Assigning per-UMI intBC (min_fraction={intbc_min_fraction})"
+                    )
+                    valid_ldf = valid_ldf.pp.assign_umi_intbc(  #pyright: ignore
+                        int_anchor1=int_anchor1,
+                        int_anchor2=int_anchor2,
+                        min_fraction=intbc_min_fraction,
+                    )
+
+                self.logger.info(f"Exporting lazily to {out_file}")
+                sink_file(valid_ldf, out_file)
+
+                self.logger.info(f"Exporting lazily to {out_file_inv}")
+                sink_file(invalid_ldf, out_file_inv)
 
                 # extract QC fields and compute UMI-level metrics
                 metrics_df = (
@@ -767,8 +761,34 @@ class Pipeline:
 
                 metrics_df = metrics_df
                 
-                metrics = {f.replace('metric_', ''):metrics_df[f][0] 
+                metrics = {f.replace('metric_', ''):metrics_df[f][0]
                            for f in metrics_df.columns}
+
+                if intbc_filter_enabled:
+                    intbc_stats = (
+                        scan_file(out_file)
+                        .select(
+                            pl.len().alias('intbc_reads_total'),
+                            pl.col('intbc_valid_read').sum().alias('intbc_reads_valid'),
+                            pl.col('umi').n_unique().alias('intbc_umis_total'),
+                            pl.col('umi').filter(pl.col('intbc_assigned').is_not_null())
+                                         .n_unique().alias('intbc_umis_assigned'),
+                            pl.col('umi').filter(pl.col('reads_intbc') > 0)
+                                         .n_unique().alias('intbc_umis_passing'),
+                        )
+                        .collect()
+                    )
+                    for col in intbc_stats.columns:
+                        metrics[col] = int(intbc_stats[col][0])
+                    if metrics['intbc_reads_total']:
+                        metrics['intbc_reads_valid_fraction'] = (
+                            metrics['intbc_reads_valid'] / metrics['intbc_reads_total']
+                        )
+                    self.logger.info(
+                        f"intBC filter: {metrics['intbc_umis_passing']}/"
+                        f"{metrics['intbc_umis_total']} UMIs pass, "
+                        f"{metrics['intbc_reads_valid']}/{metrics['intbc_reads_total']} reads kept"
+                    )
 
                 (
                     metrics_df.
