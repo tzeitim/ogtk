@@ -208,6 +208,18 @@ the deletion pattern varies by intBC as expected from independent biology:
 5. **Compare with single-molecule libraries:** use F7_1_FACS / Fpp4 as ground truth
    for the expected deletion rate (~2%) to calibrate contamination estimates
 
+### Related plan: upstream Bayesian assembly
+
+The Bayesian assembly plan (`docs/bayesian_assembly_plan.md`) addresses items 1,
+2, and 4 above at the assembly stage rather than post-hoc. It replaces the
+count-vote intBC assignment and the greedy stitching with a posterior-probability
+model that uses a size prior (empirical from paired bulk, or analytic from the
+cassette config), a background-path prior over population consensuses, and a
+curated hotspot catalogue to protect real editing deletions. A multi-read support
+gate prevents singleton PCR artefacts from being committed as consensus. The
+5mer hotspot catalogue is seeded from the two dominant breakpoints documented
+above.
+
 ## Files Analyzed
 
 All paths relative to `/home/projects/nyosef/pedro/projects/lt/workdir/20260202_pe/`
